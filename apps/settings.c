@@ -8,9 +8,11 @@
 #include "../kefyros.h"
 #include "../ui/theme.h"
 #include "../ui/deskconf.h"
+#include "pico/time.h"
 #include <stdlib.h>
+#include <string.h>
 
-static lv_obj_t *scr, *lbl_bat, *lbl_clk;
+static lv_obj_t *scr, *lbl_bat, *lbl_clk, *lbl_test;
 static lv_timer_t *stimer;     /* tied to scr's lifetime (deleted with the screen) */
 static int bkl, bk2;
 
@@ -50,6 +52,67 @@ static void act_bk2(lv_event_t *e){ int d=(int)(intptr_t)lv_event_get_user_data(
  * screen — that local pwr_scr was never freed (a leak), and this is identical. */
 static void act_power(lv_event_t *e){ (void)e; kf_power_menu(); }
 
+/* --- PSRAM diagnostics (top-of-chip scratch window, clear of the bump-allocated
+   wallpaper/browser/music arenas which grow up from address 0). Both block for a
+   few tens of ms; fine for a manual button. --- */
+#define PS_SCRATCH   0x80000u        /* 512 KB test window at the top of PSRAM */
+
+/* Throughput: time a 256 KB write then a 256 KB read; report MB/s (integer math,
+   no %f). Quad QPI should land far above the old 1-bit ~2 MB/s. */
+static void act_memspeed(lv_event_t *e){ (void)e;
+	uint32_t sz = kf_psram_size();
+	if(!sz){ lv_label_set_text(lbl_test, "Speed: no PSRAM"); return; }
+	enum { BUF = 8192, ITERS = 32 };          /* 32 * 8 KB = 256 KB per phase */
+	uint8_t *buf = malloc(BUF);
+	if(!buf){ lv_label_set_text(lbl_test, "Speed: out of memory"); return; }
+	for(int i = 0; i < BUF; i++) buf[i] = (uint8_t)(i*7 + 3);
+	uint32_t base = sz - PS_SCRATCH;
+
+	uint64_t t0 = time_us_64();
+	for(int k = 0; k < ITERS; k++) kf_psram_write(base + (uint32_t)k*BUF, buf, BUF);
+	uint64_t t1 = time_us_64();
+	for(int k = 0; k < ITERS; k++) kf_psram_read (base + (uint32_t)k*BUF, buf, BUF);
+	uint64_t t2 = time_us_64();
+	free(buf);
+
+	uint32_t total = (uint32_t)ITERS * BUF;   /* bytes/us == MB/s (decimal) */
+	uint32_t w10 = (t1>t0) ? (uint32_t)((uint64_t)total*10u/(t1-t0)) : 0;
+	uint32_t r10 = (t2>t1) ? (uint32_t)((uint64_t)total*10u/(t2-t1)) : 0;
+	lv_label_set_text_fmt(lbl_test, "Speed: W %u.%u  R %u.%u MB/s",
+		w10/10, w10%10, r10/10, r10%10);
+	lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
+}
+
+/* SPI/QPI bus check: write a per-block pseudo-random pattern across the whole
+   scratch window, then read it ALL back and verify byte-exact (separate passes,
+   so a stuck address or stale-nibble carry between transactions is caught). */
+static void act_memcheck(lv_event_t *e){ (void)e;
+	uint32_t sz = kf_psram_size();
+	if(!sz){ lv_label_set_text(lbl_test, "Check: no PSRAM"); return; }
+	uint8_t *w = malloc(1024), *r = malloc(1024);
+	if(!w || !r){ free(w); free(r); lv_label_set_text(lbl_test, "Check: out of memory"); return; }
+	uint32_t base = sz - PS_SCRATCH, fail_at = 0; int fail = 0;
+
+	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
+		uint32_t s = 0x9E3779B9u ^ (base + off);
+		for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; w[i] = (uint8_t)(s >> 24); }
+		kf_psram_write(base + off, w, 1024);
+	}
+	for(uint32_t off = 0; off < PS_SCRATCH && !fail; off += 1024){
+		uint32_t s = 0x9E3779B9u ^ (base + off);
+		for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; w[i] = (uint8_t)(s >> 24); }
+		kf_psram_read(base + off, r, 1024);
+		if(memcmp(w, r, 1024)){
+			for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ fail_at = base + off + i; break; }
+			fail = 1;
+		}
+	}
+	free(w); free(r);
+	if(fail) lv_label_set_text_fmt(lbl_test, "Check: FAIL @ 0x%06X", (unsigned)fail_at);
+	else     lv_label_set_text(lbl_test, "Check: OK (512 KB verified)");
+	lv_obj_set_style_text_color(lbl_test, fail ? lv_color_hex(0xe03c32) : KF_ACTIVE, 0);
+}
+
 static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
                          lv_event_cb_t cb, void *ud){
 	lv_obj_t *b = lv_list_add_button(list, NULL, txt);
@@ -71,11 +134,11 @@ void app_settings_open(void){
 
 	lbl_bat = lv_label_create(scr);
 	lv_obj_set_style_text_color(lbl_bat, KF_AMBER, 0);
-	lv_obj_align(lbl_bat, LV_ALIGN_TOP_MID, 0, 6);
+	lv_obj_align(lbl_bat, LV_ALIGN_TOP_MID, 0, 4);
 
 	lbl_clk = lv_label_create(scr);
 	lv_obj_set_style_text_color(lbl_clk, KF_AMBER, 0);
-	lv_obj_align(lbl_clk, LV_ALIGN_TOP_MID, 0, 22);
+	lv_obj_align(lbl_clk, LV_ALIGN_TOP_MID, 0, 18);
 
 	/* PSRAM self-test result (static after boot) */
 	lv_obj_t *lbl_ram = lv_label_create(scr);
@@ -83,17 +146,25 @@ void app_settings_open(void){
 	if(ps) lv_label_set_text_fmt(lbl_ram, "PSRAM: %u MB  OK", ps/(1024u*1024u));
 	else   lv_label_set_text(lbl_ram, "PSRAM: not detected");
 	lv_obj_set_style_text_color(lbl_ram, ps ? KF_ACTIVE : lv_color_hex(0xe03c32), 0);
-	lv_obj_align(lbl_ram, LV_ALIGN_TOP_MID, 0, 38);
+	lv_obj_align(lbl_ram, LV_ALIGN_TOP_MID, 0, 32);
+
+	/* live result line for the speed test / bus check below */
+	lbl_test = lv_label_create(scr);
+	lv_label_set_text(lbl_test, "Run a PSRAM test below");
+	lv_obj_set_style_text_color(lbl_test, KF_TEXT_MUTED, 0);
+	lv_obj_align(lbl_test, LV_ALIGN_TOP_MID, 0, 46);
 
 	lv_obj_t *list = lv_list_create(scr);
-	lv_obj_set_size(list, LCD_W-8, KF_CONTENT_H-62);
-	lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 58);
+	lv_obj_set_size(list, LCD_W-8, KF_CONTENT_H-68);
+	lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 64);
 
 	lv_group_t *g = kf_use_group();
 	additem(list,g, "LCD Light +",      act_bkl, (void*)(intptr_t)+1);
 	additem(list,g, "LCD Light -",      act_bkl, (void*)(intptr_t)-1);
 	additem(list,g, "Keyboard Light +", act_bk2, (void*)(intptr_t)+1);
 	additem(list,g, "Keyboard Light -", act_bk2, (void*)(intptr_t)-1);
+	additem(list,g, "PSRAM Speed Test", act_memspeed, NULL);
+	additem(list,g, "PSRAM Bus Check",  act_memcheck, NULL);
 	additem(list,g, "Power...",         act_power, NULL);
 
 	refresh_bat();
