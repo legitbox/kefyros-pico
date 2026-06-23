@@ -204,7 +204,39 @@ static int qr_selftest(void){
 	return 1;
 }
 
+/* Software-reset the chip in QPI format, before any PIO is set up. Critical for
+   warm reboots: a previous run left the chip in QPI mode, and on the PicoCalc the
+   PSRAM rail stays powered across an RP2350 reset (and across a "power off" while
+   USB is attached), so QPI mode is sticky. Our 1-bit bring-up (ID read etc.) only
+   works if the chip is in SPI, so we first bit-bang 0x66/0x99 as quad to knock a
+   QPI-stuck chip back to SPI. A chip already in SPI sees a 2-clock fragment and
+   discards it (incomplete command) — harmless either way. Plain GPIO; one-time. */
+static void qpi_reset_to_spi(void){
+	const int sio[4] = { KF_PSRAM_SIO0, KF_PSRAM_SIO1, KF_PSRAM_SIO2, KF_PSRAM_SIO3 };
+	for(int i = 0; i < 4; i++){ gpio_init(sio[i]); gpio_set_dir(sio[i], GPIO_OUT); }
+	gpio_init(KF_PSRAM_SCK); gpio_set_dir(KF_PSRAM_SCK, GPIO_OUT); gpio_put(KF_PSRAM_SCK, 0);
+	gpio_init(KF_PSRAM_CS);  gpio_set_dir(KF_PSRAM_CS,  GPIO_OUT); gpio_put(KF_PSRAM_CS,  1);
+
+	static const uint8_t cmds[2] = { 0x66, 0x99 };   /* reset-enable, reset */
+	for(int c = 0; c < 2; c++){
+		gpio_put(KF_PSRAM_CS, 0);
+		for(int half = 0; half < 2; half++){         /* high nibble first */
+			uint8_t n = half ? (cmds[c] & 0xF) : (cmds[c] >> 4);
+			for(int b = 0; b < 4; b++) gpio_put(sio[b], (n >> b) & 1);  /* SIO3=MSB */
+			__asm volatile("nop\nnop\nnop\nnop");
+			gpio_put(KF_PSRAM_SCK, 1);               /* sample edge (mode 0) */
+			__asm volatile("nop\nnop\nnop\nnop");
+			gpio_put(KF_PSRAM_SCK, 0);
+		}
+		gpio_put(KF_PSRAM_CS, 1);
+		for(volatile int i = 0; i < 64; i++) __asm volatile("nop");
+	}
+	sleep_us(100);   /* chip needs time to complete the reset before next command */
+}
+
 uint32_t kf_psram_init(void){
+	qpi_reset_to_spi();   /* force the chip to SPI mode regardless of prior state */
+
 	/* CS as a plain GPIO (manual). SIO2/3 start as GPIO-high; they join the PIO
 	   only once we go quad (in 1-bit bring-up they're unused / driven high). */
 	gpio_init(KF_PSRAM_CS);   gpio_set_dir(KF_PSRAM_CS, GPIO_OUT);   gpio_put(KF_PSRAM_CS, 1);
