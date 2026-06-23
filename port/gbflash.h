@@ -1,26 +1,24 @@
-// port/gbflash.h — load a Game Boy ROM from SD into a reserved flash region and run it
-// execute-in-place (XIP). Peanut-GB's gb_rom_read() is called on every ROM memory access
-// (dozens per instruction), so the ROM must be random-access fast; flash-XIP is the only
-// store on this board that qualifies (SRAM is too small for most carts, and the 8 MB PSRAM
-// is a slow PIO block-store, not memory-mapped). The chosen ROM is copied from SD into the
-// region once at load time, then gb_rom_read just indexes flash directly.
+// port/gbflash.h — load a Game Boy ROM from SD into a RAM buffer for the emulator.
+//
+// Peanut-GB's gb_rom_read() is called on every ROM memory access (dozens per instruction),
+// so the ROM must be fast random-access memory. We simply read it into a malloc'd SRAM
+// buffer: trivially fast, and no flash-write / dual-core hazards. The catch is size — only
+// ROMs that fit the free heap (~128 KB in practice, which covers nearly all classic DMG
+// titles) load; bigger carts fail with -2 (a future PSRAM-paged path can lift that).
 #ifndef KF_GBFLASH_H
 #define KF_GBFLASH_H
 #include <stdint.h>
 #include <stddef.h>
 
-// Reserved ROM region: the top 2 MB of the 4 MB flash. The firmware lives at the bottom
-// (~1.4 MB) and never reaches this far; gbflash_load() asserts that at runtime.
-#define GB_ROM_FLASH_OFFSET  (2u * 1024u * 1024u)      // from XIP_BASE (0x10000000)
-#define GB_ROM_FLASH_SIZE    (2u * 1024u * 1024u)
-
-// Memory-mapped pointer to the loaded ROM (valid after a successful gbflash_load).
+// Pointer to the loaded ROM (valid after a successful gbflash_load); NULL when none.
 const uint8_t *gbflash_rom(void);
 
-// Copy `path` (a .gb/.gbc on the SD card) into the flash ROM region. Returns the ROM size
-// in bytes on success, or <0 on error:
-//   -1 open/read failure   -2 ROM larger than the region   -3 firmware overlaps the region
-// `progress`, if non-NULL, is called as each 4 KB sector is written (for a UI bar).
+// Read `path` (a .gb/.gbc on SD) into RAM. Returns the ROM size in bytes, or <0 on error:
+//   -1 open/read failure   -2 ROM too big to fit in RAM
+// `progress`, if non-NULL, is called as bytes are read (for a UI bar).
 long gbflash_load(const char *path, void (*progress)(int done, int total));
+
+// Release the ROM buffer (call when leaving a game).
+void gbflash_free(void);
 
 #endif /* KF_GBFLASH_H */

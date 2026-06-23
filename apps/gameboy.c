@@ -139,6 +139,7 @@ static void stop_game_to_launcher(void){
 	kf_audio_stop();
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);   // restore the OS panel clock
 	disp_resume_core1();                                 // hand the panel back to LVGL
+	gbflash_free();                                      // release the ROM buffer
 	free(s_gb);      s_gb = NULL;
 	free(s_fb);      s_fb = NULL;
 	free(s_cartram); s_cartram = NULL; s_cartram_sz = 0;
@@ -217,29 +218,29 @@ static void start_game(const char *name){
 	char *dot = strrchr(s_savpath, '.');
 	if(dot) strcpy(dot, ".sav"); else strncat(s_savpath, ".sav", sizeof s_savpath - strlen(s_savpath) - 1);
 
-	set_status("loading into flash...");
-	lv_refr_now(lv_display_get_default());      // show the message before the (blocking) flash write
+	set_status("loading ROM...");
+	lv_refr_now(lv_display_get_default());      // show the message before the (blocking) read
 
 	long sz = gbflash_load(rompath, NULL);
 	if(sz < 0){
-		set_status(sz == -2 ? "ROM too big (>2MB)" : sz == -3 ? "no flash room" : "load failed");
+		set_status(sz == -2 ? "ROM too big for RAM" : "load failed");
 		return;
 	}
 
 	s_gb = malloc(sizeof *s_gb);
 	s_fb = malloc((size_t)GB_W * GB_H);
-	if(!s_gb || !s_fb){ free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; set_status("out of memory"); return; }
+	if(!s_gb || !s_fb){ gbflash_free(); free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; set_status("out of memory"); return; }
 
 	enum gb_init_error_e e = gb_init(s_gb, gb_rom_read, gb_cart_ram_read, gb_cart_ram_write, gb_err_cb, NULL);
 	if(e != GB_INIT_NO_ERROR){
 		set_status(e == GB_INIT_CARTRIDGE_UNSUPPORTED ? "unsupported cartridge" : "bad ROM");
-		free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; return;
+		gbflash_free(); free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; return;
 	}
 
 	s_cartram_sz = 0;
 	gb_get_save_size_s(s_gb, &s_cartram_sz);
 	s_cartram = s_cartram_sz ? malloc(s_cartram_sz) : NULL;
-	if(s_cartram_sz && !s_cartram){ set_status("out of memory"); free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; return; }
+	if(s_cartram_sz && !s_cartram){ set_status("out of memory"); gbflash_free(); free(s_gb); s_gb=NULL; free(s_fb); s_fb=NULL; return; }
 	if(s_cartram){ memset(s_cartram, 0, s_cartram_sz); load_sav(); }
 
 	minigb_apu_audio_init(&s_apu);
