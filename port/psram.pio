@@ -1,13 +1,74 @@
-; port/psram.pio — minimal 1-bit SPI (mode 0) for the PicoCalc ESP-PSRAM64H.
-; Full-duplex, MSB-first, 8 bits per byte (autopull/autopush threshold = 8).
-; OUT base  = SIO0 (GP2, MOSI), IN base = SIO1 (GP3, MISO), side-set = SCK (GP21).
-; CS (GP20) is driven manually by the C driver around each transaction.
-; One bit per 2 PIO cycles -> SPI clock = clk_sys / (2 * clkdiv).
+; port/psram.pio — PIO engines for the PicoCalc ESP-PSRAM64H / APS6404L.
+;
+; Three programs share one PIO, but only ONE runs at a time on the claimed SM:
+;   psram_spi  — 1-bit SPI mode 0, used ONLY at bring-up (reset 0x66/0x99, read-id
+;                0x9F, and the 0x35 "enter quad" command — all of which the chip
+;                only understands in its power-on SPI mode).
+;   psram_qr   — QPI fast-quad READ  (0xEB): cmd+addr out (4 bits/clk), bus turnaround,
+;                6 dummy clocks, then data in (4 bits/clk).
+;   psram_qw   — QPI quad WRITE (0x38): cmd+addr+data out (4 bits/clk), 0 dummy.
+;
+; All three: side-set = SCK (GP21), CS (GP20) driven manually by C. SIO0..SIO3 are
+; GP2..GP5 (consecutive) so SET/OUT/IN all use base=SIO0. SPI clock = clk_sys /
+; (2 * clkdiv) — two PIO instructions per SCK period — kept <=~18 MHz via an INTEGER
+; clkdiv (a fractional one jitters the sample point -> garbage; see psram.c).
+;
+; The quad programs flip SIO direction mid-transaction (out for cmd/addr, in for read
+; data) via `set pindirs` — the 1-bit program never did this since MOSI/MISO were
+; separate fixed pins. The C side runs each transaction from a clean SM state
+; (restart + jmp-to-start), so the trailing `jmp <self>` parks SCK low until then.
 
+; ---------------------------------------------------------------------------
+; 1-bit SPI (mode 0), full-duplex, MSB-first, 8 bits/byte. OUT=SIO0, IN=SIO1.
 .program psram_spi
 .side_set 1
-
 .wrap_target
-    out pins, 1   side 0      ; present MOSI bit, clock low
-    in  pins, 1   side 1      ; sample MISO bit, clock high
+    out pins, 1   side 0       ; present MOSI bit, clock low
+    in  pins, 1   side 1       ; sample MISO bit, clock high
 .wrap
+
+; ---------------------------------------------------------------------------
+; QPI fast-quad READ (0xEB). FIFO protocol (autopull thr=32, autopush thr=8):
+;   word0 = (0xEB<<24) | (addr & 0xFFFFFF)     ; cmd + 24-bit addr, 8 nibbles
+;   word1 = (data_nibble_count - 1)            ; nibbles to read (= 2*nbytes)
+; then C pops one byte per 2 nibbles from the RX FIFO.
+.program psram_qr
+.side_set 1
+    set pindirs, 0b1111  side 0   ; SIO0..3 -> outputs
+    set x, 7             side 0   ; 8 cmd+addr nibbles (x = 7..0)
+ca_lp:
+    out pins, 4          side 0   ; drive nibble (autopull word0), SCK low
+    jmp x-- ca_lp        side 1   ; SCK high (device samples)
+    set pindirs, 0b0000  side 0   ; SIO0..3 -> inputs (bus turnaround), SCK low
+    out x, 32            side 0   ; x = data_nibble_count - 1 (autopull word1)
+    set y, 5             side 0   ; QSPI_DUMMY-1 dummy clocks (default 6 -> y=5)
+dm_lp:
+    nop                  side 1   ; SCK high
+    jmp y-- dm_lp        side 0   ; SCK low
+rd_lp:
+    nop                  side 0   ; SCK low: device drives nibble
+    in pins, 4           side 1   ; SCK high: sample (autopush every 8 bits)
+    jmp x-- rd_lp        side 0
+done_r:
+    jmp done_r           side 0   ; park SCK low until C restarts the SM
+
+; ---------------------------------------------------------------------------
+; QPI quad WRITE (0x38). FIFO protocol (autopull thr=32):
+;   word0 = (0x38<<24) | (addr & 0xFFFFFF)     ; cmd + 24-bit addr, 8 nibbles
+;   word1 = (data_nibble_count - 1)            ; nibbles to write (= 2*nbytes)
+;   word2.. = data, packed big-endian (byte0 in bits 31..24), MSB nibble first
+; C waits for the completion push (one word) to know the last nibble has clocked.
+.program psram_qw
+.side_set 1
+    set pindirs, 0b1111  side 0   ; SIO0..3 -> outputs
+    set x, 7             side 0   ; 8 cmd+addr nibbles
+wca_lp:
+    out pins, 4          side 0   ; drive nibble (autopull word0), SCK low
+    jmp x-- wca_lp       side 1   ; SCK high
+    out x, 32            side 0   ; x = data_nibble_count - 1 (autopull word1)
+wd_lp:
+    out pins, 4          side 0   ; drive data nibble (autopull data words), SCK low
+    jmp x-- wd_lp        side 1   ; SCK high (device samples)
+    push                 side 0   ; completion barrier: last nibble has clocked
+done_w:
+    jmp done_w           side 0   ; park SCK low until C restarts the SM
