@@ -1,0 +1,152 @@
+{
+  "cacheVersion": "D20240927T193831",
+  "outputFile": "/home/legitbox/kefyros-pico/lib/cakespark/nim/libcake_embed.a",
+  "outputLastModificationTime": "",
+  "compile": [
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sexceptions.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sexceptions.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sexceptions.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdigitsutils.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdigitsutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdigitsutils.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdragonbox.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdragonbox.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdragonbox.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sformatfloat.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sformatfloat.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sformatfloat.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sdollars.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sdollars.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sdollars.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparseutils.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparseutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparseutils.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@smath.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@smath.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@smath.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@salgorithm.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@salgorithm.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@salgorithm.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sunicode.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sunicode.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sunicode.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstrutils.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstrutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstrutils.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svalue.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svalue.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svalue.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@shashes.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@shashes.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@shashes.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@stables.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@stables.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@stables.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@slexer.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@slexer.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@slexer.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sparser.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sparser.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sparser.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@ssets.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@ssets.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@ssets.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scompiler.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scompiler.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scompiler.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstreams.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstreams.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstreams.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@slexbase.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@slexbase.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@slexbase.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparsejson.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparsejson.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparsejson.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sjson.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sjson.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sjson.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svm.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svm.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svm.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scakespark.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scakespark.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scakespark.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sc_api.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sc_api.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sc_api.nim.c"
+    ],
+    [
+      "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@mcake_embed.nim.c",
+      "gcc -c  -w -fmax-errors=3 -O3 -fno-strict-aliasing -fno-ident -fno-math-errno   -I/usr/lib/nim/lib -I/home/legitbox/kefyros-pico/lib/cakespark/nim -o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@mcake_embed.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@mcake_embed.nim.c"
+    ]
+  ],
+  "link": [
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sexceptions.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdigitsutils.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdragonbox.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sformatfloat.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sdollars.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparseutils.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@smath.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@salgorithm.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sunicode.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstrutils.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svalue.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@shashes.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@stables.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@slexer.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sparser.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@ssets.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scompiler.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstreams.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@slexbase.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparsejson.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sjson.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svm.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scakespark.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sc_api.nim.c.o",
+    "/home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@mcake_embed.nim.c.o"
+  ],
+  "linkcmd": "ar rcs /home/legitbox/kefyros-pico/lib/cakespark/nim/libcake_embed.a /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sexceptions.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdigitsutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sprivate@sdragonbox.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@sstd@sformatfloat.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem@sdollars.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@ssystem.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparseutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@smath.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@salgorithm.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sunicode.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstrutils.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svalue.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@shashes.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@stables.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@slexer.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sparser.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@scollections@ssets.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scompiler.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sstreams.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@slexbase.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sparsejson.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@s..@s..@s..@s..@s..@susr@slib@snim@slib@spure@sjson.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@svm.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@scakespark.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@m..@ssrc@scakespark@sc_api.nim.c.o /home/legitbox/kefyros-pico/lib/cakespark/nim/cnim/@mcake_embed.nim.c.o",
+  "extraCmds": [],
+  "configFiles": [
+    "/etc/nim/nim.cfg",
+    "/etc/nim/config.nims"
+  ],
+  "stdinInput": false,
+  "projectIsCmd": false,
+  "cmdInput": "",
+  "currentDir": "/home/legitbox/kefyros-pico/lib/cakespark/nim",
+  "cmdline": "",
+  "depfiles": [],
+  "nimexe": ""
+}

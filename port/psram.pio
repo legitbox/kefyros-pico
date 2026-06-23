@@ -1,0 +1,13 @@
+; port/psram.pio — minimal 1-bit SPI (mode 0) for the PicoCalc ESP-PSRAM64H.
+; Full-duplex, MSB-first, 8 bits per byte (autopull/autopush threshold = 8).
+; OUT base  = SIO0 (GP2, MOSI), IN base = SIO1 (GP3, MISO), side-set = SCK (GP21).
+; CS (GP20) is driven manually by the C driver around each transaction.
+; One bit per 2 PIO cycles -> SPI clock = clk_sys / (2 * clkdiv).
+
+.program psram_spi
+.side_set 1
+
+.wrap_target
+    out pins, 1   side 0      ; present MOSI bit, clock low
+    in  pins, 1   side 1      ; sample MISO bit, clock high
+.wrap
