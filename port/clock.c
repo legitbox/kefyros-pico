@@ -106,8 +106,10 @@ uint32_t clock_sys_mhz(void){
 }
 
 /* ===== runtime dynamic clock/voltage switching =====
- * set_sys_clock_khz() re-points clk_peri at clk_sys on every call, so SPI/UART baud
- * (display, SD, keyboard) and the PSRAM PIO bus all need re-deriving afterwards. The
+ * With PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK=1 (see CMakeLists), set_sys_clock_khz()
+ * re-points clk_peri at clk_sys on every call (the SDK default would instead park clk_peri
+ * on the 48 MHz USB PLL, hard-capping every SPI at 24 MHz). So SPI/UART baud (display, SD,
+ * keyboard) and the PSRAM PIO bus all need re-deriving afterwards. The
  * QMI flash timing is deliberately left at its boot value — chosen conservative enough
  * (CLKDIV keeps flash <=66 MHz even at 400) to stay valid down to 150 MHz, so there is
  * no XIP-mismatch window and this code can run from flash normally.

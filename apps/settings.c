@@ -147,14 +147,17 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	uint32_t want = LCD_SPI_SPEED;
 	spi_set_baudrate(Pico_LCD_SPI_MOD, want);
 
+	const int TEXT_H = 44;            /* top strip reserved for the readout (bars stay below it) */
 	int frame = 0, fps = 0, fcount = 0, running = 1;
+	int shown_fps = -1; uint32_t shown_mhz = 0;
 	uint64_t t_fps = time_us_64();
+	st_puts(6, 28, "UP/DN speed   ESC quit", 1, 0xb6f000, 0x000000);   /* static hint, drawn once */
 	while(running){
 		uint8_t kst, key; uart_poll();
 		while(uart_pop_key(&kst, &key)){
 			if(key == DK_ESC || key == DK_BREAK){ running = 0; break; }
 			if(kst == KS_PRESS && key == DK_UP){
-				want += 5000000u; if(want > 90000000u) want = 90000000u;
+				want += 5000000u; if(want > 120000000u) want = 120000000u;
 				spi_set_baudrate(Pico_LCD_SPI_MOD, want);
 			} else if(kst == KS_PRESS && key == DK_DOWN){
 				if(want > 10000000u) want -= 5000000u;
@@ -163,21 +166,25 @@ static void act_screentest(lv_event_t *e){ (void)e;
 		}
 		if(!running) break;
 
-		/* build one scrolling-bar scanline, then push it to the whole panel */
+		/* one scrolling-bar scanline pushed to the whole panel BELOW the text strip */
 		for(int x = 0; x < LCD_W; x++){
 			const uint8_t *c = pal[((x + frame) / 24) % 6];
 			row[x*3] = c[0]; row[x*3+1] = c[1]; row[x*3+2] = c[2];
 		}
-		define_region_spi(0, 0, LCD_W - 1, LCD_H - 1, 1);
-		for(int y = 0; y < LCD_H; y++) spi_write_fast(Pico_LCD_SPI_MOD, row, LCD_W * 3);
+		define_region_spi(0, TEXT_H, LCD_W - 1, LCD_H - 1, 1);
+		for(int y = TEXT_H; y < LCD_H; y++) spi_write_fast(Pico_LCD_SPI_MOD, row, LCD_W * 3);
 		spi_finish(Pico_LCD_SPI_MOD);
 		lcd_spi_raise_cs();
 
-		char buf[48];
+		/* repaint the readout ONLY when it changes (the strip is never bar-filled, so no flicker) */
 		uint32_t mhz = spi_get_baudrate(Pico_LCD_SPI_MOD) / 1000000u;
-		snprintf(buf, sizeof buf, "SPI %lu MHz  FPS %d ", (unsigned long)mhz, fps);
-		st_puts(6, 6,  buf, 2, 0xffc94d, 0x000000);
-		st_puts(6, 28, "UP/DN speed   ESC quit", 1, 0xb6f000, 0x000000);
+		if(fps != shown_fps || mhz != shown_mhz){
+			char buf[48];
+			snprintf(buf, sizeof buf, "SPI %lu MHz  FPS %d  ", (unsigned long)mhz, fps);
+			draw_rect_spi(0, 0, LCD_W - 1, 19, 0x000000);
+			st_puts(6, 6, buf, 2, 0xffc94d, 0x000000);
+			shown_fps = fps; shown_mhz = mhz;
+		}
 
 		frame++; fcount++;
 		uint64_t now = time_us_64();

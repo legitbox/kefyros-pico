@@ -83,6 +83,12 @@ target_compile_definitions(kefyros PRIVATE
     # gracefully (skip the image / amber assert) rather than hard-faulting mid-decode
     # on a fragmented heap — which is exactly what crashed while scrolling Wikipedia.
     PICO_MALLOC_PANIC=0
+    # Keep clk_peri attached to clk_sys when we overclock. The SDK default parks clk_peri
+    # on the 48 MHz USB PLL after set_sys_clock_khz(), which HARD-CAPS every SPI at 24 MHz
+    # (clk_peri/2) — the LCD was stuck at 24 MHz no matter what we requested. With this on,
+    # clk_peri follows clk_sys (360 MHz), so the panel SPI can actually run fast;
+    # reclock_peripherals() re-derives the SPI/SD/UART bauds after each clock change.
+    PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK=1
     # Game Boy APU (lib/peanut-gb/minigb_apu): 16-bit native-endian stereo samples at
     # 32768 Hz, fed to the PWM audio path via kf_audio_write().
     MINIGB_APU_AUDIO_FORMAT_S16SYS=1
