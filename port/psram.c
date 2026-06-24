@@ -136,9 +136,10 @@ static void qarm(uint off){
 	s_active = (int)off;
 }
 
-/* Set after a write: the NEXT read must throw away one sacrificial transaction first
-   (RP2350-E9, see qread_page). */
-static int s_post_write = 0;
+/* Set at the start of every read CALL: its first transaction throws away a sacrificial
+   read first (RP2350-E9, see qread_page). Cleared after the first chunk — chunks within
+   one call run back-to-back and stay clean. */
+static int s_prime = 0;
 
 /* one quad READ transaction, confined to a single 1 KB page */
 static void qread_raw(uint32_t addr, uint8_t *rd, int n){
@@ -151,18 +152,18 @@ static void qread_raw(uint32_t addr, uint8_t *rd, int n){
 	cs_hi();
 }
 static void qread_page(uint32_t addr, uint8_t *rd, int n){
-	/* RP2350-E9 workaround. After a write we drove these lines push-pull to a rail;
-	   released for the next read's turnaround they float and the input pad latches at
-	   ~2 V (erratum E9), corrupting the FIRST read after a write. The SECOND read is
-	   clean (the chip drove the lines in between) — proven by the diagnostic's "rd 0/8".
-	   So burn one throwaway read to get back into clean read rhythm. Pure reads (e.g.
-	   wallpaper streaming) never hit this — the flag is only set by a preceding write. */
-	if(s_post_write){
-		qread_raw(addr, rd, n);    /* sacrificial FULL-size read (a 1-byte one doesn't reach
-		                              the glitch position; the corruption is mid-stream) */
-		s_post_write = 0;
+	/* RP2350-E9 workaround. Whenever the SIO lines float long enough (CS-high idle gap
+	   BETWEEN read calls, or after a write released them), the input pad latches at ~2 V
+	   (erratum E9) and the next read corrupts a mid-stream nibble. The SECOND back-to-back
+	   read is clean (proven by the diagnostic's "rd 0/8"). So the first transaction of
+	   each read call burns one full-size sacrificial read to get into clean read rhythm;
+	   subsequent chunks of the same call follow back-to-back and need no prime. (A short
+	   throwaway doesn't work — the glitch is mid-stream, so it must be full-size.) */
+	if(s_prime){
+		qread_raw(addr, rd, n);    /* sacrificial */
+		s_prime = 0;
 	}
-	qread_raw(addr, rd, n);        /* real read — clean now that the lines are in read rhythm */
+	qread_raw(addr, rd, n);        /* real read — clean */
 }
 static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	qarm(s_qw_off);
@@ -177,7 +178,6 @@ static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	}
 	pio_sm_get_blocking(s_pio, s_sm);                  /* completion barrier (last nibble clocked) */
 	cs_hi();
-	s_post_write = 1;                                  /* next read must prime (E9) */
 }
 
 static void qchunked(int is_write, uint32_t addr, const uint8_t *wr, uint8_t *rd, uint32_t n){
@@ -201,6 +201,7 @@ void kf_psram_write(uint32_t addr, const void *buf, uint32_t n){
 }
 void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 	if(!s_size){ if(buf) memset(buf, 0, n); return; }
+	s_prime = 1;     /* E9: the first read of this call may follow an idle float -> prime it */
 	qchunked(0, addr, NULL, (uint8_t*)buf, n);
 }
 
