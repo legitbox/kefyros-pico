@@ -235,6 +235,10 @@ uint32_t kf_psram_alloc(uint32_t n){
 	uint32_t a = s_brk; s_brk += n; return a;
 }
 void kf_psram_reset_alloc(void){ s_brk = 0; }
+/* LIFO free: roll the bump cursor back to a mark returned by an earlier alloc. Safe only
+   if nothing was allocated above `addr` since (the Game Boy ROM is always the last alloc
+   while a game runs, so freeing it on exit is clean). */
+void kf_psram_free_to(uint32_t addr){ if(addr <= s_brk) s_brk = addr; }
 
 /* Called after a runtime clk_sys change. The reliable bus speed depends on clk_sys
    (the integer divider quantizes SCK; a divider/speed validated at one clock can be

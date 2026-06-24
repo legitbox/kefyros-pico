@@ -69,8 +69,19 @@ static int16_t   s_audio[AUDIO_SAMPLES_TOTAL];
 static uint8_t   s_line[GB_W * 2 * 3]; // one output row, RGB888 (room for 2x = 320px)
 
 /* ===== Peanut-GB callbacks ===== */
+/* ROM is in PSRAM behind a page cache. Bank 0 (addr < 0x4000) is pinned, so that path is
+   a direct index. For the switchable bank we keep the active page's SRAM pointer and only
+   re-consult the cache when the bank actually changes (an MBC switch) — so the hot path
+   stays a compare + index even though the ROM isn't in SRAM. */
+static const uint8_t *s_pg0;                       /* pinned bank-0 page */
+static uint32_t       s_bpg = 0xFFFFFFFFu;         /* cached active bank page #          */
+static const uint8_t *s_bptr;                      /* ...and its SRAM pointer            */
 static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr){
-	(void)gb; return gbflash_rom()[addr];
+	(void)gb;
+	if(addr < 0x4000u) return s_pg0[addr];
+	uint32_t pg = (uint32_t)addr >> 14;
+	if(pg != s_bpg){ s_bptr = gbflash_page(pg); s_bpg = pg; }
+	return s_bptr[addr & 0x3FFFu];
 }
 static uint8_t gb_cart_ram_read(struct gb_s *gb, const uint_fast32_t addr){
 	(void)gb; return s_cartram ? s_cartram[addr] : 0xFF;
@@ -223,9 +234,11 @@ static void start_game(const char *name){
 
 	long sz = gbflash_load(rompath, NULL);
 	if(sz < 0){
-		set_status(sz == -2 ? "ROM too big for RAM" : "load failed");
+		set_status(sz == -2 ? "ROM too big for PSRAM" : "load failed");
 		return;
 	}
+	s_pg0 = gbflash_page0();        /* pinned bank 0 — must be set before gb_init reads the header */
+	s_bpg = 0xFFFFFFFFu;            /* invalidate the active-bank pointer cache */
 
 	s_gb = malloc(sizeof *s_gb);
 	s_fb = malloc((size_t)GB_W * GB_H);
@@ -248,10 +261,11 @@ static void start_game(const char *name){
 	gb_reset(s_gb);
 	s_gberr = 0; s_btn = 0; s_scale = 1;
 
-	/* enter play: the OS default 360 MHz (stable; 400 MHz destabilised the flash loader and
-	   audio). clk_peri = 360 MHz, so the panel SPI runs at 360/8 = 45 MHz (vs the OS's 25). */
+	/* enter play at the OS 360 MHz clock. clk_peri now follows clk_sys, so the panel SPI
+	   runs at the full LCD_SPI_SPEED (90 MHz) — double the old hard-capped 45 — which is
+	   what makes 2x usable. */
 	kf_clock_ui();
-	spi_set_baudrate(Pico_LCD_SPI_MOD, 45u * 1000u * 1000u);
+	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
 	disp_pause_core1();
 	draw_rect_spi(0, 0, LCD_W - 1, LCD_H - 1, 0x000000);
 	kf_audio_start(AUDIO_SAMPLE_RATE);
