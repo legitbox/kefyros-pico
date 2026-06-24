@@ -30,10 +30,13 @@
 #include "board.h"
 #include "psram.pio.h"
 
-#define KF_PSRAM_HZ      40000000u   /* target QPI bus clock; integer-divided, so the actual
-                                        SCK rounds DOWN (e.g. ~36 MHz at the 360 MHz UI clock).
-                                        Chip is rated 133 MHz; the real ceiling here is the PIO
-                                        read sample point, validated by the boot self-test. */
+/* The QPI bus clock is auto-calibrated at boot (kf_psram_init): we sweep the PIO
+   divider from fast to slow and keep the fastest that passes the bit-verify self-
+   test, so the board picks its own safe ceiling instead of us hard-coding one. The
+   chip is rated 133 MHz; the real limit is the PicoCalc's GPIO traces + the PIO
+   read sample point (bit-banged, so no hardware RX-delay trim like the QMI flash). */
+#define KF_BUS_HZ_MAX    45000000u   /* fastest divider we'll try (÷-rounded to achievable) */
+#define KF_BUS_HZ_MIN    12000000u   /* slowest we'll accept before declaring the chip dead */
 #define QSPI_DUMMY       6           /* default 0xEB fast-quad-read dummy cycles (datasheet) */
 #define QR_DUMMY_IDX     6           /* index of the `set y, N-1` dummy-count instr in psram_qr */
 
@@ -43,15 +46,17 @@ static uint s_qr_off, s_qw_off;      /* loaded offsets of the quad read/write pr
 static int  s_active = -1;           /* offset of the program currently armed on the SM  */
 static uint32_t s_size = 0;          /* detected size in bytes (0 = absent/failed)        */
 static uint32_t s_brk  = 0;          /* bump allocator cursor                             */
+static uint32_t s_bus_hz = 16000000u;/* calibrated bus speed; 16 MHz is the safe bring-up rate */
 
 static inline void cs_lo(void){ gpio_put(KF_PSRAM_CS, 0); }
 static inline void cs_hi(void){ gpio_put(KF_PSRAM_CS, 1); }
 
 /* ---- integer clock divider (frac=0): a fractional divider jitters the sample point
-   and corrupts reads — see the long note in kf_psram_reclock(). ---- */
+   and corrupts reads — see the long note in kf_psram_reclock(). Derived from the
+   calibrated s_bus_hz, so at any clk_sys the actual SCK is <= the validated speed. ---- */
 static uint16_t bus_div(void){
 	uint32_t hz = clock_get_hz(clk_sys);
-	uint32_t div = (hz + (2u*KF_PSRAM_HZ) - 1u) / (2u*KF_PSRAM_HZ);   /* ceil -> integer */
+	uint32_t div = (hz + (2u*s_bus_hz) - 1u) / (2u*s_bus_hz);   /* ceil -> integer */
 	if(div < 1u) div = 1u;
 	if(div > 65535u) div = 65535u;
 	return (uint16_t)div;
@@ -292,20 +297,30 @@ uint32_t kf_psram_init(void){
 	pio_gpio_init(s_pio, KF_PSRAM_SIO3);
 	qr_set_dummy(QSPI_DUMMY);
 
-	/* ---- Stage 3: quad self-test (fail-hard gates s_size) ---- */
+	/* ---- Stage 3: auto-calibrate the bus speed ----
+	   Sweep the PIO divider fast -> slow at the current clk_sys and keep the FASTEST
+	   that passes the bit-verify self-test. s_bus_hz stores the actual achieved speed
+	   (clk/(2*div)), so kf_psram_reclock() reproduces it at any later clk_sys. Fail-
+	   hard only if even the slowest candidate is corrupt. */
 	s_size = KF_PSRAM_SIZE;                          /* enable read/write for the test */
-	if(!qr_selftest()){
-		/* 6 dummy cycles didn't read back clean. Sweep nearby counts to localise a
-		   nibble-shift before giving up (one flash finds the right latency). */
-		int ok = 0;
-		static const int sweep[] = { 5, 7, 4, 8, 3 };
-		for(unsigned k = 0; k < sizeof sweep/sizeof sweep[0]; k++){
-			qr_set_dummy(sweep[k]);
-			if(qr_selftest()){ ok = 1; break; }
-		}
-		if(!ok){ qr_set_dummy(QSPI_DUMMY); s_size = 0; return 0; }   /* truly broken */
+	uint32_t clk   = clock_get_hz(clk_sys);
+	uint32_t dfast = (clk + (2u*KF_BUS_HZ_MAX) - 1u) / (2u*KF_BUS_HZ_MAX);
+	uint32_t dslow = (clk + (2u*KF_BUS_HZ_MIN) - 1u) / (2u*KF_BUS_HZ_MIN);
+	if(dfast < 2u) dfast = 2u;
+	int ok = 0;
+	for(uint32_t div = dfast; div <= dslow; div++){
+		s_bus_hz = clk / (2u * div);                 /* actual SCK for this divider   */
+		s_active = -1;                               /* force qarm to re-init the SM  */
+		if(qr_selftest()){ ok = 1; break; }
 	}
+	if(!ok){ s_size = 0; return 0; }                 /* nothing worked -> treat as absent */
 
 	s_brk = 0;
 	return s_size;
+}
+
+/* Current QPI bus clock in Hz (actual SCK at the live clk_sys), 0 if PSRAM absent. */
+uint32_t kf_psram_bus_hz(void){
+	if(!s_size || s_sm < 0) return 0;
+	return clock_get_hz(clk_sys) / (2u * bus_div());
 }

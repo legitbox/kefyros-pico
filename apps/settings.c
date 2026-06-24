@@ -143,7 +143,8 @@ void app_settings_open(void){
 	/* PSRAM self-test result (static after boot) */
 	lv_obj_t *lbl_ram = lv_label_create(scr);
 	uint32_t ps = kf_psram_size();
-	if(ps) lv_label_set_text_fmt(lbl_ram, "PSRAM: %u MB  OK", ps/(1024u*1024u));
+	if(ps) lv_label_set_text_fmt(lbl_ram, "PSRAM: %u MB  OK  @ %u MHz",
+	           ps/(1024u*1024u), kf_psram_bus_hz()/1000000u);
 	else   lv_label_set_text(lbl_ram, "PSRAM: not detected");
 	lv_obj_set_style_text_color(lbl_ram, ps ? KF_ACTIVE : lv_color_hex(0xe03c32), 0);
 	lv_obj_align(lbl_ram, LV_ALIGN_TOP_MID, 0, 32);

@@ -100,6 +100,7 @@ int  kfs_ready(void);                /* 1 if the card mounted */
    Software block device (NOT memory-mapped): use read/write, not direct pointers. */
 uint32_t kf_psram_init(void);                         /* probe + self-test; returns bytes (0 = absent) */
 uint32_t kf_psram_size(void);                         /* detected size (0 if none) */
+uint32_t kf_psram_bus_hz(void);                       /* current QPI SCK in Hz (0 if absent) */
 void     kf_psram_read(uint32_t addr, void *buf, uint32_t n);
 void     kf_psram_write(uint32_t addr, const void *buf, uint32_t n);
 uint32_t kf_psram_alloc(uint32_t n);                  /* bump-allocate a blob; 0xFFFFFFFF if full */
