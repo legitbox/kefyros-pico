@@ -37,8 +37,12 @@
    read sample point (bit-banged, so no hardware RX-delay trim like the QMI flash). */
 #define KF_BUS_HZ_MAX    45000000u   /* fastest divider we'll try (÷-rounded to achievable) */
 #define KF_BUS_HZ_MIN    12000000u   /* slowest we'll accept before declaring the chip dead */
+#define KF_PSRAM_RESERVE 0x8000u     /* top 32 KB withheld from the allocator: scratch the boot
+                                        + per-clock calibrator scribbles on without touching data */
 #define QSPI_DUMMY       6           /* default 0xEB fast-quad-read dummy cycles (datasheet) */
 #define QR_DUMMY_IDX     6           /* index of the `set y, N-1` dummy-count instr in psram_qr */
+
+static int psram_calibrate(void);    /* fwd: pick the fastest reliable divider at this clk_sys */
 
 static PIO  s_pio;
 static int  s_sm = -1;
@@ -165,24 +169,26 @@ void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 
 uint32_t kf_psram_size(void){ return s_size; }
 
-/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). */
+/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). The top
+   KF_PSRAM_RESERVE is withheld so the calibrator's scratch never collides with data. */
 uint32_t kf_psram_alloc(uint32_t n){
 	n = (n + 3u) & ~3u;
-	if(!s_size || s_brk + n > s_size) return 0xFFFFFFFFu;   /* out of PSRAM */
+	uint32_t ceiling = (s_size > KF_PSRAM_RESERVE) ? s_size - KF_PSRAM_RESERVE : 0;
+	if(!s_size || s_brk + n > ceiling) return 0xFFFFFFFFu;   /* out of PSRAM */
 	uint32_t a = s_brk; s_brk += n; return a;
 }
 void kf_psram_reset_alloc(void){ s_brk = 0; }
 
-/* Re-derive the PIO clock divider for the current clk_sys (call after a runtime
-   clk_sys change so the PSRAM bus stays ~18 MHz instead of scaling with the CPU).
-   MUST be an INTEGER divider: a heavy fractional divider stretches ~94% of SCK
-   periods by a sys cycle at the 250 MHz eco clock, walking the MISO sample point
-   off its valid window -> garbage reads. frac=0 keeps SCK periodic at any clk_sys.
-   In quad this matters even more — a nibble sampled a hair early shifts every byte. */
+/* Called after a runtime clk_sys change. We can't just rescale the divider: the
+   reliable bus speed depends on clk_sys (the integer divider quantizes SCK, and the
+   PIO input synchronizer adds a clk_sys-cycle skew that's a different fraction of the
+   bus period at each clock — so a speed validated at 360 MHz can be wrong at the
+   250 MHz eco clock the radio uses). So we RE-CALIBRATE for the new clk_sys, picking
+   the fastest divider that passes the thorough bit-verify. Never disables a working
+   chip mid-session — psram_calibrate() falls back to the slowest divider. */
 void kf_psram_reclock(void){
 	if(!s_size || s_sm < 0) return;
-	pio_sm_set_clkdiv_int_frac(s_pio, s_sm, bus_div(), 0);
-	pio_sm_clkdiv_restart(s_pio, s_sm);
+	psram_calibrate();
 }
 
 /* Patch the read program's dummy-cycle count live (instruction memory write).
@@ -191,25 +197,54 @@ static void qr_set_dummy(int dummy){
 	s_pio->instr_mem[s_qr_off + QR_DUMMY_IDX] = pio_encode_set(pio_y, dummy - 1);
 }
 
-/* Round-trip self-test at the current clock. Writes varied patterns (incl. a
-   non-multiple-of-4 length and a 1 KB page-cross) and reads them back byte-exact.
-   Returns 1 if clean. */
-static int qr_selftest(void){
-	static const uint32_t probes[] = { 0, 1003, 0x100000u, KF_PSRAM_SIZE - 40u };
-	static const uint32_t lens[]   = { 16,  40,   64,        37 };
-	/* probe[1]=1003,len40 straddles the 1 KB page boundary into 21- and 19-byte
-	   sub-chunks (both non-multiple-of-4) — exercises chunk-splitting + the OSR
-	   flush between writes. probe[3] is odd-length near the top of the chip. */
-	uint8_t w[80], r[80];
-	for(unsigned p = 0; p < sizeof probes/sizeof probes[0]; p++){
-		uint32_t a = probes[p], n = lens[p];
-		for(uint32_t i = 0; i < n; i++) w[i] = (uint8_t)(a + i*37u + 0x5Au);
-		kf_psram_write(a, w, n);
+/* Thorough round-trip test on the reserved top-of-chip scratch (never allocated, so
+   safe to scribble even mid-session). Writes a per-block pseudo-random pattern across
+   the whole 32 KB window, then reads it ALL back byte-exact. This is deliberately big:
+   a *marginal* bus speed passes a tiny test by luck but fails under volume (exactly
+   how 30 MHz passed boot yet the 512 KB browser/Bus-Check reads corrupted). Includes a
+   non-page-aligned, odd-length op to exercise chunk-splitting + the OSR flush. */
+static int calib_test(void){
+	const uint32_t base = s_size - KF_PSRAM_RESERVE;
+	uint8_t buf[256];
+	for(uint32_t off = 0; off < KF_PSRAM_RESERVE; off += 256){
+		uint32_t s = 0x9E3779B9u ^ (base + off);
+		for(int i = 0; i < 256; i++){ s = s*1664525u + 1013904223u; buf[i] = (uint8_t)(s >> 24); }
+		kf_psram_write(base + off, buf, 256);
+	}
+	for(uint32_t off = 0; off < KF_PSRAM_RESERVE; off += 256){
+		uint32_t s = 0x9E3779B9u ^ (base + off);
+		kf_psram_read(base + off, buf, 256);
+		for(int i = 0; i < 256; i++){ s = s*1664525u + 1013904223u; if(buf[i] != (uint8_t)(s >> 24)) return 0; }
+	}
+	/* one odd-length, page-straddling op for the chunk/OSR path */
+	{
+		uint8_t w[40], r[40]; uint32_t a = base + 1003;
+		for(int i = 0; i < 40; i++) w[i] = (uint8_t)(i*37 + 0x5A);
+		kf_psram_write(a, w, 40);
 		memset(r, 0xAA, sizeof r);
-		kf_psram_read(a, r, n);
-		if(memcmp(w, r, n) != 0) return 0;
+		kf_psram_read(a, r, 40);
+		if(memcmp(w, r, 40) != 0) return 0;
 	}
 	return 1;
+}
+
+/* Find the fastest divider that passes calib_test() at the CURRENT clk_sys. Sweeps
+   fast -> slow; s_bus_hz holds the actual achieved SCK so it's reproduced exactly.
+   Returns 1 if some speed passed; on total failure leaves the slowest divider armed
+   (best-effort — never strands a live chip with no working clock) and returns 0. */
+static int psram_calibrate(void){
+	uint32_t clk   = clock_get_hz(clk_sys);
+	uint32_t dfast = (clk + (2u*KF_BUS_HZ_MAX) - 1u) / (2u*KF_BUS_HZ_MAX);
+	uint32_t dslow = (clk + (2u*KF_BUS_HZ_MIN) - 1u) / (2u*KF_BUS_HZ_MIN);
+	if(dfast < 2u) dfast = 2u;
+	for(uint32_t div = dfast; div <= dslow; div++){
+		s_bus_hz = clk / (2u * div);
+		s_active = -1;                 /* force qarm to re-init the SM with this divider */
+		if(calib_test()) return 1;
+	}
+	s_bus_hz = clk / (2u * dslow);     /* nothing clean: run as slow as we allow */
+	s_active = -1;
+	return 0;
 }
 
 /* Software-reset the chip in QPI format, before any PIO is set up. Critical for
@@ -297,23 +332,11 @@ uint32_t kf_psram_init(void){
 	pio_gpio_init(s_pio, KF_PSRAM_SIO3);
 	qr_set_dummy(QSPI_DUMMY);
 
-	/* ---- Stage 3: auto-calibrate the bus speed ----
-	   Sweep the PIO divider fast -> slow at the current clk_sys and keep the FASTEST
-	   that passes the bit-verify self-test. s_bus_hz stores the actual achieved speed
-	   (clk/(2*div)), so kf_psram_reclock() reproduces it at any later clk_sys. Fail-
-	   hard only if even the slowest candidate is corrupt. */
+	/* ---- Stage 3: auto-calibrate the bus speed (fastest reliable at this clk_sys).
+	   Re-runs on every later clk_sys change via kf_psram_reclock(). Fail-hard only if
+	   even the slowest candidate corrupts. ---- */
 	s_size = KF_PSRAM_SIZE;                          /* enable read/write for the test */
-	uint32_t clk   = clock_get_hz(clk_sys);
-	uint32_t dfast = (clk + (2u*KF_BUS_HZ_MAX) - 1u) / (2u*KF_BUS_HZ_MAX);
-	uint32_t dslow = (clk + (2u*KF_BUS_HZ_MIN) - 1u) / (2u*KF_BUS_HZ_MIN);
-	if(dfast < 2u) dfast = 2u;
-	int ok = 0;
-	for(uint32_t div = dfast; div <= dslow; div++){
-		s_bus_hz = clk / (2u * div);                 /* actual SCK for this divider   */
-		s_active = -1;                               /* force qarm to re-init the SM  */
-		if(qr_selftest()){ ok = 1; break; }
-	}
-	if(!ok){ s_size = 0; return 0; }                 /* nothing worked -> treat as absent */
+	if(!psram_calibrate()){ s_size = 0; return 0; }  /* nothing worked -> treat as absent */
 
 	s_brk = 0;
 	return s_size;
