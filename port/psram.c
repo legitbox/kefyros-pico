@@ -37,12 +37,8 @@
    read sample point (bit-banged, so no hardware RX-delay trim like the QMI flash). */
 #define KF_BUS_HZ_MAX    45000000u   /* fastest divider we'll try (÷-rounded to achievable) */
 #define KF_BUS_HZ_MIN    12000000u   /* slowest we'll accept before declaring the chip dead */
-#define KF_PSRAM_RESERVE 0x8000u     /* top 32 KB withheld from the allocator: scratch the boot
-                                        + per-clock calibrator scribbles on without touching data */
 #define QSPI_DUMMY       6           /* default 0xEB fast-quad-read dummy cycles (datasheet) */
 #define QR_DUMMY_IDX     6           /* index of the `set y, N-1` dummy-count instr in psram_qr */
-
-static int psram_calibrate(void);    /* fwd: pick the fastest reliable divider at this clk_sys */
 
 static PIO  s_pio;
 static int  s_sm = -1;
@@ -169,26 +165,26 @@ void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 
 uint32_t kf_psram_size(void){ return s_size; }
 
-/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). The top
-   KF_PSRAM_RESERVE is withheld so the calibrator's scratch never collides with data. */
+/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). */
 uint32_t kf_psram_alloc(uint32_t n){
 	n = (n + 3u) & ~3u;
-	uint32_t ceiling = (s_size > KF_PSRAM_RESERVE) ? s_size - KF_PSRAM_RESERVE : 0;
-	if(!s_size || s_brk + n > ceiling) return 0xFFFFFFFFu;   /* out of PSRAM */
+	if(!s_size || s_brk + n > s_size) return 0xFFFFFFFFu;   /* out of PSRAM */
 	uint32_t a = s_brk; s_brk += n; return a;
 }
 void kf_psram_reset_alloc(void){ s_brk = 0; }
 
-/* Called after a runtime clk_sys change. We can't just rescale the divider: the
-   reliable bus speed depends on clk_sys (the integer divider quantizes SCK, and the
-   PIO input synchronizer adds a clk_sys-cycle skew that's a different fraction of the
-   bus period at each clock — so a speed validated at 360 MHz can be wrong at the
-   250 MHz eco clock the radio uses). So we RE-CALIBRATE for the new clk_sys, picking
-   the fastest divider that passes the thorough bit-verify. Never disables a working
-   chip mid-session — psram_calibrate() falls back to the slowest divider. */
+/* Called after a runtime clk_sys change: rescale the PIO divider to hold the boot-
+   calibrated bus speed (s_bus_hz) at the new clk_sys. MUST stay an INTEGER divider —
+   a fractional one jitters the sample point and corrupts reads. We don't re-run the
+   harsh calibration here (it would clobber live data, and can only safely touch a
+   tiny region mid-session anyway); the one-divider margin baked in at boot covers the
+   cross-clock sample-phase shift (different clk_sys -> different divider -> the input
+   synchronizer's fixed cycle skew lands at a different fraction of the bus period). */
 void kf_psram_reclock(void){
 	if(!s_size || s_sm < 0) return;
-	psram_calibrate();
+	pio_sm_set_clkdiv_int_frac(s_pio, s_sm, bus_div(), 0);
+	pio_sm_clkdiv_restart(s_pio, s_sm);
+	s_active = -1;     /* next op re-inits the SM cleanly with the new divider */
 }
 
 /* Patch the read program's dummy-cycle count live (instruction memory write).
@@ -197,54 +193,55 @@ static void qr_set_dummy(int dummy){
 	s_pio->instr_mem[s_qr_off + QR_DUMMY_IDX] = pio_encode_set(pio_y, dummy - 1);
 }
 
-/* Thorough round-trip test on the reserved top-of-chip scratch (never allocated, so
-   safe to scribble even mid-session). Writes a per-block pseudo-random pattern across
-   the whole 32 KB window, then reads it ALL back byte-exact. This is deliberately big:
-   a *marginal* bus speed passes a tiny test by luck but fails under volume (exactly
-   how 30 MHz passed boot yet the 512 KB browser/Bus-Check reads corrupted). Includes a
-   non-page-aligned, odd-length op to exercise chunk-splitting + the OSR flush. */
-static int calib_test(void){
-	const uint32_t base = s_size - KF_PSRAM_RESERVE;
-	uint8_t buf[256];
-	for(uint32_t off = 0; off < KF_PSRAM_RESERVE; off += 256){
-		uint32_t s = 0x9E3779B9u ^ (base + off);
-		for(int i = 0; i < 256; i++){ s = s*1664525u + 1013904223u; buf[i] = (uint8_t)(s >> 24); }
-		kf_psram_write(base + off, buf, 256);
-	}
-	for(uint32_t off = 0; off < KF_PSRAM_RESERVE; off += 256){
-		uint32_t s = 0x9E3779B9u ^ (base + off);
-		kf_psram_read(base + off, buf, 256);
-		for(int i = 0; i < 256; i++){ s = s*1664525u + 1013904223u; if(buf[i] != (uint8_t)(s >> 24)) return 0; }
-	}
-	/* one odd-length, page-straddling op for the chunk/OSR path */
-	{
-		uint8_t w[40], r[40]; uint32_t a = base + 1003;
-		for(int i = 0; i < 40; i++) w[i] = (uint8_t)(i*37 + 0x5A);
-		kf_psram_write(a, w, 40);
-		memset(r, 0xAA, sizeof r);
-		kf_psram_read(a, r, 40);
-		if(memcmp(w, r, 40) != 0) return 0;
-	}
+/* Test one 1024-byte block (a full chip page, the heaviest single op) with worst-case
+   pseudo-random data: write it, then read it back byte-exact. The PRNG (max bit
+   toggling) is the signal-integrity worst case — far harsher than smooth image/text
+   data — so a speed that passes this is reliable for real reads. Same seed scheme as
+   the Settings Bus Check, so calibration generates the IDENTICAL killer pattern at
+   each address. Returns 1 if clean. */
+static uint8_t s_calbuf[1024];
+static int calib_block(uint32_t addr){
+	uint32_t s = 0x9E3779B9u ^ addr;
+	for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; s_calbuf[i] = (uint8_t)(s >> 24); }
+	kf_psram_write(addr, s_calbuf, 1024);
+	memset(s_calbuf, 0xA5, 1024);
+	kf_psram_read(addr, s_calbuf, 1024);
+	s = 0x9E3779B9u ^ addr;
+	for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; if(s_calbuf[i] != (uint8_t)(s >> 24)) return 0; }
 	return 1;
 }
 
-/* Find the fastest divider that passes calib_test() at the CURRENT clk_sys. Sweeps
-   fast -> slow; s_bus_hz holds the actual achieved SCK so it's reproduced exactly.
-   Returns 1 if some speed passed; on total failure leaves the slowest divider armed
-   (best-effort — never strands a live chip with no working clock) and returns 0. */
+/* Harsh full-chip sweep — only valid at boot, before anything is allocated (psram_init
+   runs before the wallpaper/launcher), so we can scribble across all 8 MB. A 1 KB
+   killer block every 32 KB covers every address region (incl. the 0x780000 that the
+   Bus Check trips on). Bails on the first bad block, so a too-fast divider fails fast. */
+static int calib_sweep_chip(void){
+	for(uint32_t a = 0; a + 1024u <= s_size; a += 0x8000u)
+		if(!calib_block(a)) return 0;
+	return 1;
+}
+
+/* Pick the bus speed at boot: sweep the divider fast -> slow, keep the FASTEST that
+   passes the harsh full-chip test, then drop ONE notch for margin (cross-clock sample-
+   phase shift, temperature, data variation). s_bus_hz holds the achieved SCK so
+   kf_psram_reclock() reproduces it at any later clk_sys. Returns 0 only if even the
+   slowest candidate corrupts (chip treated as absent). */
 static int psram_calibrate(void){
 	uint32_t clk   = clock_get_hz(clk_sys);
 	uint32_t dfast = (clk + (2u*KF_BUS_HZ_MAX) - 1u) / (2u*KF_BUS_HZ_MAX);
 	uint32_t dslow = (clk + (2u*KF_BUS_HZ_MIN) - 1u) / (2u*KF_BUS_HZ_MIN);
 	if(dfast < 2u) dfast = 2u;
+	uint32_t pass = 0;
 	for(uint32_t div = dfast; div <= dslow; div++){
 		s_bus_hz = clk / (2u * div);
 		s_active = -1;                 /* force qarm to re-init the SM with this divider */
-		if(calib_test()) return 1;
+		if(calib_block(0) && calib_sweep_chip()){ pass = div; break; }
 	}
-	s_bus_hz = clk / (2u * dslow);     /* nothing clean: run as slow as we allow */
+	if(!pass) return 0;
+	uint32_t mdiv = (pass + 1u <= dslow) ? pass + 1u : pass;   /* one notch of margin */
+	s_bus_hz = clk / (2u * mdiv);
 	s_active = -1;
-	return 0;
+	return 1;
 }
 
 /* Software-reset the chip in QPI format, before any PIO is set up. Critical for
