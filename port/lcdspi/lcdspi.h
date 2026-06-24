@@ -5,9 +5,11 @@
 
 //#define LCD_SPI_SPEED   6000000
 //#define LCD_SPI_SPEED 25000000
-#define LCD_SPI_SPEED   50000000    /* cranked: rounds to ~45 MHz at the 360 MHz UI clock
-                                       (GB-proven stable). ~1.8x the old 25 MHz. The Settings
-                                       "Screen Test" can push higher live to find the ceiling. */
+#define LCD_SPI_SPEED   90000000    /* = clk_sys/4 at the 360 MHz UI clock = 90 MHz, validated
+                                       stable on the Settings Screen Test. ~3.75x the 24 MHz the
+                                       panel was *actually* capped at before clk_peri was freed
+                                       from the 48 MHz USB PLL (see CMakeLists). 90 is the ceiling
+                                       at 360 MHz — the next SPI divider step (÷2) is 180 MHz. */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI
