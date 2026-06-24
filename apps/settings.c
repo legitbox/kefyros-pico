@@ -83,34 +83,66 @@ static void act_memspeed(lv_event_t *e){ (void)e;
 	lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
 }
 
-/* SPI/QPI bus check: write a per-block pseudo-random pattern across the whole
-   scratch window, then read it ALL back and verify byte-exact (separate passes,
-   so a stuck address or stale-nibble carry between transactions is caught). */
+static void prng_fill(uint8_t *b, uint32_t seed){
+	uint32_t s = 0x9E3779B9u ^ seed;
+	for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; b[i] = (uint8_t)(s >> 24); }
+}
+
+/* DIAGNOSTIC bus check. Runs the 1 KB-block PRNG verify two ways to isolate the
+   0x780004-class failure: pass A writes+reads each block immediately; pass B writes
+   the whole window then reads it all back. If A passes but B fails, a later write is
+   corrupting an earlier block (or read-after-many-writes breaks). Reports the failing
+   pass, address, expected vs got byte, and how many bytes in that block are bad. */
+static int check_run(int interleaved, uint32_t base, uint8_t *w, uint8_t *r,
+                     uint32_t *fa, uint8_t *fe, uint8_t *fg, int *nbad){
+	if(interleaved){
+		for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
+			prng_fill(w, base + off);
+			kf_psram_write(base + off, w, 1024);
+			memset(r, 0xA5, 1024);
+			kf_psram_read(base + off, r, 1024);
+			if(memcmp(w, r, 1024)){
+				*nbad = 0; int first = -1;
+				for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ if(first<0){first=i;*fe=w[i];*fg=r[i];} (*nbad)++; }
+				*fa = base + off + first; return 0;
+			}
+		}
+		return 1;
+	}
+	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){ prng_fill(w, base + off); kf_psram_write(base + off, w, 1024); }
+	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
+		prng_fill(w, base + off);
+		memset(r, 0xA5, 1024);
+		kf_psram_read(base + off, r, 1024);
+		if(memcmp(w, r, 1024)){
+			*nbad = 0; int first = -1;
+			for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ if(first<0){first=i;*fe=w[i];*fg=r[i];} (*nbad)++; }
+			*fa = base + off + first; return 0;
+		}
+	}
+	return 1;
+}
+
 static void act_memcheck(lv_event_t *e){ (void)e;
 	uint32_t sz = kf_psram_size();
 	if(!sz){ lv_label_set_text(lbl_test, "Check: no PSRAM"); return; }
 	uint8_t *w = malloc(1024), *r = malloc(1024);
 	if(!w || !r){ free(w); free(r); lv_label_set_text(lbl_test, "Check: out of memory"); return; }
-	uint32_t base = sz - PS_SCRATCH, fail_at = 0; int fail = 0;
+	uint32_t base = sz - PS_SCRATCH, fa = 0; uint8_t fe = 0, fg = 0; int nbad = 0;
 
-	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
-		uint32_t s = 0x9E3779B9u ^ (base + off);
-		for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; w[i] = (uint8_t)(s >> 24); }
-		kf_psram_write(base + off, w, 1024);
-	}
-	for(uint32_t off = 0; off < PS_SCRATCH && !fail; off += 1024){
-		uint32_t s = 0x9E3779B9u ^ (base + off);
-		for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; w[i] = (uint8_t)(s >> 24); }
-		kf_psram_read(base + off, r, 1024);
-		if(memcmp(w, r, 1024)){
-			for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ fail_at = base + off + i; break; }
-			fail = 1;
-		}
-	}
+	const char *which = NULL;
+	if(!check_run(1, base, w, r, &fa, &fe, &fg, &nbad)) which = "A";
+	else if(!check_run(0, base, w, r, &fa, &fe, &fg, &nbad)) which = "B";
 	free(w); free(r);
-	if(fail) lv_label_set_text_fmt(lbl_test, "Check: FAIL @ 0x%06X", (unsigned)fail_at);
-	else     lv_label_set_text(lbl_test, "Check: OK (512 KB verified)");
-	lv_obj_set_style_text_color(lbl_test, fail ? lv_color_hex(0xe03c32) : KF_ACTIVE, 0);
+
+	if(which){
+		lv_label_set_text_fmt(lbl_test, "%s FAIL @%06X e%02X g%02X n%d",
+			which, (unsigned)fa, fe, fg, nbad);
+		lv_obj_set_style_text_color(lbl_test, lv_color_hex(0xe03c32), 0);
+	} else {
+		lv_label_set_text(lbl_test, "Check: OK (A+B, 512 KB)");
+		lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
+	}
 }
 
 static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
