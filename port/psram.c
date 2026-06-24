@@ -30,7 +30,10 @@
 #include "board.h"
 #include "psram.pio.h"
 
-#define KF_PSRAM_HZ      18000000u   /* target SPI/QPI bus clock (<= chip max, conservative) */
+#define KF_PSRAM_HZ      40000000u   /* target QPI bus clock; integer-divided, so the actual
+                                        SCK rounds DOWN (e.g. ~36 MHz at the 360 MHz UI clock).
+                                        Chip is rated 133 MHz; the real ceiling here is the PIO
+                                        read sample point, validated by the boot self-test. */
 #define QSPI_DUMMY       6           /* default 0xEB fast-quad-read dummy cycles (datasheet) */
 #define QR_DUMMY_IDX     6           /* index of the `set y, N-1` dummy-count instr in psram_qr */
 

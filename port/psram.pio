@@ -45,10 +45,10 @@ ca_lp:
 dm_lp:
     nop                  side 1   ; SCK high
     jmp y-- dm_lp        side 0   ; SCK low
-rd_lp:
-    nop                  side 0   ; SCK low: device drives nibble
-    in pins, 4           side 1   ; SCK high: sample (autopush every 8 bits)
-    jmp x-- rd_lp        side 0
+    nop                  side 1   ; priming edge: device launches the first data nibble
+rd_lp:                            ; 2 instr/nibble, sample on the FALLING edge: the nibble
+    in pins, 4           side 0   ;   launched at the prior rising edge has had ~half a clock
+    jmp x-- rd_lp        side 1   ;   to settle -> robust at high SCK. SCK high launches next.
 done_r:
     jmp done_r           side 0   ; park SCK low until C restarts the SM
 
