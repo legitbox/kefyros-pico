@@ -432,6 +432,20 @@ static lv_obj_t *build_graph3d(void){
 	lv_obj_t *s = form_begin("Graph 3D");
 	add_field(s, "Z = f(x,y):", "");
 	form_finish(s, "ENTER=graph  ESC=menu");
+	/* keybind cheatsheet for the plot viewer (3D only) — one line each */
+	lv_obj_t *kb = lv_label_create(s);
+	lv_obj_set_style_text_font(kb, KF_FONT, 0);
+	lv_obj_set_style_text_color(kb, KF_TEXT_MUTED, 0);
+	lv_obj_set_style_pad_top(kb, 6, 0);
+	lv_label_set_text(kb,
+		"In the plot:\n"
+		"  Arrows  - rotate / look around\n"
+		"  + / -   - zoom in / out\n"
+		"  Space   - toggle auto-spin\n"
+		"  F1      - flat shading / wireframe\n"
+		"  F2      - ground plane on / off\n"
+		"  R       - reset the view\n"
+		"  ESC     - back to this screen");
 	return s;
 }
 static void do_graph3d(void){
