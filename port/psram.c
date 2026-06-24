@@ -37,8 +37,12 @@
    read sample point (bit-banged, so no hardware RX-delay trim like the QMI flash). */
 #define KF_BUS_HZ_MAX    45000000u   /* fastest divider we'll try (÷-rounded to achievable) */
 #define KF_BUS_HZ_MIN    12000000u   /* slowest we'll accept before declaring the chip dead */
+#define KF_PSRAM_RESERVE 0x10000u    /* top 64 KB withheld from the allocator: the per-clock
+                                        recalibrator's scratch, never holds live data */
 #define QSPI_DUMMY       6           /* default 0xEB fast-quad-read dummy cycles (datasheet) */
 #define QR_DUMMY_IDX     6           /* index of the `set y, N-1` dummy-count instr in psram_qr */
+
+static int psram_calibrate(int boot);   /* fwd: fastest reliable divider at the CURRENT clk_sys */
 
 static PIO  s_pio;
 static int  s_sm = -1;
@@ -165,26 +169,26 @@ void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 
 uint32_t kf_psram_size(void){ return s_size; }
 
-/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). */
+/* dumb bump allocator for big long-lived blobs (wallpaper, browser page). The top
+   KF_PSRAM_RESERVE is withheld so the per-clock recalibrator's scratch never collides
+   with live data. */
 uint32_t kf_psram_alloc(uint32_t n){
 	n = (n + 3u) & ~3u;
-	if(!s_size || s_brk + n > s_size) return 0xFFFFFFFFu;   /* out of PSRAM */
+	uint32_t ceiling = (s_size > KF_PSRAM_RESERVE) ? s_size - KF_PSRAM_RESERVE : 0;
+	if(!s_size || s_brk + n > ceiling) return 0xFFFFFFFFu;   /* out of PSRAM */
 	uint32_t a = s_brk; s_brk += n; return a;
 }
 void kf_psram_reset_alloc(void){ s_brk = 0; }
 
-/* Called after a runtime clk_sys change: rescale the PIO divider to hold the boot-
-   calibrated bus speed (s_bus_hz) at the new clk_sys. MUST stay an INTEGER divider —
-   a fractional one jitters the sample point and corrupts reads. We don't re-run the
-   harsh calibration here (it would clobber live data, and can only safely touch a
-   tiny region mid-session anyway); the one-divider margin baked in at boot covers the
-   cross-clock sample-phase shift (different clk_sys -> different divider -> the input
-   synchronizer's fixed cycle skew lands at a different fraction of the bus period). */
+/* Called after a runtime clk_sys change. The reliable bus speed depends on clk_sys
+   (the integer divider quantizes SCK; a divider/speed validated at one clock can be
+   marginal at another and corrupt a single bit on certain data — exactly the
+   browser-at-250 MHz failure). So we RE-CALIBRATE for the new clk_sys, testing the
+   reserved scratch region (live data elsewhere) with the same harsh 1 KB write-then-
+   read pattern. Never disables a live chip — psram_calibrate() falls back to slowest. */
 void kf_psram_reclock(void){
 	if(!s_size || s_sm < 0) return;
-	pio_sm_set_clkdiv_int_frac(s_pio, s_sm, bus_div(), 0);
-	pio_sm_clkdiv_restart(s_pio, s_sm);
-	s_active = -1;     /* next op re-inits the SM cleanly with the new divider */
+	psram_calibrate(0);
 }
 
 /* Patch the read program's dummy-cycle count live (instruction memory write).
@@ -211,22 +215,29 @@ static int calib_block(uint32_t addr){
 	return 1;
 }
 
-/* Harsh full-chip sweep — only valid at boot, before anything is allocated (psram_init
-   runs before the wallpaper/launcher), so we can scribble across all 8 MB. A 1 KB
-   killer block every 32 KB covers every address region (incl. the 0x780000 that the
-   Bus Check trips on). Bails on the first bad block, so a too-fast divider fails fast. */
-static int calib_sweep_chip(void){
-	for(uint32_t a = 0; a + 1024u <= s_size; a += 0x8000u)
-		if(!calib_block(a)) return 0;
+/* One calibration pass at the current divider. At BOOT nothing is allocated yet
+   (psram_init runs before the wallpaper/launcher), so we sweep killer blocks across
+   the WHOLE chip — every address region, incl. the 0x780000 the Bus Check trips on.
+   Mid-session (boot=0) live data is everywhere except the reserved top, so we hammer
+   that 64 KB instead (64 distinct 1 KB patterns, each write-then-read so it exercises
+   the read-after-write program switch that was glitching). Bails on first bad block. */
+static int calib_pass(int boot){
+	if(boot){
+		for(uint32_t a = 0; a + 1024u <= s_size; a += 0x8000u)
+			if(!calib_block(a)) return 0;
+		return 1;
+	}
+	uint32_t base = s_size - KF_PSRAM_RESERVE;
+	for(uint32_t off = 0; off < KF_PSRAM_RESERVE; off += 1024u)
+		if(!calib_block(base + off)) return 0;
 	return 1;
 }
 
-/* Pick the bus speed at boot: sweep the divider fast -> slow, keep the FASTEST that
-   passes the harsh full-chip test, then drop ONE notch for margin (cross-clock sample-
-   phase shift, temperature, data variation). s_bus_hz holds the achieved SCK so
-   kf_psram_reclock() reproduces it at any later clk_sys. Returns 0 only if even the
-   slowest candidate corrupts (chip treated as absent). */
-static int psram_calibrate(void){
+/* Pick the bus speed for the CURRENT clk_sys: sweep the divider fast -> slow, keep the
+   FASTEST that passes, then drop ONE notch for margin (temperature, data variation).
+   Re-run on every clk_sys change (kf_psram_reclock) since the reliable speed is clock-
+   dependent. Returns 0 only if even the slowest candidate corrupts. */
+static int psram_calibrate(int boot){
 	uint32_t clk   = clock_get_hz(clk_sys);
 	uint32_t dfast = (clk + (2u*KF_BUS_HZ_MAX) - 1u) / (2u*KF_BUS_HZ_MAX);
 	uint32_t dslow = (clk + (2u*KF_BUS_HZ_MIN) - 1u) / (2u*KF_BUS_HZ_MIN);
@@ -235,9 +246,9 @@ static int psram_calibrate(void){
 	for(uint32_t div = dfast; div <= dslow; div++){
 		s_bus_hz = clk / (2u * div);
 		s_active = -1;                 /* force qarm to re-init the SM with this divider */
-		if(calib_block(0) && calib_sweep_chip()){ pass = div; break; }
+		if(calib_pass(boot)){ pass = div; break; }
 	}
-	if(!pass) return 0;
+	if(!pass){ s_bus_hz = clk / (2u * dslow); s_active = -1; return 0; }
 	uint32_t mdiv = (pass + 1u <= dslow) ? pass + 1u : pass;   /* one notch of margin */
 	s_bus_hz = clk / (2u * mdiv);
 	s_active = -1;
@@ -345,7 +356,7 @@ uint32_t kf_psram_init(void){
 	   Re-runs on every later clk_sys change via kf_psram_reclock(). Fail-hard only if
 	   even the slowest candidate corrupts. ---- */
 	s_size = KF_PSRAM_SIZE;                          /* enable read/write for the test */
-	if(!psram_calibrate()){ s_size = 0; return 0; }  /* nothing worked -> treat as absent */
+	if(!psram_calibrate(1)){ s_size = 0; return 0; } /* full-chip; nothing worked -> absent */
 
 	s_brk = 0;
 	return s_size;
