@@ -35,8 +35,10 @@
    test, so the board picks its own safe ceiling instead of us hard-coding one. The
    chip is rated 133 MHz; the real limit is the PicoCalc's GPIO traces + the PIO
    read sample point (bit-banged, so no hardware RX-delay trim like the QMI flash). */
-#define KF_BUS_HZ_MAX    60000000u   /* fastest divider we'll try (÷-rounded to achievable);
-                                        at 360 MHz clk_sys: ÷3=60, ÷4=45, ÷5=36, ÷6=30 */
+#define KF_BUS_HZ_MAX    45000000u   /* fastest divider we'll try (÷-rounded to achievable).
+                                        At the 360 MHz UI clock: ÷4=45 passes calibration, the
+                                        one-notch margin settles on ÷5=36 — this board's proven
+                                        stable ceiling (÷3=60 fails). ÷6=30 is the slow fallback. */
 #define KF_BUS_HZ_MIN    12000000u   /* slowest we'll accept before declaring the chip dead */
 #define KF_PSRAM_RESERVE 0x10000u    /* top 64 KB withheld from the allocator: the per-clock
                                         recalibrator's scratch, never holds live data */
