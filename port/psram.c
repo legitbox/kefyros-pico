@@ -327,6 +327,18 @@ uint32_t kf_psram_init(void){
 	s_active = -1;
 	pio_gpio_init(s_pio, KF_PSRAM_SIO2);            /* SIO2/3 now PIO-driven for quad */
 	pio_gpio_init(s_pio, KF_PSRAM_SIO3);
+
+	/* Bypass the PIO input synchronizer on the 4 data lines. The synchronizer
+	   re-samples inputs in the clk_sys domain, so the effective read sample point
+	   depends on the clkdiv PHASE — which differs between a full pio_sm_init (resets
+	   the phase) and our restart path (keeps it). That made the FIRST read after a
+	   write (program switch -> full init) land on a marginal phase and glitch one bit,
+	   while back-to-back reads stayed clean (why wallpaper worked but the browser, which
+	   interleaves writes, corrupted). Bypassed, sampling is purely SCK-relative and thus
+	   phase-independent. Safe here: source-synchronous (we clock it) sampled mid-window. */
+	s_pio->input_sync_bypass |= (1u<<KF_PSRAM_SIO0) | (1u<<KF_PSRAM_SIO1)
+	                          | (1u<<KF_PSRAM_SIO2) | (1u<<KF_PSRAM_SIO3);
+
 	qr_set_dummy(QSPI_DUMMY);
 
 	/* ---- Stage 3: auto-calibrate the bus speed (fastest reliable at this clk_sys).
