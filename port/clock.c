@@ -41,6 +41,7 @@
 
 #include "port/board.h"
 #include "port/clock.h"
+#include "port/lcdspi/lcdspi.h"   /* LCD_SPI_SPEED — keep the reclock in sync with the crank */
 
 /* re-derived after a clk_sys change (defined in psram.c / disp.c) */
 extern void kf_psram_reclock(void);
@@ -115,7 +116,7 @@ uint32_t clock_sys_mhz(void){
 static uint32_t s_cur_khz = KF_SYS_KHZ;
 
 static void reclock_peripherals(void){
-	spi_set_baudrate(KF_LCD_SPI, 25000000u);    /* LCD  (LCD_SPI_SPEED)        */
+	spi_set_baudrate(KF_LCD_SPI, LCD_SPI_SPEED); /* LCD — honour the cranked panel clock  */
 	spi_set_baudrate(KF_SD_SPI,  24000000u);    /* SD   (CONF_SD_TRX_FREQUENCY)*/
 	uart_set_baudrate(KF_KBD_UART, KF_KBD_BAUD);
 	kf_psram_reclock();                          /* PSRAM PIO bus back to ~18 MHz */

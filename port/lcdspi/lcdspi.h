@@ -4,8 +4,10 @@
 #include <hardware/spi.h>
 
 //#define LCD_SPI_SPEED   6000000
-#define LCD_SPI_SPEED   25000000
-//#define LCD_SPI_SPEED 50000000
+//#define LCD_SPI_SPEED 25000000
+#define LCD_SPI_SPEED   50000000    /* cranked: rounds to ~45 MHz at the 360 MHz UI clock
+                                       (GB-proven stable). ~1.8x the old 25 MHz. The Settings
+                                       "Screen Test" can push higher live to find the ceiling. */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI

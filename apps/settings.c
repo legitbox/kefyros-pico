@@ -8,9 +8,15 @@
 #include "../kefyros.h"
 #include "../ui/theme.h"
 #include "../ui/deskconf.h"
+#include "../port/disp.h"            /* disp_pause_core1 / disp_resume_core1 */
+#include "lcdspi/lcdspi.h"          /* direct panel blit + LCD_SPI_SPEED */
+#include "hardware/spi.h"           /* spi_set_baudrate / spi_get_baudrate */
 #include "pico/time.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern char font8x8_basic[128][8];   /* ui/font8x8.c */
 
 static lv_obj_t *scr, *lbl_bat, *lbl_clk, *lbl_test;
 static lv_timer_t *stimer;     /* tied to scr's lifetime (deleted with the screen) */
@@ -111,6 +117,83 @@ static void act_burn(lv_event_t *e){ (void)e;
 	}
 }
 
+/* --- Screen test: full-screen direct-SPI blit loop. Shows live FPS + the actual panel
+   SPI clock, lets you crank the clock with UP/DOWN to find the corruption ceiling, ESC
+   quits. Scrolling colour bars make tearing/corruption obvious. Takes over the panel
+   (Core1 parked, grab-mode keys) and hands it back to LVGL on exit. --- */
+static void st_putc(int x, int y, unsigned char ch, int scale, int fg, int bg){
+	unsigned char t[8];
+	const unsigned char *g = (const unsigned char*)font8x8_basic[ch & 0x7f];
+	for(int i = 0; i < 8; i++){            /* font8x8 is LSB-first; draw_bitmap_spi wants MSB-first */
+		unsigned char v = g[i], r = 0;
+		for(int b = 0; b < 8; b++) if((v >> b) & 1) r |= (unsigned char)(1 << (7 - b));
+		t[i] = r;
+	}
+	draw_bitmap_spi(x, y, 8, 8, scale, fg, bg, t);
+}
+static void st_puts(int x, int y, const char *s, int scale, int fg, int bg){
+	for(; *s; s++, x += 8*scale) st_putc(x, y, (unsigned char)*s, scale, fg, bg);
+}
+
+static void act_screentest(lv_event_t *e){ (void)e;
+	static const uint8_t pal[6][3] = {
+		{255,255,255},{255,0,0},{0,255,0},{0,0,255},{255,255,0},{0,255,255}
+	};
+	static uint8_t row[LCD_W * 3];        /* one RGB888 scanline (static: off the stack) */
+	lv_obj_t *back = lv_screen_active();
+
+	kf_grab_input(1);                     /* raw keys to us, not LVGL */
+	disp_pause_core1();                   /* take the panel from the flush pump */
+	uint32_t want = LCD_SPI_SPEED;
+	spi_set_baudrate(Pico_LCD_SPI_MOD, want);
+
+	int frame = 0, fps = 0, fcount = 0, running = 1;
+	uint64_t t_fps = time_us_64();
+	while(running){
+		uint8_t kst, key; uart_poll();
+		while(uart_pop_key(&kst, &key)){
+			if(key == DK_ESC || key == DK_BREAK){ running = 0; break; }
+			if(kst == KS_PRESS && key == DK_UP){
+				want += 5000000u; if(want > 90000000u) want = 90000000u;
+				spi_set_baudrate(Pico_LCD_SPI_MOD, want);
+			} else if(kst == KS_PRESS && key == DK_DOWN){
+				if(want > 10000000u) want -= 5000000u;
+				spi_set_baudrate(Pico_LCD_SPI_MOD, want);
+			}
+		}
+		if(!running) break;
+
+		/* build one scrolling-bar scanline, then push it to the whole panel */
+		for(int x = 0; x < LCD_W; x++){
+			const uint8_t *c = pal[((x + frame) / 24) % 6];
+			row[x*3] = c[0]; row[x*3+1] = c[1]; row[x*3+2] = c[2];
+		}
+		define_region_spi(0, 0, LCD_W - 1, LCD_H - 1, 1);
+		for(int y = 0; y < LCD_H; y++) spi_write_fast(Pico_LCD_SPI_MOD, row, LCD_W * 3);
+		spi_finish(Pico_LCD_SPI_MOD);
+		lcd_spi_raise_cs();
+
+		char buf[48];
+		uint32_t mhz = spi_get_baudrate(Pico_LCD_SPI_MOD) / 1000000u;
+		snprintf(buf, sizeof buf, "SPI %lu MHz  FPS %d ", (unsigned long)mhz, fps);
+		st_puts(6, 6,  buf, 2, 0xffc94d, 0x000000);
+		st_puts(6, 28, "UP/DN speed   ESC quit", 1, 0xb6f000, 0x000000);
+
+		frame++; fcount++;
+		uint64_t now = time_us_64();
+		if(now - t_fps >= 500000ull){
+			fps = (int)((uint64_t)fcount * 1000000ull / (now - t_fps));
+			fcount = 0; t_fps = now;
+		}
+		kf_net_poll();                /* keep WiFi/time alive like the GB loop does */
+	}
+
+	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);   /* restore the OS panel clock */
+	disp_resume_core1();
+	kf_grab_input(0);
+	lv_obj_invalidate(back);          /* force LVGL to repaint the settings screen */
+}
+
 static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
                          lv_event_cb_t cb, void *ud){
 	lv_obj_t *b = lv_list_add_button(list, NULL, txt);
@@ -163,6 +246,7 @@ void app_settings_open(void){
 	additem(list,g, "Keyboard Light +", act_bk2, (void*)(intptr_t)+1);
 	additem(list,g, "Keyboard Light -", act_bk2, (void*)(intptr_t)-1);
 	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
+	additem(list,g, "Screen Test",      act_screentest, NULL);
 	additem(list,g, "Power...",         act_power, NULL);
 
 	refresh_bat();
