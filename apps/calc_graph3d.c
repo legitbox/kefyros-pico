@@ -42,6 +42,7 @@ static double s_z[NG][NG];  static int s_ok[NG][NG];
 static double s_zmin, s_zmax, s_zlo, s_zhi;     /* data range + nice box range */
 static int    s_sx[NG][NG], s_sy[NG][NG];        /* per-frame projected screen coords */
 static double s_vd[NG][NG];                      /* per-frame vertex depth (for sorting) */
+static double s_nx[NG][NG], s_ny[NG][NG], s_nz[NG][NG];  /* normalised model coords (for normals) */
 static int    s_ord[NQ]; static double s_qd[NQ]; static int s_qn;   /* shaded quad order */
 
 /* view params set per frame by setup_view(), consumed by projw() */
@@ -86,9 +87,18 @@ static void blit_ch(int x,int y,char ch,uint16_t c){ if((unsigned char)ch>=128) 
 	const char *g=font8x8_basic[(int)ch]; for(int j=0;j<8;j++){ uint8_t b=(uint8_t)g[j]; for(int i=0;i<8;i++) if((b>>i)&1) px(x+i,y+j,c); } }
 static void blit_str(int x,int y,const char*s,uint16_t c){ for(;*s;s++,x+=6) blit_ch(x,y,*s,c); }
 
-static uint16_t shade(double t){ /* t in [0,1] -> dim amber .. hot */
+static uint16_t shade(double t){ /* t in [0,1] -> dim amber .. hot (wireframe) */
 	if(t<0)t=0; if(t>1)t=1;
 	int r=(int)(0xb8 + t*(0xff-0xb8)), g=(int)(0x86 + t*(0xc9-0x86)), b=(int)(0x0b + t*(0x4d-0x0b));
+	return RGB(r,g,b);
+}
+/* lit: the amber height-ramp modulated by a directional light (+ ambient) */
+static uint16_t shade_lit(double t, double inten){
+	if(t<0)t=0; if(t>1)t=1; if(inten<0)inten=0; if(inten>1.15)inten=1.15;
+	int r=(int)((0xb8 + t*(0xff-0xb8))*inten);
+	int g=(int)((0x86 + t*(0xc9-0x86))*inten);
+	int b=(int)((0x0b + t*(0x4d-0x0b))*inten);
+	if(r>255)r=255; if(g>255)g=255; if(b>255)b=255;
 	return RGB(r,g,b);
 }
 
@@ -193,6 +203,7 @@ static void render3(void){
 		s_sx[i][j]=(int)lround(GW/2 + xr*v_scl);
 		s_sy[i][j]=(int)lround(GH/2 - scr*v_scl);
 		s_vd[i][j]=yr*v_cb - nz*v_sb;            /* depth into the screen */
+		s_nx[i][j]=nx; s_ny[i][j]=ny; s_nz[i][j]=nz;   /* for face normals (lighting) */
 	}
 	if(shaded){
 		s_qn=0;
@@ -211,9 +222,20 @@ static void render3(void){
 		for(int k = 0; k < GW*cur_h; k++) strip[k] = C_BG;
 		draw_frame();                            /* gizmo + ground plane (behind the surface) */
 		if(shaded){
+			/* directional light in object (normalised) space, from above-front-right */
+			const double Lx=0.32, Ly=0.42, Lz=0.85;
 			for(int o=0;o<s_qn;o++){ int q=s_ord[o], i=q/(NG-1), j=q%(NG-1);
 				double az=(s_z[i][j]+s_z[i+1][j]+s_z[i][j+1]+s_z[i+1][j+1])*0.25;
-				uint16_t c=shade((az-s_zmin)/(2*zh+1e-9));
+				/* face normal from two edges (normalised model space) */
+				double ax=s_nx[i+1][j]-s_nx[i][j], ay=s_ny[i+1][j]-s_ny[i][j], aaz=s_nz[i+1][j]-s_nz[i][j];
+				double bx=s_nx[i][j+1]-s_nx[i][j], by=s_ny[i][j+1]-s_ny[i][j], bz=s_nz[i][j+1]-s_nz[i][j];
+				double nx=ay*bz-aaz*by, ny=aaz*bx-ax*bz, nz=ax*by-ay*bx;
+				double nl=sqrt(nx*nx+ny*ny+nz*nz); if(nl<1e-12) nl=1;
+				nx/=nl; ny/=nl; nz/=nl;
+				if(nz<0){ nx=-nx; ny=-ny; nz=-nz; }      /* up-facing (height field) */
+				double diff=nx*Lx+ny*Ly+nz*Lz; if(diff<0)diff=0;
+				double inten=0.32 + 0.78*diff;            /* ambient + diffuse */
+				uint16_t c=shade_lit((az-s_zmin)/(2*zh+1e-9), inten);
 				tri(s_sx[i][j],s_sy[i][j], s_sx[i+1][j],s_sy[i+1][j], s_sx[i+1][j+1],s_sy[i+1][j+1], c);
 				tri(s_sx[i][j],s_sy[i][j], s_sx[i+1][j+1],s_sy[i+1][j+1], s_sx[i][j+1],s_sy[i][j+1], c);
 			}
