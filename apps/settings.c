@@ -52,82 +52,63 @@ static void act_bk2(lv_event_t *e){ int d=(int)(intptr_t)lv_event_get_user_data(
  * screen — that local pwr_scr was never freed (a leak), and this is identical. */
 static void act_power(lv_event_t *e){ (void)e; kf_power_menu(); }
 
-/* --- PSRAM diagnostics (top-of-chip scratch window, clear of the bump-allocated
-   wallpaper/browser/music arenas which grow up from address 0). Both block for a
-   few tens of ms; fine for a manual button. --- */
-#define PS_SCRATCH   0x80000u        /* 512 KB test window at the top of PSRAM */
+/* --- PSRAM burn-in: combined throughput + integrity torture test. Hammers the WHOLE
+   free region (everything above the allocator high-water, so it won't touch the live
+   wallpaper/browser/music arenas) for ~2 s with a fresh pseudo-random pattern each pass,
+   write-all then read-verify-all, counting any corrupted byte. Reports MB pounded,
+   combined W+R throughput, pass count, and errors. Blocks (UI frozen) while it runs. --- */
+#define BURN_BUF   8192u
+#define BURN_US    2000000ull        /* ~2 second burn */
 
-/* Throughput: time a 256 KB write then a 256 KB read; report MB/s (integer math,
-   no %f). Quad QPI should land far above the old 1-bit ~2 MB/s. */
-static void act_memspeed(lv_event_t *e){ (void)e;
+static void act_burn(lv_event_t *e){ (void)e;
 	uint32_t sz = kf_psram_size();
-	if(!sz){ lv_label_set_text(lbl_test, "Speed: no PSRAM"); return; }
-	enum { BUF = 8192, ITERS = 32 };          /* 32 * 8 KB = 256 KB per phase */
-	uint8_t *buf = malloc(BUF);
-	if(!buf){ lv_label_set_text(lbl_test, "Speed: out of memory"); return; }
-	for(int i = 0; i < BUF; i++) buf[i] = (uint8_t)(i*7 + 3);
-	uint32_t base = sz - PS_SCRATCH;
+	if(!sz){ lv_label_set_text(lbl_test, "Burn: no PSRAM"); return; }
+	uint8_t *buf = malloc(BURN_BUF);
+	if(!buf){ lv_label_set_text(lbl_test, "Burn: out of memory"); return; }
 
+	uint32_t base = kf_psram_brk();           /* free region: [brk, size) */
+	if(base > sz) base = 0;
+	uint32_t span = (sz - base) - ((sz - base) % BURN_BUF);
+	if(!span){ free(buf); lv_label_set_text(lbl_test, "Burn: no free PSRAM"); return; }
+
+	uint64_t total = 0; uint32_t errors = 0, first_at = 0, passes = 0; uint8_t fe = 0, fg = 0;
 	uint64_t t0 = time_us_64();
-	for(int k = 0; k < ITERS; k++) kf_psram_write(base + (uint32_t)k*BUF, buf, BUF);
-	uint64_t t1 = time_us_64();
-	for(int k = 0; k < ITERS; k++) kf_psram_read (base + (uint32_t)k*BUF, buf, BUF);
-	uint64_t t2 = time_us_64();
+	while(time_us_64() - t0 < BURN_US){
+		uint32_t pseed = 0x9E3779B9u ^ (passes * 2654435761u);     /* new pattern each pass */
+		for(uint32_t off = 0; off < span; off += BURN_BUF){        /* write the whole region */
+			uint32_t s = pseed ^ off;
+			for(uint32_t i = 0; i < BURN_BUF; i++){ s = s*1664525u + 1013904223u; buf[i] = (uint8_t)(s >> 24); }
+			kf_psram_write(base + off, buf, BURN_BUF);
+		}
+		total += span;
+		for(uint32_t off = 0; off < span; off += BURN_BUF){        /* read it ALL back, verify */
+			uint32_t s = pseed ^ off;
+			kf_psram_read(base + off, buf, BURN_BUF);
+			for(uint32_t i = 0; i < BURN_BUF; i++){
+				s = s*1664525u + 1013904223u;
+				if(buf[i] != (uint8_t)(s >> 24)){
+					if(!errors){ first_at = base + off + i; fe = (uint8_t)(s >> 24); fg = buf[i]; }
+					errors++;
+				}
+			}
+		}
+		total += span;
+		passes++;
+	}
+	uint64_t dt = time_us_64() - t0;
 	free(buf);
 
-	uint32_t total = (uint32_t)ITERS * BUF;   /* bytes/us == MB/s (decimal) */
-	uint32_t w10 = (t1>t0) ? (uint32_t)((uint64_t)total*10u/(t1-t0)) : 0;
-	uint32_t r10 = (t2>t1) ? (uint32_t)((uint64_t)total*10u/(t2-t1)) : 0;
-	lv_label_set_text_fmt(lbl_test, "Speed: W %u.%u  R %u.%u MB/s",
-		w10/10, w10%10, r10/10, r10%10);
-	lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
-}
-
-static void prng_fill(uint8_t *b, uint32_t seed){
-	uint32_t s = 0x9E3779B9u ^ seed;
-	for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; b[i] = (uint8_t)(s >> 24); }
-}
-
-/* DIAGNOSTIC bus check. Write+read each 1 KB PRNG block; on the first wrong byte,
-   re-read that SAME block 8x WITHOUT rewriting it, to tell write-side from read-side:
-   - "stored" : every re-read returns the same wrong value  -> the WRITE latched wrong
-                (simultaneous-switching noise on the output lines).
-   - "Nx/vary": re-reads disagree / sometimes correct        -> intermittent READ sample.
-   Reports addr, expected vs got, bit-xor (which SIO line), and the re-read verdict. */
-static void act_memcheck(lv_event_t *e){ (void)e;
-	uint32_t sz = kf_psram_size();
-	if(!sz){ lv_label_set_text(lbl_test, "Check: no PSRAM"); return; }
-	uint8_t *w = malloc(1024), *r = malloc(1024);
-	if(!w || !r){ free(w); free(r); lv_label_set_text(lbl_test, "Check: out of memory"); return; }
-	uint32_t base = sz - PS_SCRATCH;
-
-	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
-		prng_fill(w, base + off);
-		kf_psram_write(base + off, w, 1024);
-		memset(r, 0xA5, 1024);
-		kf_psram_read(base + off, r, 1024);
-		int first = -1;
-		for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ first = i; break; }
-		if(first < 0) continue;
-
-		uint32_t a = base + off + first;
-		uint8_t  exp = w[first], got = r[first];
-		int wrong = 0, vary = 0;
-		for(int k = 0; k < 8; k++){               /* re-read same block, no rewrite */
-			memset(r, 0xA5, 1024);
-			kf_psram_read(base + off, r, 1024);
-			if(r[first] != exp){ wrong++; if(r[first] != got) vary = 1; }
-		}
-		free(w); free(r);
-		lv_label_set_text_fmt(lbl_test, "@%06X e%02X g%02X ^%02X %s%d/8",
-			(unsigned)a, exp, got, (unsigned)(exp ^ got),
-			vary ? "vary " : (wrong == 8 ? "stored " : "rd "), wrong);
+	uint32_t mbps10 = dt ? (uint32_t)(total * 10u / dt) : 0;       /* bytes/us *10 = MB/s.1 */
+	uint32_t mb = (uint32_t)(total / (1024u*1024u));
+	if(errors){
+		lv_label_set_text_fmt(lbl_test, "BURN: %u ERR @%06X e%02X g%02X (%uMB)",
+			(unsigned)errors, (unsigned)first_at, fe, fg, (unsigned)mb);
 		lv_obj_set_style_text_color(lbl_test, lv_color_hex(0xe03c32), 0);
-		return;
+	} else {
+		lv_label_set_text_fmt(lbl_test, "BURN OK: %uMB %u.%u MB/s %up 0err",
+			(unsigned)mb, mbps10/10, mbps10%10, (unsigned)passes);
+		lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
 	}
-	free(w); free(r);
-	lv_label_set_text(lbl_test, "Check: OK (512 KB)");
-	lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
 }
 
 static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
@@ -181,8 +162,7 @@ void app_settings_open(void){
 	additem(list,g, "LCD Light -",      act_bkl, (void*)(intptr_t)-1);
 	additem(list,g, "Keyboard Light +", act_bk2, (void*)(intptr_t)+1);
 	additem(list,g, "Keyboard Light -", act_bk2, (void*)(intptr_t)-1);
-	additem(list,g, "PSRAM Speed Test", act_memspeed, NULL);
-	additem(list,g, "PSRAM Bus Check",  act_memcheck, NULL);
+	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
 	additem(list,g, "Power...",         act_power, NULL);
 
 	refresh_bat();

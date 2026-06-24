@@ -101,6 +101,7 @@ int  kfs_ready(void);                /* 1 if the card mounted */
 uint32_t kf_psram_init(void);                         /* probe + self-test; returns bytes (0 = absent) */
 uint32_t kf_psram_size(void);                         /* detected size (0 if none) */
 uint32_t kf_psram_bus_hz(void);                       /* current QPI SCK in Hz (0 if absent) */
+uint32_t kf_psram_brk(void);                          /* allocator high-water; [brk,size) is free */
 void     kf_psram_read(uint32_t addr, void *buf, uint32_t n);
 void     kf_psram_write(uint32_t addr, const void *buf, uint32_t n);
 uint32_t kf_psram_alloc(uint32_t n);                  /* bump-allocate a blob; 0xFFFFFFFF if full */

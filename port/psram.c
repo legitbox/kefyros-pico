@@ -220,6 +220,7 @@ void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 }
 
 uint32_t kf_psram_size(void){ return s_size; }
+uint32_t kf_psram_brk(void){ return s_brk; }   /* allocator high-water: [brk,size) is free */
 
 /* dumb bump allocator for big long-lived blobs (wallpaper, browser page). The top
    KF_PSRAM_RESERVE is withheld so the per-clock recalibrator's scratch never collides
