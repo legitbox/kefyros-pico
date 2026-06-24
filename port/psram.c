@@ -136,8 +136,12 @@ static void qarm(uint off){
 	s_active = (int)off;
 }
 
-/* one quad transfer confined to a single 1 KB page */
-static void qread_page(uint32_t addr, uint8_t *rd, int n){
+/* Set after a write: the NEXT read must throw away one sacrificial transaction first
+   (RP2350-E9, see qread_page). */
+static int s_post_write = 0;
+
+/* one quad READ transaction, confined to a single 1 KB page */
+static void qread_raw(uint32_t addr, uint8_t *rd, int n){
 	qarm(s_qr_off);
 	cs_lo();
 	pio_sm_put_blocking(s_pio, s_sm, (0xEBu << 24) | (addr & 0xFFFFFFu)); /* cmd + addr   */
@@ -145,6 +149,20 @@ static void qread_page(uint32_t addr, uint8_t *rd, int n){
 	for(int i = 0; i < n; i++)
 		rd[i] = (uint8_t)(pio_sm_get_blocking(s_pio, s_sm) & 0xFF);
 	cs_hi();
+}
+static void qread_page(uint32_t addr, uint8_t *rd, int n){
+	/* RP2350-E9 workaround. After a write we drove these lines push-pull to a rail;
+	   released for the next read's turnaround they float and the input pad latches at
+	   ~2 V (erratum E9), corrupting the FIRST read after a write. The SECOND read is
+	   clean (the chip drove the lines in between) — proven by the diagnostic's "rd 0/8".
+	   So burn one throwaway read to get back into clean read rhythm. Pure reads (e.g.
+	   wallpaper streaming) never hit this — the flag is only set by a preceding write. */
+	if(s_post_write){
+		uint8_t junk;
+		qread_raw(addr, &junk, 1);
+		s_post_write = 0;
+	}
+	qread_raw(addr, rd, n);
 }
 static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	qarm(s_qw_off);
@@ -159,6 +177,7 @@ static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	}
 	pio_sm_get_blocking(s_pio, s_sm);                  /* completion barrier (last nibble clocked) */
 	cs_hi();
+	s_post_write = 1;                                  /* next read must prime (E9) */
 }
 
 static void qchunked(int is_write, uint32_t addr, const uint8_t *wr, uint8_t *rd, uint32_t n){
