@@ -158,11 +158,11 @@ static void qread_page(uint32_t addr, uint8_t *rd, int n){
 	   So burn one throwaway read to get back into clean read rhythm. Pure reads (e.g.
 	   wallpaper streaming) never hit this — the flag is only set by a preceding write. */
 	if(s_post_write){
-		uint8_t junk;
-		qread_raw(addr, &junk, 1);
+		qread_raw(addr, rd, n);    /* sacrificial FULL-size read (a 1-byte one doesn't reach
+		                              the glitch position; the corruption is mid-stream) */
 		s_post_write = 0;
 	}
-	qread_raw(addr, rd, n);
+	qread_raw(addr, rd, n);        /* real read — clean now that the lines are in read rhythm */
 }
 static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	qarm(s_qw_off);
