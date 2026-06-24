@@ -37,13 +37,19 @@ static cnode    *fn3;
 static double    yaw=0.7, pitch=0.45, zoom=1.0;
 static double    X0=-5, X1=5, Y0=-5, Y1=5;
 
-/* cached surface (recomputed only when the function changes — not while moving) */
-static double s_z[NG][NG];  static int s_ok[NG][NG];
+/* cached surface (recomputed only when the function changes — not while moving).
+   These working buffers total ~42 KB. They used to be static .bss — permanently
+   resident, they starved the shared SRAM heap so that other apps' allocations failed
+   (notably the music player's 32 KB audio ring malloc, which left playback stuck on
+   the play button with no sound). They now live in ONE heap arena allocated on open
+   (g3d_alloc) and freed on close (g3d_free); pointer-to-array types keep s_z[i][j]. */
+static double (*s_z)[NG];  static int (*s_ok)[NG];
 static double s_zmin, s_zmax, s_zlo, s_zhi;     /* data range + nice box range */
-static int    s_sx[NG][NG], s_sy[NG][NG];        /* per-frame projected screen coords */
-static double s_vd[NG][NG];                      /* per-frame vertex depth (for sorting) */
-static double s_nx[NG][NG], s_ny[NG][NG], s_nz[NG][NG];  /* normalised model coords (for normals) */
-static int    s_ord[NQ]; static double s_qd[NQ]; static int s_qn;   /* shaded quad order */
+static int    (*s_sx)[NG], (*s_sy)[NG];          /* per-frame projected screen coords */
+static double (*s_vd)[NG];                        /* per-frame vertex depth (for sorting) */
+static double (*s_nx)[NG], (*s_ny)[NG], (*s_nz)[NG];  /* normalised model coords (for normals) */
+static int    *s_ord; static double *s_qd; static int s_qn;   /* shaded quad order */
+static void   *g3d_arena;                         /* single heap block backing all of the above */
 
 /* view params set per frame by setup_view(), consumed by projw() */
 static double v_cx,v_cy,v_cz,v_hx,v_hy,v_hz,v_scl,v_ca,v_sa,v_cb,v_sb;
@@ -284,10 +290,41 @@ int calc_graph3d_tick(void){
 	return 1;
 }
 
+/* Carve every big per-vertex / per-quad buffer out of one heap block. Doubles are laid
+   down first (their block sizes are all multiples of 8, so each stays 8-aligned); the
+   int blocks follow. Freed in full by g3d_free() when the plotter closes. */
+static int g3d_alloc(void){
+	if(g3d_arena) return 1;
+	const size_t dbl = sizeof(double[NG][NG]);   /* one NGxNG double grid */
+	const size_t ib  = sizeof(int[NG][NG]);      /* one NGxNG int grid    */
+	size_t need = dbl*5 + sizeof(double[NQ])      /* s_z,s_vd,s_nx,s_ny,s_nz + s_qd */
+	            + ib*3  + sizeof(int[NQ]);        /* s_ok,s_sx,s_sy        + s_ord  */
+	char *p = malloc(need);
+	if(!p) return 0;
+	g3d_arena = p;
+	s_z =(double(*)[NG])p; p+=dbl;
+	s_vd=(double(*)[NG])p; p+=dbl;
+	s_nx=(double(*)[NG])p; p+=dbl;
+	s_ny=(double(*)[NG])p; p+=dbl;
+	s_nz=(double(*)[NG])p; p+=dbl;
+	s_qd=(double*)p;       p+=sizeof(double[NQ]);
+	s_ok=(int(*)[NG])p;    p+=ib;
+	s_sx=(int(*)[NG])p;    p+=ib;
+	s_sy=(int(*)[NG])p;    p+=ib;
+	s_ord=(int*)p;
+	return 1;
+}
+static void g3d_free(void){
+	free(g3d_arena); g3d_arena=NULL;
+	s_z=NULL; s_vd=NULL; s_nx=NULL; s_ny=NULL; s_nz=NULL; s_qd=NULL;
+	s_ok=NULL; s_sx=NULL; s_sy=NULL; s_ord=NULL;
+}
+
 void calc_graph3d_open(const cnode *f){
 	if(!f) return;
 	if(!strip) strip = malloc((size_t)GW*STRIP_H*2);   /* one strip; freed on exit */
 	if(!strip){ calc_note("out of memory"); return; }
+	if(!g3d_alloc()){ free(strip); strip=NULL; calc_note("out of memory"); return; }
 	cn_free(fn3); fn3=cn_clone(f);
 	yaw=0.7; pitch=0.45; zoom=1.0; vyaw=vpitch=vzoomr=0; held=0; auto_rot=0;
 
@@ -308,7 +345,7 @@ void calc_graph3d_key(uint8_t key, int mods, int pressed){
 	if(pressed){
 		switch(key){
 		case DK_ESC: case DK_BREAK:
-			cn_free(fn3); fn3=NULL; free(strip); strip=NULL;
+			cn_free(fn3); fn3=NULL; free(strip); strip=NULL; g3d_free();
 			held=0; vyaw=vpitch=vzoomr=0; auto_rot=0;
 			lv_obj_delete(scr3); scr3=NULL; calc_show_worksheet(); return;
 		case DK_F1:           shaded     = !shaded;     render3(); return;   /* F1 */
