@@ -584,12 +584,14 @@ void calc_poll(void){
 	if(!active) return;
 	uint8_t st, key;
 	while(uart_pop_key(&st, &key)){
-		if(st == KS_RELEASE) continue;
 		int mods = uart_mods();
+		int pressed = (st != KS_RELEASE);
+		/* the 2D/3D plotters animate, so they need key-up too (held-key tracking) */
+		if(mode==CMODE_GRAPH){ calc_graph_key(key, mods, pressed);   continue; }
+		if(mode==CMODE_3D){    calc_graph3d_key(key, mods, pressed); continue; }
+		if(st == KS_RELEASE) continue;
 		/* a full-screen viewer owns all keys while active */
-		if(mode==CMODE_GRAPH){ calc_graph_key(key, mods);   continue; }
 		if(mode==CMODE_TABLE){ calc_table_key(key, mods);   continue; }
-		if(mode==CMODE_3D){    calc_graph3d_key(key, mods); continue; }
 		switch(screen){
 		case SCR_HOME:    home_key(key, mods);      break;
 		case SCR_SCRATCH: scratch_key(key, mods);   break;
@@ -599,6 +601,9 @@ void calc_poll(void){
 		case SCR_TABLE:   tableform_key(key, mods); break;
 		}
 	}
+	/* drive smooth pan/rotate animation each superloop pass */
+	if(mode==CMODE_GRAPH)   calc_graph_tick();
+	else if(mode==CMODE_3D) calc_graph3d_tick();
 }
 
 void app_calc_open(void){

@@ -6,6 +6,7 @@
 #include "calc.h"
 #include "disp.h"                 /* disp_pause_core1 / disp_resume_core1 */
 #include "lcdspi/lcdspi.h"        /* draw_buffer_spi (direct panel blit) */
+#include "pico/time.h"            /* time_us_64 */
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -37,6 +38,12 @@ static int       nfuncs, gkind;
 static double    xmin, xmax, ymin, ymax;     /* world window */
 static double    pmin, pmax;                  /* parameter range (param/polar) */
 static int       trace_on, trace_col;
+
+/* velocity-driven pan/zoom (smooth, accelerated) — active only when not tracing */
+static double    vpx, vpy, vzoomr;            /* pan vel (windows/s), zoom rate (1/s) */
+enum { H_L=1, H_R=2, H_U=4, H_D=8, H_ZI=16, H_ZO=32 };
+static uint8_t   held;
+static uint64_t  last_us;
 
 static const uint16_t COL[MAXF] = {
 	RGB(0xf0,0xa5,0x00), RGB(0xb6,0xf0,0x00), RGB(0x4a,0xc8,0xe0), RGB(0xe0,0x6c,0x4a) };
@@ -169,9 +176,11 @@ void calc_graph_2d(cnode **f, int nf, int kind){
 	lv_obj_set_style_pad_all(gscr,0,0); lv_obj_set_style_bg_color(gscr,lv_color_black(),0);
 	lv_obj_remove_flag(gscr, LV_OBJ_FLAG_SCROLLABLE);
 
+	vpx=vpy=vzoomr=0; held=0;
 	calc_set_mode(CMODE_GRAPH);
 	lv_screen_load(gscr);
 	lv_refr_now(lv_display_get_default());   /* flush the black bg before we paint over it */
+	last_us = time_us_64();
 	redraw();
 }
 
@@ -179,24 +188,70 @@ static void zoom(double f){
 	double cx=(xmin+xmax)/2, cy=(ymin+ymax)/2, hx=(xmax-xmin)/2*f, hy=(ymax-ymin)/2*f;
 	xmin=cx-hx; xmax=cx+hx; ymin=cy-hy; ymax=cy+hy;
 }
-void calc_graph_key(uint8_t key, int mods){
+static double vel_step(double v, int dir, double acc, double vmax, double fric, double dt){
+	if(dir){ v += dir*acc*dt; if(v>vmax)v=vmax; if(v<-vmax)v=-vmax; }
+	else { double d=fric*dt; if(v>0){ v-=d; if(v<0)v=0; } else if(v<0){ v+=d; if(v>0)v=0; } }
+	return v;
+}
+
+void calc_graph_key(uint8_t key, int mods, int pressed){
 	(void)mods;
-	double pw=(xmax-xmin)*0.12, ph=(ymax-ymin)*0.12;
+	if(pressed){
+		switch(key){
+		case DK_ESC: case DK_F1+4: case DK_BREAK:
+			for(int i=0;i<MAXF;i++){ cn_free(funcs[i]); funcs[i]=NULL; }
+			free(strip); strip=NULL; held=0; vpx=vpy=vzoomr=0;
+			lv_obj_delete(gscr); gscr=NULL;
+			calc_show_worksheet(); return;
+		case 't': case 'T': trace_on=!trace_on; trace_col=GW/2; held=0; vpx=vpy=vzoomr=0; redraw(); return;
+		case 'r': case 'R': xmin=-10;xmax=10;ymin=-10;ymax=10; trace_on=0; held=0; vpx=vpy=vzoomr=0; redraw(); return;
+		}
+	}
+	/* trace mode keeps the old discrete stepping (cursor + manual y-pan) */
+	if(trace_on){
+		if(!pressed) return;
+		double ph=(ymax-ymin)*0.12;
+		switch(key){
+		case DK_LEFT:  if(trace_col>0)    trace_col--; break;
+		case DK_RIGHT: if(trace_col<GW-1) trace_col++; break;
+		case DK_UP:    ymin+=ph; ymax+=ph; break;
+		case DK_DOWN:  ymin-=ph; ymax-=ph; break;
+		default: return;
+		}
+		redraw(); return;
+	}
+	/* free-roam: arrows pan, +/- zoom — all velocity-driven (see calc_graph_tick) */
+	uint8_t bit=0;
 	switch(key){
-	case DK_ESC: case DK_F1+4: case DK_BREAK:
-		for(int i=0;i<MAXF;i++){ cn_free(funcs[i]); funcs[i]=NULL; }
-		free(strip); strip=NULL;
-		lv_obj_delete(gscr); gscr=NULL;
-		calc_show_worksheet(); return;
-	case DK_LEFT:  if(trace_on){ if(trace_col>0)trace_col--; } else { xmin-=pw; xmax-=pw; } break;
-	case DK_RIGHT: if(trace_on){ if(trace_col<GW-1)trace_col++; } else { xmin+=pw; xmax+=pw; } break;
-	case DK_UP:    ymin+=ph; ymax+=ph; break;
-	case DK_DOWN:  ymin-=ph; ymax-=ph; break;
-	case '+': case '=': zoom(0.8); break;
-	case '-': case '_': zoom(1.25); break;
-	case 't': case 'T': trace_on=!trace_on; trace_col=GW/2; break;
-	case 'r': case 'R': xmin=-10;xmax=10;ymin=-10;ymax=10; trace_on=0; break;
+	case DK_LEFT:  bit=H_L;  break;
+	case DK_RIGHT: bit=H_R;  break;
+	case DK_UP:    bit=H_U;  break;
+	case DK_DOWN:  bit=H_D;  break;
+	case '+': case '=': bit=H_ZI; break;
+	case '-': case '_': bit=H_ZO; break;
 	default: return;
 	}
+	if(pressed) held |= bit; else held &= (uint8_t)~bit;
+}
+
+/* per-frame integrate + redraw; returns 1 while animating (called from calc_poll) */
+int calc_graph_tick(void){
+	if(!gscr || trace_on) return 0;
+	uint64_t now = time_us_64();
+	double dt = (double)(now - last_us) / 1e6; last_us = now;
+	if(dt <= 0) return 0; if(dt > 0.05) dt = 0.05;
+
+	int dx = ((held&H_R)?1:0) - ((held&H_L)?1:0);
+	int dy = ((held&H_U)?1:0) - ((held&H_D)?1:0);
+	int dz = ((held&H_ZI)?1:0) - ((held&H_ZO)?1:0);
+	vpx    = vel_step(vpx,    dx, 4.0, 1.6, 6.0, dt);
+	vpy    = vel_step(vpy,    dy, 4.0, 1.6, 6.0, dt);
+	vzoomr = vel_step(vzoomr, dz, 4.0, 2.0, 6.0, dt);
+	if(vpx==0 && vpy==0 && vzoomr==0) return 0;
+
+	double mx = vpx*(xmax-xmin)*dt, my = vpy*(ymax-ymin)*dt;
+	xmin+=mx; xmax+=mx; ymin+=my; ymax+=my;
+	if(vzoomr) zoom(exp(-vzoomr*dt));      /* +zoom (ZI) shrinks the window */
 	redraw();
+	return 1;
 }

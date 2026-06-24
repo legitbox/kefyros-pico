@@ -69,7 +69,8 @@ void calc_note(const char *s);             /* append an amber note line to histo
 enum { GK_CARTESIAN = 0, GK_PARAM = 1, GK_POLAR = 2 };
 /* funcs are cloned by the grapher (caller keeps ownership of its array). */
 void calc_graph_2d(cnode **funcs, int nf, int kind);
-void calc_graph_key(uint8_t key, int mods);
+void calc_graph_key(uint8_t key, int mods, int pressed);   /* pressed: 1=down 0=up */
+int  calc_graph_tick(void);                                /* per-frame pan/zoom integrate */
 
 /* ===================== tables (calc_table.c) ===================== */
 void calc_table_open(const cnode *f, double start, double step);
@@ -77,7 +78,8 @@ void calc_table_key(uint8_t key, int mods);
 
 /* ===================== 3D surface (calc_graph3d.c) ===================== */
 void calc_graph3d_open(const cnode *f);    /* z = f(x,y) */
-void calc_graph3d_key(uint8_t key, int mods);
+void calc_graph3d_key(uint8_t key, int mods, int pressed); /* pressed: 1=down 0=up */
+int  calc_graph3d_tick(void);                              /* per-frame rotate/zoom integrate */
 
 /* ===================== symbolic (calc_sym.c) ===================== */
 cnode *calc_diff(const cnode *n, const char *var);
