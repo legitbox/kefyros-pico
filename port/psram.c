@@ -44,6 +44,8 @@
 
 static int psram_calibrate(int boot);   /* fwd: fastest reliable divider at the CURRENT clk_sys */
 
+#define KF_SIO_MASK ((1u<<KF_PSRAM_SIO0)|(1u<<KF_PSRAM_SIO1)|(1u<<KF_PSRAM_SIO2)|(1u<<KF_PSRAM_SIO3))
+
 static PIO  s_pio;
 static int  s_sm = -1;
 static uint s_qr_off, s_qw_off;      /* loaded offsets of the quad read/write programs   */
@@ -141,6 +143,16 @@ static void qarm(uint off){
    one call run back-to-back and stay clean. */
 static int s_prime = 0;
 
+/* RP2350-E9 root mitigation: between transactions, hold the 4 SIO lines DRIVEN (output,
+   high) instead of letting them float. A floating input pad latches at ~2 V (E9) and the
+   next read misreads a bit; keeping them out of the mid-rail zone during every idle gap
+   stops the latch from ever forming. Injected on the parked SM; the next qarm re-arms it,
+   and the read program drives cmd/addr over this before any data, so no contention. */
+static void park_lines_driven(void){
+	pio_sm_set_pins_with_mask(s_pio, s_sm, KF_SIO_MASK, KF_SIO_MASK);     /* value = high */
+	pio_sm_set_pindirs_with_mask(s_pio, s_sm, KF_SIO_MASK, KF_SIO_MASK);  /* dir = output */
+}
+
 /* one quad READ transaction, confined to a single 1 KB page */
 static void qread_raw(uint32_t addr, uint8_t *rd, int n){
 	qarm(s_qr_off);
@@ -150,6 +162,7 @@ static void qread_raw(uint32_t addr, uint8_t *rd, int n){
 	for(int i = 0; i < n; i++)
 		rd[i] = (uint8_t)(pio_sm_get_blocking(s_pio, s_sm) & 0xFF);
 	cs_hi();
+	park_lines_driven();   /* don't leave the lines floating (E9) */
 }
 static void qread_page(uint32_t addr, uint8_t *rd, int n){
 	/* RP2350-E9 workaround. Whenever the SIO lines float long enough (CS-high idle gap
@@ -178,6 +191,7 @@ static void qwrite_page(uint32_t addr, const uint8_t *wr, int n){
 	}
 	pio_sm_get_blocking(s_pio, s_sm);                  /* completion barrier (last nibble clocked) */
 	cs_hi();
+	park_lines_driven();   /* don't leave the lines floating (E9) */
 }
 
 static void qchunked(int is_write, uint32_t addr, const uint8_t *wr, uint8_t *rd, uint32_t n){
