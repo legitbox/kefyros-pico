@@ -137,25 +137,42 @@ static void arrow(double ax,double ay,double az,double bx,double by,double bz,ui
 	line(x1,y1,(int)lround(x1-7*dx-3*pxx),(int)lround(y1-7*dy-3*pyy),c);
 }
 
-/* ground grid plane (F2) + axes gizmo + tick labels */
+static void perp_of(int x0,int y0,int x1,int y1,double*pxx,double*pyy){
+	double dx=x1-x0, dy=y1-y0, L=sqrt(dx*dx+dy*dy);
+	if(L<1){ *pxx=0; *pyy=0; } else { *pxx=-dy/L; *pyy=dx/L; }
+}
+static void tick_mark(int tx,int ty,double pxx,double pyy,uint16_t c){
+	int ox=(int)lround(3*pxx), oy=(int)lround(3*pyy);
+	line(tx-ox,ty-oy, tx+ox,ty+oy, c);
+}
+
+/* Reference frame: a BIG ground grid plane + the y-axis spine (both gated by F2/show_plane),
+   plus the always-on x and z axes. Ticks are little perpendicular marks, not numbers. */
 static void draw_frame(void){
-	double zp = (s_zlo<=0.0 && 0.0<=s_zhi) ? 0.0 : s_zlo;   /* grid plane at z=0 if in range */
-	if(show_plane){
-		for(double gx=ceil(X0); gx<=X1+1e-9; gx+=1) linw(gx,Y0,zp, gx,Y1,zp, C_GRID);
-		for(double gy=ceil(Y0); gy<=Y1+1e-9; gy+=1) linw(X0,gy,zp, X1,gy,zp, C_GRID);
-	}
-	arrow(X0,0,zp, X1,0,zp, C_AXIS);            /* x */
-	arrow(0,Y0,zp, 0,Y1,zp, C_AXIS);            /* y */
-	arrow(0,0,s_zlo, 0,0,s_zhi, C_AXIS);        /* z */
-	int tx,ty;
-	projw(X1,0,zp,&tx,&ty);    blit_str(tx+4,ty-4,"x",C_LBL);
-	projw(0,Y1,zp,&tx,&ty);    blit_str(tx+4,ty-4,"y",C_LBL);
-	projw(0,0,s_zhi,&tx,&ty);  blit_str(tx+4,ty-8,"z",C_LBL);
-	for(double gx=ceil(X0); gx<=X1+1e-9; gx+=2){ if(fabs(gx)<0.5) continue;
-		projw(gx,0,zp,&tx,&ty); char b[12]; snprintf(b,sizeof b,"%g",gx); blit_str(tx-2,ty+3,b,C_TICK); }
+	double zp = (s_zlo<=0.0 && 0.0<=s_zhi) ? 0.0 : s_zlo;
+	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
 	double zr=s_zhi-s_zlo, zs = zr>40?10: zr>16?5: zr>8?2:1;
-	for(double gz=ceil(s_zlo/zs)*zs; gz<=s_zhi+1e-9; gz+=zs){ if(fabs(gz)<zs/4) continue;
-		projw(0,0,gz,&tx,&ty); char b[12]; snprintf(b,sizeof b,"%g",gz); blit_str(tx+4,ty-3,b,C_TICK); }
+
+	if(show_plane){
+		double Ex=2.5*v_hx, Ey=2.5*v_hy;                 /* a big floor, ~5x the data span */
+		double gx0=v_cx-Ex, gx1=v_cx+Ex, gy0=v_cy-Ey, gy1=v_cy+Ey;
+		for(double g=ceil(gx0); g<=gx1+1e-9; g+=1) linw(g,gy0,zp, g,gy1,zp, C_GRID);
+		for(double g=ceil(gy0); g<=gy1+1e-9; g+=1) linw(gx0,g,zp, gx1,g,zp, C_GRID);
+		arrow(0,Y0,zp, 0,Y1,zp, C_AXIS);                 /* y-axis spine (with the plane) */
+		projw(0,Y0,zp,&e0x,&e0y); projw(0,Y1,zp,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
+		for(double g=ceil(Y0); g<=Y1+1e-9; g+=1){ if(fabs(g)<0.5) continue; projw(0,g,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+		projw(0,Y1,zp,&tx,&ty); blit_str(tx+4,ty-4,"y",C_LBL);
+	}
+	/* x-axis (always) */
+	arrow(X0,0,zp, X1,0,zp, C_AXIS);
+	projw(X0,0,zp,&e0x,&e0y); projw(X1,0,zp,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
+	for(double g=ceil(X0); g<=X1+1e-9; g+=1){ if(fabs(g)<0.5) continue; projw(g,0,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+	projw(X1,0,zp,&tx,&ty); blit_str(tx+4,ty-4,"x",C_LBL);
+	/* z-axis (always) */
+	arrow(0,0,s_zlo, 0,0,s_zhi, C_AXIS);
+	projw(0,0,s_zlo,&e0x,&e0y); projw(0,0,s_zhi,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
+	for(double g=ceil(s_zlo/zs)*zs; g<=s_zhi+1e-9; g+=zs){ if(fabs(g)<zs/4) continue; projw(0,0,g,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+	projw(0,0,s_zhi,&tx,&ty); blit_str(tx+4,ty-8,"z",C_LBL);
 }
 
 static int qcmp(const void *a,const void *b){
