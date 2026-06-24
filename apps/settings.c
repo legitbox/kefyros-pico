@@ -88,61 +88,46 @@ static void prng_fill(uint8_t *b, uint32_t seed){
 	for(int i = 0; i < 1024; i++){ s = s*1664525u + 1013904223u; b[i] = (uint8_t)(s >> 24); }
 }
 
-/* DIAGNOSTIC bus check. Runs the 1 KB-block PRNG verify two ways to isolate the
-   0x780004-class failure: pass A writes+reads each block immediately; pass B writes
-   the whole window then reads it all back. If A passes but B fails, a later write is
-   corrupting an earlier block (or read-after-many-writes breaks). Reports the failing
-   pass, address, expected vs got byte, and how many bytes in that block are bad. */
-static int check_run(int interleaved, uint32_t base, uint8_t *w, uint8_t *r,
-                     uint32_t *fa, uint8_t *fe, uint8_t *fg, int *nbad){
-	if(interleaved){
-		for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
-			prng_fill(w, base + off);
-			kf_psram_write(base + off, w, 1024);
-			memset(r, 0xA5, 1024);
-			kf_psram_read(base + off, r, 1024);
-			if(memcmp(w, r, 1024)){
-				*nbad = 0; int first = -1;
-				for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ if(first<0){first=i;*fe=w[i];*fg=r[i];} (*nbad)++; }
-				*fa = base + off + first; return 0;
-			}
-		}
-		return 1;
-	}
-	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){ prng_fill(w, base + off); kf_psram_write(base + off, w, 1024); }
-	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
-		prng_fill(w, base + off);
-		memset(r, 0xA5, 1024);
-		kf_psram_read(base + off, r, 1024);
-		if(memcmp(w, r, 1024)){
-			*nbad = 0; int first = -1;
-			for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ if(first<0){first=i;*fe=w[i];*fg=r[i];} (*nbad)++; }
-			*fa = base + off + first; return 0;
-		}
-	}
-	return 1;
-}
-
+/* DIAGNOSTIC bus check. Write+read each 1 KB PRNG block; on the first wrong byte,
+   re-read that SAME block 8x WITHOUT rewriting it, to tell write-side from read-side:
+   - "stored" : every re-read returns the same wrong value  -> the WRITE latched wrong
+                (simultaneous-switching noise on the output lines).
+   - "Nx/vary": re-reads disagree / sometimes correct        -> intermittent READ sample.
+   Reports addr, expected vs got, bit-xor (which SIO line), and the re-read verdict. */
 static void act_memcheck(lv_event_t *e){ (void)e;
 	uint32_t sz = kf_psram_size();
 	if(!sz){ lv_label_set_text(lbl_test, "Check: no PSRAM"); return; }
 	uint8_t *w = malloc(1024), *r = malloc(1024);
 	if(!w || !r){ free(w); free(r); lv_label_set_text(lbl_test, "Check: out of memory"); return; }
-	uint32_t base = sz - PS_SCRATCH, fa = 0; uint8_t fe = 0, fg = 0; int nbad = 0;
+	uint32_t base = sz - PS_SCRATCH;
 
-	const char *which = NULL;
-	if(!check_run(1, base, w, r, &fa, &fe, &fg, &nbad)) which = "A";
-	else if(!check_run(0, base, w, r, &fa, &fe, &fg, &nbad)) which = "B";
-	free(w); free(r);
+	for(uint32_t off = 0; off < PS_SCRATCH; off += 1024){
+		prng_fill(w, base + off);
+		kf_psram_write(base + off, w, 1024);
+		memset(r, 0xA5, 1024);
+		kf_psram_read(base + off, r, 1024);
+		int first = -1;
+		for(int i = 0; i < 1024; i++) if(w[i] != r[i]){ first = i; break; }
+		if(first < 0) continue;
 
-	if(which){
-		lv_label_set_text_fmt(lbl_test, "%s FAIL @%06X e%02X g%02X n%d",
-			which, (unsigned)fa, fe, fg, nbad);
+		uint32_t a = base + off + first;
+		uint8_t  exp = w[first], got = r[first];
+		int wrong = 0, vary = 0;
+		for(int k = 0; k < 8; k++){               /* re-read same block, no rewrite */
+			memset(r, 0xA5, 1024);
+			kf_psram_read(base + off, r, 1024);
+			if(r[first] != exp){ wrong++; if(r[first] != got) vary = 1; }
+		}
+		free(w); free(r);
+		lv_label_set_text_fmt(lbl_test, "@%06X e%02X g%02X ^%02X %s%d/8",
+			(unsigned)a, exp, got, (unsigned)(exp ^ got),
+			vary ? "vary " : (wrong == 8 ? "stored " : "rd "), wrong);
 		lv_obj_set_style_text_color(lbl_test, lv_color_hex(0xe03c32), 0);
-	} else {
-		lv_label_set_text(lbl_test, "Check: OK (A+B, 512 KB)");
-		lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
+		return;
 	}
+	free(w); free(r);
+	lv_label_set_text(lbl_test, "Check: OK (512 KB)");
+	lv_obj_set_style_text_color(lbl_test, KF_ACTIVE, 0);
 }
 
 static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
