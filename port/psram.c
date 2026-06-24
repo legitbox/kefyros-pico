@@ -100,22 +100,40 @@ static pio_sm_config qcfg(uint off){
 	return c;
 }
 
-/* Arm the SM to run program `off` from a clean state (PC at start, FIFOs + shift
-   registers cleared). A full re-init only when the program actually changes;
-   otherwise just restart + jump, which is cheap. The clear is what drops any
-   leftover OSR nibbles from a previous partial-word write. */
-static void qarm(uint off){
-	pio_sm_set_enabled(s_pio, s_sm, false);
-	if(off != (uint)s_active){
-		pio_sm_config c = qcfg(off);
-		pio_sm_init(s_pio, s_sm, off, &c);   /* sets pins/shift/clkdiv/wrap, jmp off, clears */
-		s_active = (int)off;
-	} else {
-		pio_sm_clear_fifos(s_pio, s_sm);
-		pio_sm_restart(s_pio, s_sm);
-		pio_sm_exec(s_pio, s_sm, pio_encode_jmp(off));
-	}
+/* The wrap [target,end] for whichever quad program lives at `off` (absolute addrs). */
+static void qwrap(uint off, uint *wt, uint *we){
+	if(off == s_qr_off){ *wt = off + psram_qr_wrap_target; *we = off + psram_qr_wrap; }
+	else               { *wt = off + psram_qw_wrap_target; *we = off + psram_qw_wrap; }
+}
+
+/* Full SM (re)configuration WITH a clkdiv_restart (resets the divider phase). Use ONLY
+   when the clkdiv actually changes — first arm, reclock, each calibration candidate —
+   because clkdiv_restart is precisely what made the read-after-write path differ from
+   the read-after-read path and glitch a bit (see qarm). s_active<0 signals "clkdiv
+   dirty, must full-init". */
+static void qfullinit(uint off){
+	pio_sm_config c = qcfg(off);
+	pio_sm_init(s_pio, s_sm, off, &c);       /* pins/shift/clkdiv/wrap, clkdiv_restart, clears */
 	pio_sm_set_enabled(s_pio, s_sm, true);
+	s_active = (int)off;
+}
+
+/* Arm program `off` for one transaction. CRITICAL: once the SM is configured we switch
+   programs WITHOUT pio_sm_init — only clear/restart + set_wrap + jmp, which leaves the
+   clkdiv phase FREE-RUNNING. Empirically, reads on this path are clean even for the
+   exact patterns that the pio_sm_init path (clkdiv_restart) corrupted on the first read
+   after a write. Same clkdiv for read & write, and identical pin config, so a switch is
+   just new wrap bounds + PC. Only a clkdiv change (s_active<0) forces a full init. */
+static void qarm(uint off){
+	if(s_active < 0){ qfullinit(off); return; }
+	uint wt, we; qwrap(off, &wt, &we);
+	pio_sm_set_enabled(s_pio, s_sm, false);
+	pio_sm_clear_fifos(s_pio, s_sm);
+	pio_sm_restart(s_pio, s_sm);              /* clears OSR/ISR shift state, NOT clkdiv phase */
+	pio_sm_set_wrap(s_pio, s_sm, wt, we);
+	pio_sm_exec(s_pio, s_sm, pio_encode_jmp(off));
+	pio_sm_set_enabled(s_pio, s_sm, true);
+	s_active = (int)off;
 }
 
 /* one quad transfer confined to a single 1 KB page */
@@ -248,11 +266,15 @@ static int psram_calibrate(int boot){
 		s_active = -1;                 /* force qarm to re-init the SM with this divider */
 		if(calib_pass(boot)){ pass = div; break; }
 	}
-	if(!pass){ s_bus_hz = clk / (2u * dslow); s_active = -1; return 0; }
-	uint32_t mdiv = (pass + 1u <= dslow) ? pass + 1u : pass;   /* one notch of margin */
+	uint32_t mdiv;
+	int ok;
+	if(!pass){ mdiv = dslow; ok = 0; }                          /* best-effort: slowest */
+	else     { mdiv = (pass + 1u <= dslow) ? pass + 1u : pass; ok = 1; }  /* +1 notch margin */
 	s_bus_hz = clk / (2u * mdiv);
-	s_active = -1;
-	return 1;
+	s_active = -1;            /* clkdiv dirty */
+	qfullinit(s_qr_off);     /* apply the final clkdiv now so the first real op (a read)
+	                            takes the clean restart path, not a fresh pio_sm_init */
+	return ok;
 }
 
 /* Software-reset the chip in QPI format, before any PIO is set up. Critical for
@@ -349,6 +371,17 @@ uint32_t kf_psram_init(void){
 	   phase-independent. Safe here: source-synchronous (we clock it) sampled mid-window. */
 	s_pio->input_sync_bypass |= (1u<<KF_PSRAM_SIO0) | (1u<<KF_PSRAM_SIO1)
 	                          | (1u<<KF_PSRAM_SIO2) | (1u<<KF_PSRAM_SIO3);
+
+	/* RP2350-E9 workaround. The SIO lines float during every read's bus turnaround
+	   (output -> input, before the chip drives data). On RP2350 a floating input pad
+	   latches/leaks at ~2 V (erratum E9), reading the wrong bit — worst on the first
+	   read after a write, which drove the line to a rail and released it through mid-
+	   rail. Pull-DOWNS are the affected case; internal PULL-UPS are immune, so enabling
+	   them holds a floating line at a defined HIGH during turnaround. The chip's push-
+	   pull driver still overrides the weak pull-up for real data. This is the documented
+	   software workaround and the actual root cause of the single-bit read corruption. */
+	gpio_pull_up(KF_PSRAM_SIO0); gpio_pull_up(KF_PSRAM_SIO1);
+	gpio_pull_up(KF_PSRAM_SIO2); gpio_pull_up(KF_PSRAM_SIO3);
 
 	qr_set_dummy(QSPI_DUMMY);
 
