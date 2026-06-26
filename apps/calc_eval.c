@@ -153,6 +153,9 @@ static double call_builtin(const char *nm, double *v, int n, int *ok){
 	#define A1 (n>=1?v[0]:NAN)
 	#define A2 (n>=2?v[1]:NAN)
 	#define NEED(k) do{ if(n!=(k)){ *ok=0; err("arg count: %s", nm); return NAN; } }while(0)
+	/* force a decimal: these aren't in the exact table, so the whole expression drops to the
+	   numeric path. float(1/3) -> 0.3333333333; N/dec/approx are aliases (Python/SymPy). */
+	if(!strcmp(nm,"float")||!strcmp(nm,"dec")||!strcmp(nm,"approx")||!strcmp(nm,"N")){ NEED(1); return A1; }
 	/* trig (angle-aware) */
 	if(!strcmp(nm,"sin")){ NEED(1); return sin(to_rad(A1)); }
 	if(!strcmp(nm,"cos")){ NEED(1); return cos(to_rad(A1)); }
