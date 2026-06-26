@@ -94,6 +94,7 @@ int  kfs_ready(void);                /* 1 if the card mounted */
 #define KF_ROOT     "/kefyros"
 #define KF_NOTES    "/kefyros/notes"
 #define KF_WALLS    "/kefyros/wallpapers"
+#define KF_PAINT    "/kefyros/paint"
 #define KF_CONFIG   "/kefyros/config.txt"
 
 /* ===== PSRAM (port/psram.c) — 8 MB ESP-PSRAM64H, PIO SPI block store =====
@@ -193,6 +194,7 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
 void app_gameboy_open(void); /* Game Boy (DMG) emulator — Peanut-GB, ROMs from SD->flash */
+void app_paint_open(void);   /* Paint: 16-colour indexed pixel-art editor (canvas + SD) */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
 void editor_poll(void);
@@ -203,5 +205,6 @@ void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void cakespark_poll(void);   /* CakeSpark REPL: grabbed keys (no-op unless open) */
 void gameboy_poll(void);     /* Game Boy: picker keys + the blocking play loop (no-op idle) */
+void paint_poll(void);       /* Paint: editor keys (no-op unless open) */
 
 #endif
