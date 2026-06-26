@@ -145,14 +145,16 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	lv_obj_t *back = lv_screen_active();
 
 	/* Overclock ladder. SPI baud = clk_sys / 4 (the highest even-divider step below
-	   clk_sys/2), so the ONLY way past 90 MHz is to raise clk_sys itself. Rungs 2–3
+	   clk_sys/2), so the ONLY way past 90 MHz is to raise clk_sys itself. Rungs 2–4
 	   overvolt past the 1.30 V longevity cap — held ONLY while this test is open; the
-	   normal 360 MHz / 90 MHz / entry voltage are restored on exit (ESC). */
+	   normal 360 MHz / 90 MHz / entry voltage are restored on exit (ESC). 500 MHz @
+	   1.60 V is Pimoroni's documented sustainable OC ceiling on a cooled board. */
 	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
 		{360000, VREG_VOLTAGE_1_30,  90000000u},   /* normal UI clock                  */
 		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* free — already the boost rail     */
 		{440000, VREG_VOLTAGE_1_40, 110000000u},   /* overvolt, test-only               */
-		{480000, VREG_VOLTAGE_1_50, 120000000u},   /* overvolt, test-only               */
+		{480000, VREG_VOLTAGE_1_60, 120000000u},   /* overvolt, test-only               */
+		{500000, VREG_VOLTAGE_1_60, 125000000u},   /* Pimoroni 500 MHz ceiling, test-only */
 	};
 	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
 	int step = 0;
