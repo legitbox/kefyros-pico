@@ -116,18 +116,22 @@ uint32_t clock_sys_mhz(void){
  *
  * Voltage ordering: raise the rail BEFORE clocking up, lower it AFTER clocking down. */
 static uint32_t s_cur_khz = KF_SYS_KHZ;
+static uint32_t s_lcd_hz   = LCD_SPI_SPEED;   /* panel SPI target; reclock honours it so a
+                                                 single app (calc) can run faster than the UI */
 
 static void reclock_peripherals(void){
-	spi_set_baudrate(KF_LCD_SPI, LCD_SPI_SPEED); /* LCD — honour the cranked panel clock  */
+	spi_set_baudrate(KF_LCD_SPI, s_lcd_hz);     /* LCD — honour the cranked panel clock  */
 	spi_set_baudrate(KF_SD_SPI,  24000000u);    /* SD   (CONF_SD_TRX_FREQUENCY)*/
 	uart_set_baudrate(KF_KBD_UART, KF_KBD_BAUD);
 	kf_psram_reclock();                          /* PSRAM PIO bus back to ~18 MHz */
 }
 
-static void clock_apply(uint32_t khz, enum vreg_voltage v, bool up){
+static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool up){
 	disp_pause_core1();                          /* no SPI blit in flight during the switch */
+	if(v > VREG_VOLTAGE_1_30) vreg_disable_voltage_limit();   /* allow 1.35+ V (RP2350) */
 	if(up){ vreg_set_voltage(v); sleep_ms(2); }  /* rail up before clock up */
 	if(set_sys_clock_khz(khz, false)){
+		s_lcd_hz = lcd_hz;
 		reclock_peripherals();
 		s_cur_khz = khz;
 		if(!up) vreg_set_voltage(v);             /* rail down only after a good downclock */
@@ -138,21 +142,29 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, bool up){
 
 void kf_clock_boost(void){
 	if(s_cur_khz >= 400000u) return;
-	clock_apply(400000u, VREG_VOLTAGE_1_30, true);
+	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, true);
 }
-/* Steady-state UI clock: 360 MHz for smooth menus. We boot at 250 (reliable cold start)
-   and ramp here once init is done — a WARM ramp avoids the cold-boot 400 marginality.
-   1.30 V (same rail as boost); a gentler overclock than 400 (less heat, steadier). */
+/* Steady-state UI clock: 400 MHz / 100 MHz SPI (raised from 360/90 — the panel was
+   validated clean to 110 MHz on the Screen Test, and 400 is the same 1.30 V rail we
+   already run FLAC at). WARM ramp from the 250 MHz cold-boot clock avoids the cold-boot
+   400 marginality. This is the default the whole UI + Game Boy return to. */
 void kf_clock_ui(void){
-	if(s_cur_khz == 360000u) return;
-	clock_apply(360000u, VREG_VOLTAGE_1_30, 360000u > s_cur_khz);
+	if(s_cur_khz == 400000u) return;
+	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, 400000u > s_cur_khz);
+}
+/* Calculator-only max: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One rung below this
+   chip's validated 440 MHz ceiling (480/500 died even at 1.60 V), one voltage notch above
+   the 400/1.30 UI. Held only while the calc app is open; kf_clock_ui() restores 400/100. */
+void kf_clock_calc(void){
+	if(s_cur_khz == 420000u) return;
+	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);
 }
 void kf_clock_eco(void){
 	if(s_cur_khz <= 250000u) return;
 	/* 250 MHz: under the ~270 MHz WiFi ceiling, faster than stock 150. The dynamic
 	   cyw43 bus divider (port/net.c) auto-tunes to ~31 MHz here. (Voltage 1.20 V was
 	   ruled out as the cause of the ECDSA-verify failure — it's a software issue.) */
-	clock_apply(250000u, VREG_VOLTAGE_1_20, false);
+	clock_apply(250000u, VREG_VOLTAGE_1_20, 100000000u, false);
 }
 uint32_t kf_clock_khz(void){ return clock_get_hz(clk_sys) / 1000u; }
 

@@ -5,11 +5,12 @@
 
 //#define LCD_SPI_SPEED   6000000
 //#define LCD_SPI_SPEED 25000000
-#define LCD_SPI_SPEED   90000000    /* = clk_sys/4 at the 360 MHz UI clock = 90 MHz, validated
-                                       stable on the Settings Screen Test. ~3.75x the 24 MHz the
-                                       panel was *actually* capped at before clk_peri was freed
-                                       from the 48 MHz USB PLL (see CMakeLists). 90 is the ceiling
-                                       at 360 MHz — the next SPI divider step (÷2) is 180 MHz. */
+#define LCD_SPI_SPEED  100000000    /* = clk_sys/4 at the 400 MHz UI clock = 100 MHz. SPI baud is
+                                       clk_sys/4 (next divider step ÷2 is unsurvivable), so the panel
+                                       speed is tied to the UI clock: 400→100. The Screen Test
+                                       validated the panel clean to 110 (440 MHz); 480/500 killed the
+                                       *core*, so 440 is this chip's ceiling. Calc runs 420→105 via
+                                       kf_clock_calc(); the rest of the UI sits here at 100. */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI

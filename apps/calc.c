@@ -550,7 +550,7 @@ static lv_obj_t *build_home(void){
 }
 static void home_key(uint8_t k, int m){
 	(void)m;
-	if(k==DK_ESC || k==DK_BREAK){ active=0; kf_grab_input(0); kf_back_to_launcher(); return; }
+	if(k==DK_ESC || k==DK_BREAK){ active=0; kf_grab_input(0); kf_clock_ui(); kf_back_to_launcher(); return; }
 	if(k==DK_UP){   home_sel=(home_sel+NHITEMS-1)%NHITEMS; home_hl(); return; }
 	if(k==DK_DOWN){ home_sel=(home_sel+1)%NHITEMS; home_hl(); return; }
 	if(k==DK_ENTER){
@@ -621,6 +621,7 @@ void calc_poll(void){
 }
 
 void app_calc_open(void){
+	kf_clock_calc();              /* run the panel at this chip's max: 420 MHz / 105 MHz SPI */
 	active = 1; hpos = -1; mode = CMODE_REPL;
 	home_sel = 0; form_scr = NULL;
 	show_screen(SCR_HOME);

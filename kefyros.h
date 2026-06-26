@@ -114,7 +114,8 @@ void     kf_psram_reclock(void);                      /* re-derive PIO clkdiv af
    power. The switch pauses the Core-1 display pump and re-derives all clk_sys-derived
    peripheral clocks, so it's safe to call from app code (NOT from inside an LVGL flush). */
 void     kf_clock_boost(void);                        /* 400 MHz @ 1.30 V (FLAC etc.) */
-void     kf_clock_ui(void);                           /* 360 MHz @ 1.30 V (smooth UI default) */
+void     kf_clock_ui(void);                           /* 400 MHz @ 1.30 V / 100 MHz SPI (UI default) */
+void     kf_clock_calc(void);                         /* 420 MHz @ 1.35 V / 105 MHz SPI (calc only) */
 void     kf_clock_eco(void);                          /* 250 MHz @ 1.20 V (under WiFi ~270 ceiling) */
 uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
 
