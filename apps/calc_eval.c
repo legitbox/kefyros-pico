@@ -2,6 +2,7 @@
 // evaluator (full scientific function table + constants + angle mode), and number
 // formatting. Pure C, uses math.h (-lm). Part of the Kefyros scientific calculator.
 #include "calc.h"
+#include "calc_num.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@ cnode *cn_neg(cnode *a){ cnode *n = cn_new(CN_NEG); if(n) n->a = a; return n; }
 
 void cn_free(cnode *n){
 	if(!n) return;
+	if(n->exact){ cnum_free(n->exact); free(n->exact); }
 	cn_free(n->a); cn_free(n->b);
 	for(int i=0;i<n->nargs;i++) cn_free(n->args[i]);
 	free(n);
@@ -33,6 +35,7 @@ cnode *cn_clone(const cnode *n){
 	if(!n) return NULL;
 	cnode *c = cn_new(n->type); if(!c) return NULL;
 	c->num = n->num; c->op = n->op; memcpy(c->name, n->name, CN_NAMELEN);
+	if(n->exact){ c->exact = malloc(sizeof(cnum)); if(c->exact){ cnum_init(c->exact); cnum_copy(c->exact, n->exact); } }
 	c->a = cn_clone(n->a); c->b = cn_clone(n->b);
 	c->nargs = n->nargs;
 	for(int i=0;i<n->nargs;i++) c->args[i] = cn_clone(n->args[i]);

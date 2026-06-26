@@ -5,6 +5,7 @@
 // Identifiers allow high-bit bytes so UTF-8 names (e.g. theta) parse. Part of the
 // Kefyros scientific calculator.
 #include "calc.h"
+#include "calc_num.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -39,10 +40,20 @@ static cnode *parse_atom(void){
 		return e;
 	}
 	if(isdigit((unsigned char)c) || c=='.'){
+		const char *start = P;
 		char *end; double v = strtod(P, &end);
 		if(end==P){ seterr("bad number"); return NULL; }
 		P = end;
-		return cn_num(v);
+		cnode *node = cn_num(v);
+		if(!node){ seterr("out of memory"); return NULL; }
+		/* exact iff a pure integer literal (no '.', no exponent) — keeps 1/3, 2^100 exact */
+		int isint = 1;
+		for(const char *s = start; s < end; s++) if(*s=='.'||*s=='e'||*s=='E'){ isint = 0; break; }
+		if(isint){
+			node->exact = malloc(sizeof(cnum));
+			if(node->exact){ cnum_init(node->exact); cnum_set_str_int(node->exact, start, (int)(end-start)); }
+		}
+		return node;
 	}
 	if(is_namestart(c)){
 		char name[CN_NAMELEN]; int i=0;
@@ -52,7 +63,8 @@ static cnode *parse_atom(void){
 		if(*P=='('){                                  /* function call */
 			P++;
 			cnode *call = cn_new(CN_CALL);
-			strncpy(call->name, name, CN_NAMELEN-1);
+			if(!call) return NULL;
+			memcpy(call->name, name, (size_t)i + 1);   /* name is NUL-terminated, i < CN_NAMELEN */
 			skip();
 			if(*P!=')'){
 				for(;;){
@@ -156,10 +168,12 @@ static cnode *parse_expr(void){
 	if(!a) return NULL;
 	skip();
 	if(*P=='='){
-		P++;
+		int cmp = (P[1] == '=');          /* Python '==' (equality test) vs '=' (assign/equation) */
+		P += cmp ? 2 : 1;
 		cnode *b = parse_sum();
 		if(!b){ cn_free(a); return NULL; }
 		cnode *eq = cn_new(CN_EQ); eq->a = a; eq->b = b;
+		if(cmp) eq->op = 'c';
 		return eq;
 	}
 	return a;

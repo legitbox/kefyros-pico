@@ -19,11 +19,13 @@ typedef enum {
 #define CN_MAXPARAMS 4
 #define CN_NAMELEN   24
 
+struct cnum;                                       /* apps/calc_num.h — exact rational */
 typedef struct cnode cnode;
 struct cnode {
 	cn_type type;
-	double  num;                                   /* CN_NUM */
-	char    op;                                    /* CN_BINOP: + - * / % ^ */
+	double  num;                                   /* CN_NUM (numeric/inexact value)        */
+	struct cnum *exact;                            /* CN_NUM: exact rational, or NULL=inexact */
+	char    op;                                    /* CN_BINOP: + - * / % ^ ; CN_EQ: 'c'=='==' */
 	char    name[CN_NAMELEN];                      /* CN_VAR / CN_CALL */
 	cnode  *a, *b;                                 /* operands (NEG/FACT use a) */
 	cnode  *args[CN_MAXARGS]; int nargs;           /* CN_CALL */

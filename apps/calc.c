@@ -9,6 +9,8 @@
 #include "../kefyros.h"
 #include "../ui/theme.h"
 #include "calc.h"
+#include "calc_num.h"
+#include "calc_exact.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -143,6 +145,18 @@ static void run_line(const char *text){
 	if(n->type == CN_CALL && try_command(n)){ cn_free(n); return; }
 
 	if(n->type == CN_EQ){
+		if(n->op == 'c'){                         /* Python-style equality test: a == b */
+			int equal;
+			cnum la, ra; cnum_init(&la); cnum_init(&ra);
+			if(calc_eval_exact(n->a, &la) && calc_eval_exact(n->b, &ra))
+				equal = (cnum_cmp(&la, &ra) == 0);   /* exact when both sides are rational */
+			else { int ok=1; double x=calc_eval(n->a,&ok), y=calc_eval(n->b,&ok);
+				if(!ok){ echo_err(calc_err); cnum_free(&la); cnum_free(&ra); cn_free(n); return; }
+				equal = (x == y); }
+			cnum_free(&la); cnum_free(&ra);
+			echo_res(equal ? "true" : "false");
+			cn_free(n); return;
+		}
 		if(n->a->type == CN_VAR){                 /* assignment: name = expr */
 			int ok=1; double v = calc_eval(n->b, &ok);
 			if(!ok){ echo_err(calc_err); cn_free(n); return; }
@@ -166,6 +180,18 @@ static void run_line(const char *text){
 		echo_note("equation - use the Solve screen, or solve(eq, var)");
 		cn_free(n); return;
 	}
+
+	/* exact rational result first (1/3+1/6 -> 1/2, 2^100, 10!); fall back to numeric */
+	cnum ex; cnum_init(&ex);
+	if(calc_eval_exact(n, &ex)){
+		char num[192];
+		if(cnum_to_str(&ex, num, sizeof num) >= 0){   /* fits the line -> show it exactly */
+			calc_set_var("ans", cnum_to_double(&ex));
+			echo_res(num); cnum_free(&ex); cn_free(n); return;
+		}
+		/* exact but too long to display as a fraction -> numeric approximation below */
+	}
+	cnum_free(&ex);
 
 	int ok=1; double v = calc_eval(n, &ok);
 	if(!ok){ echo_err(calc_err); cn_free(n); return; }
