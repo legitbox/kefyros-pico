@@ -17,7 +17,12 @@
 #include <math.h>
 
 /* ===== screen state ===== */
-enum { SCR_HOME=0, SCR_SCRATCH, SCR_SOLVE, SCR_GRAPH, SCR_GRAPH3D, SCR_TABLE };
+enum { SCR_HOME=0, SCR_SCRATCH, SCR_SOLVE, SCR_GRAPH, SCR_GRAPH3D, SCR_TABLE, SCR_SETTINGS };
+
+/* result display mode: EXACT shows rationals/integers exactly (1/3+1/6 -> 1/2), falling back
+   to numeric only when an expression isn't rational; DECIMAL always shows a number. */
+enum { RMODE_EXACT = 0, RMODE_DECIMAL };
+static int g_result_mode = RMODE_EXACT;
 static int active = 0;
 static int screen = SCR_HOME;
 static int g_return_screen = SCR_SCRATCH;   /* where a viewer (graph/table/3D) returns to */
@@ -30,9 +35,10 @@ void calc_set_mode(int m){ mode = m; }
 /* ===== forward decls ===== */
 static void show_screen(int s);
 static lv_obj_t *build_home(void), *build_scratch(void), *build_solve(void),
-                *build_graph2d(void), *build_graph3d(void), *build_table(void);
+                *build_graph2d(void), *build_graph3d(void), *build_table(void), *build_settings(void);
 static void home_key(uint8_t,int), scratch_key(uint8_t,int), solve_key(uint8_t,int),
-            g2dform_key(uint8_t,int), g3dform_key(uint8_t,int), tableform_key(uint8_t,int);
+            g2dform_key(uint8_t,int), g3dform_key(uint8_t,int), tableform_key(uint8_t,int),
+            settings_key(uint8_t,int);
 
 /* viewer launch wrappers: remember which screen to return to, then open the viewer */
 static void launch_graph2d(cnode **f,int n,int k){ g_return_screen=screen; calc_graph_2d(f,n,k); }
@@ -181,17 +187,20 @@ static void run_line(const char *text){
 		cn_free(n); return;
 	}
 
-	/* exact rational result first (1/3+1/6 -> 1/2, 2^100, 10!); fall back to numeric */
-	cnum ex; cnum_init(&ex);
-	if(calc_eval_exact(n, &ex)){
-		char num[192];
-		if(cnum_to_str(&ex, num, sizeof num) >= 0){   /* fits the line -> show it exactly */
-			calc_set_var("ans", cnum_to_double(&ex));
-			echo_res(num); cnum_free(&ex); cn_free(n); return;
+	/* in Exact mode, try the exact rational result first (1/3+1/6 -> 1/2, 2^100, 10!);
+	   Decimal mode (and inexact/too-long results) drop straight to the numeric path. */
+	if(g_result_mode == RMODE_EXACT){
+		cnum ex; cnum_init(&ex);
+		if(calc_eval_exact(n, &ex)){
+			char num[192];
+			if(cnum_to_str(&ex, num, sizeof num) >= 0){   /* fits the line -> show it exactly */
+				calc_set_var("ans", cnum_to_double(&ex));
+				echo_res(num); cnum_free(&ex); cn_free(n); return;
+			}
+			/* exact but too long to display as a fraction -> numeric approximation below */
 		}
-		/* exact but too long to display as a fraction -> numeric approximation below */
+		cnum_free(&ex);
 	}
-	cnum_free(&ex);
 
 	int ok=1; double v = calc_eval(n, &ok);
 	if(!ok){ echo_err(calc_err); cn_free(n); return; }
@@ -523,7 +532,7 @@ static const struct { const char *label; int scr; } HITEMS[] = {
 	{ "Graph 2D",   SCR_GRAPH    },
 	{ "Graph 3D",   SCR_GRAPH3D  },
 	{ "Table",      SCR_TABLE    },
-	{ "Angle",      -1           },   /* in-place: cycle DEG/RAD/GRAD */
+	{ "Settings",   SCR_SETTINGS },   /* result mode + angle live here */
 };
 #define NHITEMS 6
 static lv_obj_t *hrows[NHITEMS];
@@ -536,8 +545,6 @@ static void home_hl(void){
 		lv_obj_set_style_bg_opa(hrows[i], sel?LV_OPA_COVER:LV_OPA_TRANSP, 0);
 		lv_obj_set_style_text_color(hrows[i], sel?KF_BG_DEEP:KF_AMBER, 0);
 	}
-	const char *am = calc_angle()==CALC_DEG?"DEG": calc_angle()==CALC_RAD?"RAD":"GRAD";
-	lv_label_set_text_fmt(hrows[NHITEMS-1], "Angle: %s", am);
 }
 static lv_obj_t *build_home(void){
 	fmsg = NULL;
@@ -579,9 +586,72 @@ static void home_key(uint8_t k, int m){
 	if(k==DK_ESC || k==DK_BREAK){ active=0; kf_grab_input(0); kf_clock_ui(); kf_back_to_launcher(); return; }
 	if(k==DK_UP){   home_sel=(home_sel+NHITEMS-1)%NHITEMS; home_hl(); return; }
 	if(k==DK_DOWN){ home_sel=(home_sel+1)%NHITEMS; home_hl(); return; }
-	if(k==DK_ENTER){
-		if(HITEMS[home_sel].scr < 0){ calc_set_angle((calc_angle()+1)%3); home_hl(); }
-		else show_screen(HITEMS[home_sel].scr);
+	if(k==DK_ENTER) show_screen(HITEMS[home_sel].scr);
+}
+
+/* ===================================================================== */
+/* Settings: result mode (Exact/Decimal) + angle (Deg/Rad/Grad)          */
+/* ===================================================================== */
+#define NSET 2
+static lv_obj_t *srows[NSET];
+static int set_sel = 0;
+
+static void settings_hl(void){
+	for(int i=0;i<NSET;i++){
+		int sel = (i==set_sel);
+		lv_obj_set_style_bg_color(srows[i], KF_ACTIVE, 0);
+		lv_obj_set_style_bg_opa(srows[i], sel?LV_OPA_COVER:LV_OPA_TRANSP, 0);
+		lv_obj_set_style_text_color(srows[i], sel?KF_BG_DEEP:KF_AMBER, 0);
+	}
+	lv_label_set_text_fmt(srows[0], "Result:  %s", g_result_mode==RMODE_EXACT ? "Exact" : "Decimal");
+	const char *am = calc_angle()==CALC_DEG ? "Deg" : calc_angle()==CALC_RAD ? "Rad" : "Grad";
+	lv_label_set_text_fmt(srows[1], "Angle:   %s", am);
+}
+
+static lv_obj_t *build_settings(void){
+	fmsg = NULL;
+	lv_obj_t *s = lv_obj_create(NULL);
+	lv_obj_set_style_bg_color(s, KF_BG_DEEP, 0);
+	lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
+	lv_obj_set_style_pad_all(s, 6, 0);
+	kf_inset_top(s);
+	lv_obj_set_flex_flow(s, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_style_pad_row(s, 3, 0);
+
+	lv_obj_t *t = lv_label_create(s);
+	lv_obj_set_style_text_font(t, KF_FONT_BIG, 0);
+	lv_obj_set_style_text_color(t, KF_AMBER_BR, 0);
+	lv_label_set_text(t, "SETTINGS");
+
+	for(int i=0;i<NSET;i++){
+		lv_obj_t *r = lv_label_create(s);
+		lv_obj_set_width(r, LCD_W-12);
+		lv_obj_set_style_text_font(r, KF_FONT, 0);
+		lv_obj_set_style_pad_ver(r, 4, 0);
+		lv_obj_set_style_pad_left(r, 4, 0);
+		srows[i] = r;
+	}
+	lv_obj_t *h = lv_label_create(s);
+	lv_obj_set_width(h, LCD_W-12);
+	lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
+	lv_obj_set_style_text_font(h, KF_FONT, 0);
+	lv_obj_set_style_text_color(h, KF_TEXT_MUTED, 0);
+	lv_label_set_text(h, "Up/Dn select  Left/Right or ENTER change  ESC back");
+
+	settings_hl();
+	return s;
+}
+
+static void settings_key(uint8_t k, int m){
+	(void)m;
+	if(k==DK_ESC || k==DK_BREAK){ show_screen(SCR_HOME); return; }
+	if(k==DK_UP){   set_sel=(set_sel+NSET-1)%NSET; settings_hl(); return; }
+	if(k==DK_DOWN){ set_sel=(set_sel+1)%NSET; settings_hl(); return; }
+	int fwd = (k==DK_ENTER || k==DK_RIGHT), back = (k==DK_LEFT);
+	if(fwd || back){
+		if(set_sel==0) g_result_mode ^= 1;                              /* Exact <-> Decimal */
+		else calc_set_angle((calc_angle() + (fwd?1:2)) % 3);            /* Deg/Rad/Grad cycle */
+		settings_hl();
 	}
 }
 
@@ -598,6 +668,7 @@ static void show_screen(int s){
 	case SCR_GRAPH:   form_scr = build_graph2d(); break;
 	case SCR_GRAPH3D: form_scr = build_graph3d(); break;
 	case SCR_TABLE:   form_scr = build_table();   break;
+	case SCR_SETTINGS: form_scr = build_settings(); break;
 	default:          form_scr = build_home();    break;
 	}
 	lv_screen_load(form_scr);
@@ -639,6 +710,7 @@ void calc_poll(void){
 		case SCR_GRAPH:   g2dform_key(key, mods);   break;
 		case SCR_GRAPH3D: g3dform_key(key, mods);   break;
 		case SCR_TABLE:   tableform_key(key, mods); break;
+		case SCR_SETTINGS: settings_key(key, mods); break;
 		}
 	}
 	/* drive smooth pan/rotate animation each superloop pass */
