@@ -155,3 +155,21 @@ void kf_clock_eco(void){
 	clock_apply(250000u, VREG_VOLTAGE_1_20, false);
 }
 uint32_t kf_clock_khz(void){ return clock_get_hz(clk_sys) / 1000u; }
+
+/* Bare clk_sys/voltage change that does NOT pause Core1 — the Screen Test already
+ * parks Core1 and drives the panel directly, so re-pausing here would let the flush
+ * pump resume mid-test. We still re-derive SD/UART/PSRAM (reclock_peripherals) so the
+ * keyboard keeps working across the switch; the caller re-baudrates the LCD itself.
+ * Voltages above the 1.30 V default cap require unlocking the regulator limit first,
+ * else vreg_set_voltage silently clamps to 1.30 V. */
+uint32_t kf_clock_set_bare(uint32_t khz, enum vreg_voltage v, bool up){
+	if(v > VREG_VOLTAGE_1_30) vreg_disable_voltage_limit();   /* allow 1.35–1.65 V (RP2350) */
+	if(up){ vreg_set_voltage(v); sleep_ms(2); }               /* rail up before clock up */
+	if(set_sys_clock_khz(khz, false)){
+		reclock_peripherals();                               /* SD/UART/PSRAM follow clk_sys */
+		s_cur_khz = khz;
+		if(!up) vreg_set_voltage(v);                         /* rail down only after a good downclock */
+		return khz * 1000u;
+	}
+	return 0;                                                /* PLL rejected the rate; rail left as-is */
+}

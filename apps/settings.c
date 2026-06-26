@@ -9,8 +9,10 @@
 #include "../ui/theme.h"
 #include "../ui/deskconf.h"
 #include "../port/disp.h"            /* disp_pause_core1 / disp_resume_core1 */
+#include "../port/clock.h"           /* kf_clock_set_bare — overclock ladder for the speed test */
 #include "lcdspi/lcdspi.h"          /* direct panel blit + LCD_SPI_SPEED */
 #include "hardware/spi.h"           /* spi_set_baudrate / spi_get_baudrate */
+#include "hardware/vreg.h"          /* vreg_get_voltage + VREG_VOLTAGE_* for the OC ladder */
 #include "pico/time.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -142,26 +144,46 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static uint8_t row[LCD_W * 3];        /* one RGB888 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
+	/* Overclock ladder. SPI baud = clk_sys / 4 (the highest even-divider step below
+	   clk_sys/2), so the ONLY way past 90 MHz is to raise clk_sys itself. Rungs 2–3
+	   overvolt past the 1.30 V longevity cap — held ONLY while this test is open; the
+	   normal 360 MHz / 90 MHz / entry voltage are restored on exit (ESC). */
+	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
+		{360000, VREG_VOLTAGE_1_30,  90000000u},   /* normal UI clock                  */
+		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* free — already the boost rail     */
+		{440000, VREG_VOLTAGE_1_40, 110000000u},   /* overvolt, test-only               */
+		{480000, VREG_VOLTAGE_1_50, 120000000u},   /* overvolt, test-only               */
+	};
+	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
+	int step = 0;
+	const uint32_t entry_khz = clock_sys_mhz() * 1000u;   /* restore clk_sys on exit  */
+	const enum vreg_voltage entry_v = vreg_get_voltage(); /* restore rail on exit     */
+
 	kf_grab_input(1);                     /* raw keys to us, not LVGL */
 	disp_pause_core1();                   /* take the panel from the flush pump */
-	uint32_t want = LCD_SPI_SPEED;
-	spi_set_baudrate(Pico_LCD_SPI_MOD, want);
+	spi_set_baudrate(Pico_LCD_SPI_MOD, STEP[step].spi);
 
 	const int TEXT_H = 44;            /* top strip reserved for the readout (bars stay below it) */
 	int frame = 0, fps = 0, fcount = 0, running = 1;
 	int shown_fps = -1; uint32_t shown_mhz = 0;
 	uint64_t t_fps = time_us_64();
-	st_puts(6, 28, "UP/DN speed   ESC quit", 1, 0xb6f000, 0x000000);   /* static hint, drawn once */
+	st_puts(6, 28, "UP/DN clock  ESC quit", 1, 0xb6f000, 0x000000);   /* static hint, drawn once */
 	while(running){
 		uint8_t kst, key; uart_poll();
 		while(uart_pop_key(&kst, &key)){
 			if(key == DK_ESC || key == DK_BREAK){ running = 0; break; }
-			if(kst == KS_PRESS && key == DK_UP){
-				want += 5000000u; if(want > 120000000u) want = 120000000u;
-				spi_set_baudrate(Pico_LCD_SPI_MOD, want);
-			} else if(kst == KS_PRESS && key == DK_DOWN){
-				if(want > 10000000u) want -= 5000000u;
-				spi_set_baudrate(Pico_LCD_SPI_MOD, want);
+			if(kst == KS_PRESS && key == DK_UP && step < NSTEP-1){
+				/* climb a rung: raise the rail+clock, then take SPI to clk_sys/4 */
+				if(kf_clock_set_bare(STEP[step+1].khz, STEP[step+1].v, true)){
+					step++;
+					spi_set_baudrate(Pico_LCD_SPI_MOD, STEP[step].spi);
+				}                          /* PLL rejected the rate -> stay on this rung */
+			} else if(kst == KS_PRESS && key == DK_DOWN && step > 0){
+				/* drop a rung: clock+rail down first, then SPI */
+				if(kf_clock_set_bare(STEP[step-1].khz, STEP[step-1].v, false)){
+					step--;
+					spi_set_baudrate(Pico_LCD_SPI_MOD, STEP[step].spi);
+				}
 			}
 		}
 		if(!running) break;
@@ -179,8 +201,9 @@ static void act_screentest(lv_event_t *e){ (void)e;
 		/* repaint the readout ONLY when it changes (the strip is never bar-filled, so no flicker) */
 		uint32_t mhz = spi_get_baudrate(Pico_LCD_SPI_MOD) / 1000000u;
 		if(fps != shown_fps || mhz != shown_mhz){
-			char buf[48];
-			snprintf(buf, sizeof buf, "SPI %lu MHz  FPS %d  ", (unsigned long)mhz, fps);
+			char buf[64];
+			snprintf(buf, sizeof buf, "SPI %lu  SYS %lu  FPS %d  ",
+			         (unsigned long)mhz, (unsigned long)clock_sys_mhz(), fps);
 			draw_rect_spi(0, 0, LCD_W - 1, 19, 0x000000);
 			st_puts(6, 6, buf, 2, 0xffc94d, 0x000000);
 			shown_fps = fps; shown_mhz = mhz;
@@ -195,6 +218,9 @@ static void act_screentest(lv_event_t *e){ (void)e;
 		kf_net_poll();                /* keep WiFi/time alive like the GB loop does */
 	}
 
+	/* Restore the core clock + voltage we entered with (drop down from whatever rung
+	   we left on), then hand the panel back at the normal OS SPI speed. */
+	if(step != 0) kf_clock_set_bare(entry_khz, entry_v, entry_khz > STEP[step].khz);
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);   /* restore the OS panel clock */
 	disp_resume_core1();
 	kf_grab_input(0);
