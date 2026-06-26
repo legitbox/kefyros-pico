@@ -1,5 +1,6 @@
 // apps/calc_parse.c — tokenizer + recursive-descent parser -> AST.
-// Precedence: '=' < (+ -) < (* / %) < unary(- +) < '^' (right-assoc) < postfix '!'.
+// Precedence: '=' < (+ -) < (* / // %) < unary(- +) < ('^' | '**') right-assoc < postfix '!'.
+// Python-compatible: '**' aliases '^' (power); '//' is floor division -> floor(a/b).
 // Implicit multiply: 2x, 2(x+1), 2sin(x), (a)(b), 3pi. Function calls name(a,b,...).
 // Identifiers allow high-bit bytes so UTF-8 names (e.g. theta) parse. Part of the
 // Kefyros scientific calculator.
@@ -88,8 +89,8 @@ static cnode *parse_pow(void){
 	cnode *base = parse_postfix();
 	if(!base) return NULL;
 	skip();
-	if(*P=='^'){
-		P++;
+	if(*P=='^' || (P[0]=='*' && P[1]=='*')){          /* '^' or Python '**' */
+		P += (*P=='^') ? 1 : 2;
 		cnode *e = parse_unary();                     /* right-assoc + allow -exp */
 		if(!e){ cn_free(base); return NULL; }
 		return cn_bin('^', base, e);
@@ -110,7 +111,15 @@ static cnode *parse_term(void){
 	for(;;){
 		skip();
 		char op = *P;
-		if(op=='*'||op=='/'||op=='%'){
+		if(op=='/' && P[1]=='/'){                     /* Python floor division: a//b -> floor(a/b) */
+			P += 2;
+			cnode *b = parse_unary();
+			if(!b){ cn_free(a); return NULL; }
+			cnode *fl = cn_new(CN_CALL);
+			strncpy(fl->name, "floor", CN_NAMELEN-1);
+			fl->args[fl->nargs++] = cn_bin('/', a, b);
+			a = fl;
+		} else if(op=='*'||op=='/'||op=='%'){
 			P++;
 			cnode *b = parse_unary();
 			if(!b){ cn_free(a); return NULL; }

@@ -142,6 +142,27 @@ V2.0 is the foundation all of them stand on.
 
 ---
 
+## 8b. Pythonic compatibility (user direction: "keep it pythonic if possible")
+The grammar is already a **superset** of Python for expressions — function names match
+Python/`math` (`pow sqrt abs min max round floor ceil log exp`), `%` is modulo, `()` calls
+work. Keep the math-native niceties (`^`, implicit multiply `2x`/`3pi`, `f(x)=…`) **and**
+accept Python forms alongside them. Principle: *additive — never remove a math form to add a
+Python one.*
+
+**Done (parser, build-verified):**
+- `**` accepted as an alias for `^` (power).
+- `//` floor division → desugars to `floor(a/b)`.
+
+**Deferred decisions (real forks — additive, but need a call):**
+- **`==` as equality alias.** Today `=` is overloaded as both assign and math-equality
+  (`solve(x^2=4,x)`). Python uses `==` for equality. Safe to *also* accept `==` (superset).
+  Recommend yes.
+- **`log` semantics conflict.** Calc `log(x)` = log10 (TI convention); Python `math.log` =
+  *natural* log. Can't satisfy both silently. Options: keep log10 (TI), or make `log`=ln
+  (Python) and require `log10()`. NEEDS A DECISION — don't change silently.
+- **comparisons / booleans** (`< > <= >= and or`) — for piecewise & conditions; lands with
+  V2.1 (solve/piecewise), not V2.0.
+
 ## 9. First concrete actions (V2.0-a)
 1. `apps/calc_bignum.{c,h}` — int64-fast-path bignum, host-tested.
 2. `apps/calc_num.{c,h}` — `cnum` rational over bignum (normalise, arith, to/from string/double).
