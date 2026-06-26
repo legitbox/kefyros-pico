@@ -8,6 +8,7 @@
 // is 0x20-0x7F only — non-ASCII rendered as missing-glyph boxes).
 #include "../kefyros.h"
 #include "../ui/theme.h"
+#include "../ui/deskconf.h"          /* persist result mode + angle to the SD config */
 #include "calc.h"
 #include "calc_num.h"
 #include "calc_exact.h"
@@ -23,6 +24,17 @@ enum { SCR_HOME=0, SCR_SCRATCH, SCR_SOLVE, SCR_GRAPH, SCR_GRAPH3D, SCR_TABLE, SC
    to numeric only when an expression isn't rational; DECIMAL always shows a number. */
 enum { RMODE_EXACT = 0, RMODE_DECIMAL };
 static int g_result_mode = RMODE_EXACT;
+
+/* persist result mode + angle to the SD config (deskconf), and reload them on app open. */
+static void calc_settings_save(void){
+	deskconf_set_int("calc.result", g_result_mode);
+	deskconf_set_int("calc.angle",  calc_angle());
+}
+static void calc_settings_load(void){
+	g_result_mode = deskconf_get_int("calc.result", RMODE_EXACT) ? RMODE_DECIMAL : RMODE_EXACT;
+	int a = deskconf_get_int("calc.angle", CALC_DEG);
+	calc_set_angle(a >= 0 && a <= 2 ? a : CALC_DEG);
+}
 static int active = 0;
 static int screen = SCR_HOME;
 static int g_return_screen = SCR_SCRATCH;   /* where a viewer (graph/table/3D) returns to */
@@ -252,7 +264,7 @@ static lv_obj_t *build_scratch(void){
 
 static void scratch_key(uint8_t key, int mods){
 	if(key==DK_ESC || key==DK_F1+4 || key==DK_BREAK){ show_screen(SCR_HOME); return; }
-	if(key==DK_F1+3){ calc_set_angle((calc_angle()+1)%3); set_status(); return; } /* F4 angle */
+	if(key==DK_F1+3){ calc_set_angle((calc_angle()+1)%3); calc_settings_save(); set_status(); return; } /* F4 angle */
 	if(key==DK_ENTER){
 		const char *t = lv_textarea_get_text(ta);
 		char line[160]; strncpy(line, t, sizeof line-1); line[sizeof line-1]=0;
@@ -651,6 +663,7 @@ static void settings_key(uint8_t k, int m){
 	if(fwd || back){
 		if(set_sel==0) g_result_mode ^= 1;                              /* Exact <-> Decimal */
 		else calc_set_angle((calc_angle() + (fwd?1:2)) % 3);            /* Deg/Rad/Grad cycle */
+		calc_settings_save();
 		settings_hl();
 	}
 }
@@ -720,6 +733,7 @@ void calc_poll(void){
 
 void app_calc_open(void){
 	kf_clock_calc();              /* run the panel at this chip's max: 420 MHz / 105 MHz SPI */
+	calc_settings_load();         /* restore result mode + angle from the SD config */
 	active = 1; hpos = -1; mode = CMODE_REPL;
 	home_sel = 0; form_scr = NULL;
 	show_screen(SCR_HOME);
