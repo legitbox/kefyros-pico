@@ -38,14 +38,18 @@ Icon: amber pencil (`/kefyros/icons/paint.png`, from Downloads `paint.png`).
 - Integer zoom levels auto-fit on New: 144→2x (288px), 128→2x, 64→4x, 32→8x, 16→16x; `+`/`-`
   change zoom, pan with Shift+arrows when the view exceeds 296px.
 
-## Memory budget (while app open; all malloc-on-open / free-on-close)
-- Art canvas I4: ~11KB.
-- Shape preview / undo scratch (one "before" snapshot): ~11KB.
-- **Undo/redo = bounded delta ring**, NOT fixed snapshots. Each op records changed pixels as
-  (offset, old_index) pairs; a bucket-fill of the whole canvas ≈ the canvas, a pencil dab ≈ a few
-  bytes. Cap total undo memory ~48KB, drop oldest op when over. Bounds RAM regardless of canvas
-  size and is far cheaper than N×10KB full snapshots.
-- Peak ≈ 11 + 11 + 48 ≈ **~70KB** while open, all freed on exit.
+## Memory budget — SRAM holds only the live data; undo history lives in PSRAM
+- **SRAM (malloc-on-open / free-on-close):** the I4 art canvas (~11KB) + one preview/restore
+  scratch (~11KB) = **~21KB total**. This is all LVGL ever dereferences directly.
+- **WHY the canvas can't be in PSRAM:** PSRAM is a PIO-SPI **block store, not memory-mapped**
+  (`kf_psram_read/write`, no real pointers). LVGL renders/scales the canvas by dereferencing the
+  buffer pointer every frame — so the live canvas MUST be SRAM. It's only ~11KB, so that's free.
+- **Undo/redo → PSRAM, full snapshots (no delta ring needed).** History is accessed by our own
+  code, not LVGL, so PSRAM is the ideal home. Store a 10KB snapshot per op; 8MB ÷ 10KB ≈ **~800
+  levels** = effectively unlimited. Cost per op ≈ a 10KB quad-QSPI write ≈ **~0.5ms** (undo is a
+  rare keypress — imperceptible). `kf_psram_alloc` a ring on open, `kf_psram_free_to` on close
+  (shared LIFO bump allocator, same pattern as the GB ROM cache).
+- Net SRAM peak while open ≈ **~21KB**, all freed on exit; undo depth bounded only by PSRAM.
 
 ## UX / keyboard map (modal, single-hand friendly)
 - **Arrows** move the pixel cursor. **Space/Enter** = apply current tool at cursor.
@@ -85,7 +89,7 @@ Icon: amber pencil (`/kefyros/icons/paint.png`, from Downloads `paint.png`).
 2. **Color + fill** — palette HUD (`Tab`), slot cycle/number keys, eyedropper, bucket fill
    (scanline flood). Palette edit screen (`F6`).
 3. **Shapes** — line (Bresenham), rectangle, ellipse (midpoint); outline + filled; live preview.
-4. **Undo/redo** — bounded delta ring wired into every mutating op.
+4. **Undo/redo** — PSRAM snapshot ring (`kf_psram_alloc`/`free_to`) wired into every mutating op.
 5. **Persistence** — `.kpx` save/load/open-picker, New-canvas size picker, unsaved guard.
 6. **PNG export** — encoder + slot-0-transparent toggle; drop into `/kefyros/paint/`.
 
