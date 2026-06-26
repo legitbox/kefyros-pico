@@ -35,6 +35,7 @@ static int g_w = 64, g_h = 64, g_size_i = 2;      /* default 64x64 */
 static int g_zoom = 4, g_cx = 32, g_cy = 32;
 static int g_color = 7, g_tool = TOOL_PENCIL;     /* default white pencil */
 static int g_grid = 1, g_hud_on = 1, g_pen = 0;   /* pen = draw-while-moving */
+static int g_ox, g_oy;                            /* scaled-canvas top-left, relative to clip */
 
 /* ---------------- I4 pixel access (direct nibble, matches lv_canvas_set_px layout) -------- */
 static inline void px_set(int x, int y, int idx){
@@ -52,20 +53,22 @@ static void recompute_zoom(void){
 	if(g_zoom > 32) g_zoom = 32;
 }
 static void relayout(void){
-	int vw = g_w * g_zoom, vh = g_h * g_zoom;
-	lv_obj_set_size(g_canvas, vw, vh);
-	int ox, oy;
-	if(vw <= LCD_W) ox = (LCD_W - vw) / 2;        /* fits: centre */
+	int vw = g_w * g_zoom, vh = g_h * g_zoom;     /* on-screen size of the scaled canvas */
+	if(vw <= LCD_W) g_ox = (LCD_W - vw) / 2;      /* fits: centre */
 	else {                                        /* overflows: keep cursor in view */
-		ox = LCD_W / 2 - (g_cx * g_zoom + g_zoom / 2);
-		if(ox > 0) ox = 0; if(ox < LCD_W - vw) ox = LCD_W - vw;
+		g_ox = LCD_W / 2 - (g_cx * g_zoom + g_zoom / 2);
+		if(g_ox > 0) g_ox = 0; if(g_ox < LCD_W - vw) g_ox = LCD_W - vw;
 	}
-	if(vh <= KF_CONTENT_H) oy = (KF_CONTENT_H - vh) / 2;
+	if(vh <= KF_CONTENT_H) g_oy = (KF_CONTENT_H - vh) / 2;
 	else {
-		oy = KF_CONTENT_H / 2 - (g_cy * g_zoom + g_zoom / 2);
-		if(oy > 0) oy = 0; if(oy < KF_CONTENT_H - vh) oy = KF_CONTENT_H - vh;
+		g_oy = KF_CONTENT_H / 2 - (g_cy * g_zoom + g_zoom / 2);
+		if(g_oy > 0) g_oy = 0; if(g_oy < KF_CONTENT_H - vh) g_oy = KF_CONTENT_H - vh;
 	}
-	lv_obj_set_pos(g_canvas, ox, oy);             /* (auto-invalidates old+new area) */
+	/* transform-scale the native-size canvas (pivot is top-left, set in rebuild). The object
+	   stays g_w x g_h; the scaled image grows down-right from (g_ox,g_oy) to fill vw x vh. */
+	lv_image_set_scale(g_canvas, (uint32_t)(g_zoom * 256));   /* 256 = 1x */
+	lv_obj_set_pos(g_canvas, g_ox, g_oy);
+	lv_obj_invalidate(g_clip);                    /* redraw image + overlay */
 }
 
 /* ---------------- HUD ---------------- */
@@ -79,22 +82,24 @@ static void update_hud(void){
 /* ---------------- overlay: grid + cursor drawn over the canvas (never touch the buffer) --- */
 static void clip_draw_post(lv_event_t *e){
 	lv_layer_t *layer = lv_event_get_layer(e);
-	lv_area_t cc; lv_obj_get_coords(g_canvas, &cc);   /* absolute on-screen canvas rect */
+	lv_area_t cl; lv_obj_get_coords(g_clip, &cl);     /* clip's absolute origin (pad 0) */
+	int bx = cl.x1 + g_ox, by = cl.y1 + g_oy;         /* scaled-canvas top-left, absolute */
+	int vw = g_w * g_zoom, vh = g_h * g_zoom;
 
 	if(g_grid && g_zoom >= GRID_MIN_ZOOM){
 		lv_draw_rect_dsc_t gd; lv_draw_rect_dsc_init(&gd);
 		gd.bg_color = KF_BORDER; gd.bg_opa = LV_OPA_40; gd.border_width = 0;
-		for(int i = 0; i <= g_w; i++){ int x = cc.x1 + i * g_zoom;
-			lv_area_t v = { x, cc.y1, x, cc.y2 }; lv_draw_rect(layer, &gd, &v); }
-		for(int j = 0; j <= g_h; j++){ int y = cc.y1 + j * g_zoom;
-			lv_area_t hh = { cc.x1, y, cc.x2, y }; lv_draw_rect(layer, &gd, &hh); }
+		for(int i = 0; i <= g_w; i++){ int x = bx + i * g_zoom;
+			lv_area_t v = { x, by, x, by + vh - 1 }; lv_draw_rect(layer, &gd, &v); }
+		for(int j = 0; j <= g_h; j++){ int y = by + j * g_zoom;
+			lv_area_t hh = { bx, y, bx + vw - 1, y }; lv_draw_rect(layer, &gd, &hh); }
 	}
 
 	lv_draw_rect_dsc_t cd; lv_draw_rect_dsc_init(&cd);
 	cd.bg_opa = LV_OPA_TRANSP; cd.border_color = KF_ACTIVE;
 	cd.border_width = g_zoom >= 4 ? 2 : 1; cd.border_opa = LV_OPA_COVER;
-	lv_area_t a = { cc.x1 + g_cx * g_zoom, cc.y1 + g_cy * g_zoom,
-	                cc.x1 + g_cx * g_zoom + g_zoom - 1, cc.y1 + g_cy * g_zoom + g_zoom - 1 };
+	lv_area_t a = { bx + g_cx * g_zoom, by + g_cy * g_zoom,
+	                bx + g_cx * g_zoom + g_zoom - 1, by + g_cy * g_zoom + g_zoom - 1 };
 	lv_draw_rect(layer, &cd, &a);
 }
 
@@ -107,8 +112,9 @@ static void rebuild_canvas(int w, int h){
 	lv_canvas_set_draw_buf(g_canvas, g_db);
 	for(int i = 0; i < 16; i++)
 		lv_canvas_set_palette(g_canvas, (uint8_t)i, lv_color_to_32(lv_color_hex(PAL[i]), 0xFF));
-	lv_image_set_inner_align(g_canvas, LV_IMAGE_ALIGN_STRETCH);  /* src->obj = integer zoom */
-	lv_image_set_antialias(g_canvas, false);                     /* crisp nearest-neighbour */
+	lv_obj_set_size(g_canvas, g_w, g_h);          /* native size; transform-scale enlarges it */
+	lv_image_set_pivot(g_canvas, 0, 0);           /* scale grows down-right from the top-left */
+	lv_image_set_antialias(g_canvas, false);      /* crisp nearest-neighbour pixels */
 	g_cx = g_w / 2; g_cy = g_h / 2;
 	recompute_zoom();
 	relayout();
@@ -116,7 +122,7 @@ static void rebuild_canvas(int w, int h){
 
 static void stamp(void){
 	px_set(g_cx, g_cy, g_tool == TOOL_ERASER ? 0 : g_color);
-	lv_obj_invalidate(g_canvas);
+	lv_obj_invalidate(g_clip);    /* redraws the canvas image (child) + overlay */
 }
 static void move_cursor(int dx, int dy){
 	g_cx += dx; g_cy += dy;
