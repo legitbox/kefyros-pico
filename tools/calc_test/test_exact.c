@@ -61,16 +61,40 @@ int main(void){
 	EX("min(3/2,4/3,5)", "4/3");
 	EX("pow(2,10)", "1024");
 
+	/* special-angle trig (RAD mode default): rational results only (Niven) */
+	EX("sin(pi/6)", "1/2");
+	EX("sin(5*pi/6)", "1/2");
+	EX("sin(7*pi/6)", "-1/2");
+	EX("cos(pi/3)", "1/2");
+	EX("cos(pi)", "-1");
+	EX("sin(pi/2)", "1");
+	EX("tan(pi/4)", "1");
+	EX("tan(3*pi/4)", "-1");
+	EX("sin(0)", "0");
+	EX("cos(0)", "1");
+	EX("sin(2*pi)", "0");
+
 	/* must fall back to numeric (NOT exact) */
 	INEX("0.5+0.5");      /* decimal literals */
 	INEX("1/2+0.25");     /* mixed */
 	INEX("pi");           /* irrational constant */
-	INEX("sqrt(2)");      /* surd — V2.0-b, not here */
+	INEX("sqrt(2)");      /* surd — next V2.0-b increment, not here */
 	INEX("2^(1/2)");      /* non-integer power */
-	INEX("sin(0)");       /* transcendental */
-	INEX("x");            /* variable */
+	INEX("sin(pi/4)");    /* sqrt(2)/2 — irrational */
+	INEX("tan(pi/3)");    /* sqrt(3) — irrational */
+	INEX("sin(1)");       /* 1 radian — transcendental */
+	INEX("x");            /* unset variable */
 	INEX("2^100000");     /* RAM guard: result too big -> numeric path */
 	INEX("100000!");      /* work guard: factorial beyond the cap */
+
+	/* exact variables: x = 1/2 stays exact through later expressions */
+	{ cnum half; cnum_init(&half); cnum_set_i64(&half, 1);
+	  cnum two; cnum_init(&two); cnum_set_i64(&two, 2); cnum_div(&half, &half, &two);
+	  calc_set_var_exact("x", &half); cnum_free(&half); cnum_free(&two); }
+	EX("x", "1/2");
+	EX("x+x", "1");
+	EX("x^2", "1/4");
+	EX("2*x+1/3", "4/3");
 
 	/* parser sanity for the pythonic equality marker */
 	cnode *eq = calc_parse("x==4");

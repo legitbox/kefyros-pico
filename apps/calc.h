@@ -50,6 +50,8 @@ int     calc_angle(void);
 void    calc_set_angle(int mode);
 int     calc_get_var(const char *name, double *out);   /* 1 if defined */
 void    calc_set_var(const char *name, double v);
+void    calc_set_var_exact(const char *name, const struct cnum *x);  /* store an exact value */
+int     calc_get_var_exact(const char *name, struct cnum *out);      /* 1 if var holds exact */
 void    calc_def_fun(const char *name, char params[][CN_NAMELEN], int nparams, const cnode *body);
 const struct cfun *calc_find_fun(const char *name);    /* opaque; used by eval */
 void    calc_reset_env(void);

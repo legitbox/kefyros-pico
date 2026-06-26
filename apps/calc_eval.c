@@ -44,7 +44,8 @@ cnode *cn_clone(const cnode *n){
 
 /* ===================== environment ===================== */
 struct cfun { char name[CN_NAMELEN]; char params[CN_MAXPARAMS][CN_NAMELEN]; int nparams; cnode *body; };
-typedef struct cvar { char name[CN_NAMELEN]; double val; } cvar;
+/* val is always set (numeric view); exact!=NULL when the variable holds an exact rational. */
+typedef struct cvar { char name[CN_NAMELEN]; double val; cnum *exact; } cvar;
 
 static struct {
 	cvar  vars[80]; int nvars;
@@ -59,12 +60,32 @@ int calc_get_var(const char *name, double *out){
 	for(int i=0;i<ENV.nvars;i++) if(!strcmp(ENV.vars[i].name,name)){ if(out)*out=ENV.vars[i].val; return 1; }
 	return 0;
 }
+/* find an existing slot or make a new one; returns NULL if the table is full. */
+static cvar *var_slot(const char *name){
+	for(int i=0;i<ENV.nvars;i++) if(!strcmp(ENV.vars[i].name,name)) return &ENV.vars[i];
+	if(ENV.nvars >= (int)(sizeof ENV.vars/sizeof ENV.vars[0])) return NULL;
+	cvar *s = &ENV.vars[ENV.nvars++];
+	strncpy(s->name, name, CN_NAMELEN-1); s->name[CN_NAMELEN-1]=0; s->exact = NULL;
+	return s;
+}
+static void var_clear_exact(cvar *s){ if(s->exact){ cnum_free(s->exact); free(s->exact); s->exact = NULL; } }
+
 void calc_set_var(const char *name, double v){
-	for(int i=0;i<ENV.nvars;i++) if(!strcmp(ENV.vars[i].name,name)){ ENV.vars[i].val=v; return; }
-	if(ENV.nvars < (int)(sizeof ENV.vars/sizeof ENV.vars[0])){
-		strncpy(ENV.vars[ENV.nvars].name, name, CN_NAMELEN-1);
-		ENV.vars[ENV.nvars].val = v; ENV.nvars++;
-	}
+	cvar *s = var_slot(name);
+	if(s){ var_clear_exact(s); s->val = v; }     /* plain numeric assignment drops any exact value */
+}
+void calc_set_var_exact(const char *name, const struct cnum *x){
+	cvar *s = var_slot(name);
+	if(!s) return;
+	var_clear_exact(s);
+	s->val = cnum_to_double(x);
+	s->exact = malloc(sizeof(cnum));
+	if(s->exact){ cnum_init(s->exact); cnum_copy(s->exact, x); }
+}
+int calc_get_var_exact(const char *name, struct cnum *out){
+	for(int i=0;i<ENV.nvars;i++)
+		if(!strcmp(ENV.vars[i].name,name) && ENV.vars[i].exact){ cnum_copy(out, ENV.vars[i].exact); return 1; }
+	return 0;
 }
 const struct cfun *calc_find_fun(const char *name){
 	for(int i=0;i<ENV.nfuns;i++) if(!strcmp(ENV.funs[i].name,name)) return &ENV.funs[i];
@@ -82,6 +103,7 @@ void calc_def_fun(const char *name, char params[][CN_NAMELEN], int nparams, cons
 }
 void calc_reset_env(void){
 	for(int i=0;i<ENV.nfuns;i++){ cn_free(ENV.funs[i].body); ENV.funs[i].body=NULL; }
+	for(int i=0;i<ENV.nvars;i++) var_clear_exact(&ENV.vars[i]);
 	ENV.nvars = 0; ENV.nfuns = 0; ENV.angle = CALC_RAD;
 }
 

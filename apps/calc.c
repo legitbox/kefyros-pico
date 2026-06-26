@@ -176,6 +176,19 @@ static void run_line(const char *text){
 			cn_free(n); return;
 		}
 		if(n->a->type == CN_VAR){                 /* assignment: name = expr */
+			/* exact assignment keeps the rational (x = 1/2 stays 1/2 for later use) */
+			if(g_result_mode == RMODE_EXACT){
+				cnum ex; cnum_init(&ex);
+				if(calc_eval_exact(n->b, &ex)){
+					char num[192];
+					if(cnum_to_str(&ex, num, sizeof num) >= 0){
+						calc_set_var_exact(n->a->name, &ex); calc_set_var_exact("ans", &ex);
+						char r[256]; snprintf(r,sizeof r,"%s = %s", n->a->name, num); echo_res(r);
+						cnum_free(&ex); cn_free(n); return;
+					}
+				}
+				cnum_free(&ex);
+			}
 			int ok=1; double v = calc_eval(n->b, &ok);
 			if(!ok){ echo_err(calc_err); cn_free(n); return; }
 			calc_set_var(n->a->name, v); calc_set_var("ans", v);

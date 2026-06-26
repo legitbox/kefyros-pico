@@ -55,7 +55,99 @@ static int bi_ncr(bigint *out, long n, long r){
 	return 1;
 }
 
+/* ---- exact trig of special angles (rational results only; Niven's theorem) ---- */
+
+/* match a node to r*pi with r rational: pi, c*pi, pi/n, c*pi/n, sums/negs. 1 on success. */
+static int match_pi(const cnode *n, cnum *r){
+	if(!n) return 0;
+	if(n->type==CN_VAR && (!strcmp(n->name,"pi")||!strcmp(n->name,"\xcf\x80"))){ cnum_set_i64(r,1); return 1; }
+	if(n->type==CN_NEG){ if(!match_pi(n->a,r)) return 0; cnum_neg(r); return 1; }
+	if(n->type==CN_BINOP){
+		if(n->op=='*'){
+			cnum c; cnum_init(&c); int ok=0;
+			if(calc_eval_exact(n->a,&c) && match_pi(n->b,r)){ cnum_mul(r,r,&c); ok=1; }
+			else if(match_pi(n->a,r) && calc_eval_exact(n->b,&c)){ cnum_mul(r,r,&c); ok=1; }
+			cnum_free(&c); return ok;
+		}
+		if(n->op=='/'){
+			cnum d; cnum_init(&d); int ok=0;
+			if(match_pi(n->a,r) && calc_eval_exact(n->b,&d) && !cnum_is_zero(&d)){ cnum_div(r,r,&d); ok=1; }
+			cnum_free(&d); return ok;
+		}
+		if(n->op=='+'||n->op=='-'){
+			cnum rb; cnum_init(&rb); int ok=0;
+			if(match_pi(n->a,r) && match_pi(n->b,&rb)){ if(n->op=='+') cnum_add(r,r,&rb); else cnum_sub(r,r,&rb); ok=1; }
+			cnum_free(&rb); return ok;
+		}
+	}
+	return 0;
+}
+/* the trig argument as a multiple of pi ("half-turns"), honouring the angle mode. */
+static int arg_half_turns(const cnode *n, cnum *r){
+	int mode = calc_angle();
+	if(mode==CALC_RAD){
+		if(match_pi(n, r)) return 1;
+		cnum a; cnum_init(&a); int z = 0;     /* a bare 0 angle is exact (sin0=0, cos0=1) */
+		if(calc_eval_exact(n, &a) && cnum_is_zero(&a)){ cnum_set_i64(r, 0); z = 1; }
+		cnum_free(&a); return z;
+	}
+	cnum a; cnum_init(&a);
+	int ok = calc_eval_exact(n, &a);          /* DEG/GRAD: arg is a plain number of deg/grad */
+	if(ok){ cnum d; cnum_init(&d); cnum_set_i64(&d, mode==CALC_DEG ? 180 : 200); cnum_div(r,&a,&d); cnum_free(&d); }
+	cnum_free(&a); return ok;
+}
+/* out = r mod m, in [0,m) */
+static void rat_mod(cnum *out, const cnum *r, int m){
+	cnum md; cnum_init(&md); cnum_set_i64(&md, m);
+	cnum q; cnum_init(&q); cnum_div(&q, r, &md);
+	bigint fl; bi_init(&fl); ratfloor(&fl, &q);
+	cnum f; cnum_init(&f); set_int(&f, &fl);
+	cnum_mul(&f, &f, &md); cnum_sub(out, r, &f);
+	cnum_free(&md); cnum_free(&q); bi_free(&fl); cnum_free(&f);
+}
+static int eq_frac(const cnum *s, long a, long b){
+	cnum f, d; cnum_init(&f); cnum_init(&d);
+	cnum_set_i64(&f, a); cnum_set_i64(&d, b); cnum_div(&f, &f, &d);
+	int e = (cnum_cmp(s, &f) == 0); cnum_free(&f); cnum_free(&d); return e;
+}
+static void set_half(cnum *out, int sign){ cnum_set_i64(out, sign); cnum d; cnum_init(&d); cnum_set_i64(&d,2); cnum_div(out,out,&d); cnum_free(&d); }
+/* sin(r*pi): rational only at 0, +-1/2, +-1 (s = r mod 2 in [0,2)) */
+static int sin_pi(const cnum *r, cnum *out){
+	cnum s; cnum_init(&s); rat_mod(&s, r, 2); int got = 1;
+	if(cnum_is_int(&s))                       cnum_set_i64(out, 0);    /* 0, 1 -> 0 */
+	else if(eq_frac(&s,1,2))                  cnum_set_i64(out, 1);
+	else if(eq_frac(&s,3,2))                  cnum_set_i64(out, -1);
+	else if(eq_frac(&s,1,6)||eq_frac(&s,5,6)) set_half(out, 1);
+	else if(eq_frac(&s,7,6)||eq_frac(&s,11,6))set_half(out, -1);
+	else got = 0;
+	cnum_free(&s); return got;
+}
+/* cos(r*pi) = sin((r+1/2)*pi) */
+static int cos_pi(const cnum *r, cnum *out){
+	cnum h; cnum_init(&h); set_half(&h, 1);
+	cnum rr; cnum_init(&rr); cnum_add(&rr, r, &h);
+	int g = sin_pi(&rr, out); cnum_free(&h); cnum_free(&rr); return g;
+}
+/* tan(r*pi): rational only at 0, +-1 (s = r mod 1; 1/2 is undefined) */
+static int tan_pi(const cnum *r, cnum *out){
+	cnum s; cnum_init(&s); rat_mod(&s, r, 1); int got = 1;
+	if(cnum_is_zero(&s))     cnum_set_i64(out, 0);
+	else if(eq_frac(&s,1,4)) cnum_set_i64(out, 1);
+	else if(eq_frac(&s,3,4)) cnum_set_i64(out, -1);
+	else got = 0;            /* 1/2 undefined; pi/3 etc. irrational */
+	cnum_free(&s); return got;
+}
+
 static int eval_call_exact(const cnode *n, cnum *out){
+	/* trig of special angles: the argument is symbolic (r*pi), so handle it before the
+	   generic "evaluate every arg to a rational" step below would reject it. */
+	if(n->nargs==1 && (!strcmp(n->name,"sin")||!strcmp(n->name,"cos")||!strcmp(n->name,"tan"))){
+		cnum r; cnum_init(&r); int got = 0;
+		if(arg_half_turns(n->args[0], &r))
+			got = n->name[0]=='s' ? sin_pi(&r,out) : n->name[0]=='c' ? cos_pi(&r,out) : tan_pi(&r,out);
+		cnum_free(&r);
+		return got;     /* unrecognised angle -> decline -> numeric path */
+	}
 	const char *nm = n->name;
 	int na = n->nargs;
 	/* evaluate all args exactly; bail if any isn't exact */
@@ -176,7 +268,9 @@ int calc_eval_exact(const cnode *n, cnum *out){
 	}
 	case CN_CALL:
 		return eval_call_exact(n, out);
+	case CN_VAR:
+		return calc_get_var_exact(n->name, out);   /* exact-valued user var (pi/e stay symbolic) */
 	default:
-		return 0;   /* CN_VAR (pi/e/user vars), CN_EQ — not an exact rational here */
+		return 0;   /* CN_EQ — not an exact rational here */
 	}
 }
