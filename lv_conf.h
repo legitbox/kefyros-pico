@@ -57,10 +57,6 @@
 #define LV_FS_POSIX_LETTER  'A'
 #define LV_FS_POSIX_PATH    ""
 
-/* Canvas widget — the Paint app's I4 (16-colour indexed) document buffer. On by
-   default in lv_conf_internal, but Paint hard-depends on it, so pin it explicitly. */
-#define LV_USE_CANVAS       1
-
 /* Image cache budget. CRITICAL: this lives in the heap, and our heap is only
    ~210 KB (the rest of SRAM is the 200 KB wallpaper scratch + LVGL draw buffers).
    A 2 MB budget meant LVGL NEVER evicted decoded images (it thought it had 2 MB
