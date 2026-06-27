@@ -146,6 +146,9 @@ static void ed_teardown(void){
 /* open the editor for `posix` (source path) named `name`. Returns 1 if it took over the
    screen, 0 on failure (caller should show the can't-decode message). */
 static int ed_open(const char *posix, const char *name){
+	/* release the chooser preview's hold on the shared raw_dsc BEFORE the editor takes it,
+	   so deleting the old chooser screen can't invalidate the editor image's decode cache. */
+	if(prev_img) lv_image_set_src(prev_img, NULL);
 	if(!decode_thumb(posix, &ed_W, &ed_H, &ed_st)) return 0;   /* decodes into g_thumb */
 	ed_tw = ed_W >> ed_st; ed_th = ed_H >> ed_st;
 	if(ed_tw < 1) ed_tw = 1;

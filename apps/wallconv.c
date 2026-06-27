@@ -18,6 +18,7 @@
 #include "lvgl/src/libs/tjpgd/tjpgd.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define WC_POOL 8192          /* TJpgDec work pool; 4 KB is the lib's rec, 8 KB is safe with scaling */
 
@@ -35,23 +36,28 @@ static size_t wc_in(JDEC *jd, uint8_t *buf, size_t n){
 	return fseek(c->f, (long)n, SEEK_CUR) == 0 ? n : 0;
 }
 
-/* TJpgDec output: `bmp` is an RGB888 block covering output rect [left..right]x[top..bottom]
-   (inclusive, in scaled-image coords). Copy the part overlapping our window as RGB565. */
+/* TJpgDec output: `bmp` is a block covering output rect [left..right]x[top..bottom]
+   (inclusive, in scaled-image coords). Copy the part overlapping our window as RGB565.
+   Two non-obvious TJpgDec facts (both verified against a host decode of real photos):
+     * the pixel order is B,G,R (NOT R,G,B) — Cb drives byte0, Cr drives byte2; and
+     * for a DESCALED decode (scale>0) the valid pixels sit at the top-left of rows whose
+       stride is the UNSCALED MCU width (msx*8), not the scaled rect width. lv_tjpgd never
+       descales (it always runs scale 0) so this fork's descaler stride is otherwise untested. */
 static int wc_out(JDEC *jd, void *bmp, JRECT *r){
 	wc_ctx *c = (wc_ctx*)jd->device;
 	const uint8_t *p = (const uint8_t*)bmp;
-	int bw = r->right - r->left + 1;            /* block width in px */
+	int rowstride = (jd->msx * 8) * 3;          /* unscaled MCU width — see note above */
 	uint16_t line[32];                          /* an MCU is at most 16 px wide; 32 is slack */
 	for(int y = r->top; y <= r->bottom; y++){
 		int dy = y - c->sy0;
 		if(dy < 0 || dy >= c->dstH) continue;
-		const uint8_t *row = p + (size_t)(y - r->top) * bw * 3;
+		const uint8_t *row = p + (size_t)(y - r->top) * rowstride;
 		int run = 0, first = -1;
 		for(int x = r->left; x <= r->right; x++){
 			int dx = x - c->sx0;
 			if(dx < 0 || dx >= c->dstW) continue;   /* the in-window dx are contiguous */
-			const uint8_t *px = row + (size_t)(x - r->left) * 3;
-			line[run] = (uint16_t)(((px[0] & 0xF8) << 8) | ((px[1] & 0xFC) << 3) | (px[2] >> 3));
+			const uint8_t *px = row + (size_t)(x - r->left) * 3;   /* px = B,G,R */
+			line[run] = (uint16_t)(((px[2] & 0xF8) << 8) | ((px[1] & 0xFC) << 3) | (px[0] >> 3));
 			if(first < 0) first = dx;
 			run++;
 		}
@@ -95,12 +101,16 @@ int wc_dims(const char *path, int *w, int *h){
 	return ok;
 }
 
+#define WC_SCRATCH_MAX 1024   /* decode the crop into a bounded PSRAM scratch (<=2 MB) */
+
 int wc_bake(const char *path, int cx, int cy, int side, int out_px, uint32_t dst){
-	/* pick the most aggressive 1/2^s prescale that still leaves >= out_px samples
-	   across the crop, so pass 2 only ever downsamples (no interpolation holes). */
+	/* Decode the crop as large as a bounded scratch allows — full-res (s=0) for crops up to
+	   WC_SCRATCH_MAX, a power-of-two descale for bigger ones — then BOX-AVERAGE down to
+	   out_px. Area averaging (not nearest) is what keeps the result smooth instead of the
+	   chunky 'pixelator' look. Worst-case ~2x-3x supersample feeds the average. */
 	int s = 0;
-	while(s < 3 && (side >> (s + 1)) >= out_px) s++;
-	int cs = side >> s;                         /* crop side in scaled px (>= out_px, usually) */
+	while(s < 3 && (side >> s) > WC_SCRATCH_MAX) s++;
+	int cs = side >> s;
 	if(cs < 1) cs = 1;
 	int sx0 = cx >> s, sy0 = cy >> s;
 
@@ -117,20 +127,34 @@ int wc_bake(const char *path, int cx, int cy, int side, int out_px, uint32_t dst
 
 	if(!wc_run(path, s, sx0, sy0, cs, cs, scratch)){ kf_psram_free_to(mark); return 0; }
 
-	/* pass 2: nearest-neighbour box from cs x cs -> out_px x out_px, row by row */
-	uint16_t *srow = malloc((size_t)cs * 2);
-	uint16_t *orow = malloc((size_t)out_px * 2);
-	int ok = (srow && orow);
-	for(int oy = 0; ok && oy < out_px; oy++){
-		int sy = (int)((long)oy * cs / out_px);
-		kf_psram_read(scratch + (size_t)sy * cs * 2, srow, (uint32_t)cs * 2);
-		for(int ox = 0; ox < out_px; ox++){
-			int sx = (int)((long)ox * cs / out_px);
-			orow[ox] = srow[sx];
+	/* pass 2: streaming box-average cs x cs -> out_px x out_px. Each source row is added
+	   once into the accumulator of its target output row (vertical avg); a precomputed
+	   column map buckets source columns (horizontal avg). One PSRAM write per output row. */
+	int *colmap = malloc((size_t)cs * sizeof(int));
+	uint32_t *aR = calloc(out_px, 4), *aG = calloc(out_px, 4), *aB = calloc(out_px, 4), *cn = calloc(out_px, 4);
+	uint16_t *srow = malloc((size_t)cs * 2), *orow = malloc((size_t)out_px * 2);
+	int ok = (colmap && aR && aG && aB && cn && srow && orow);
+	if(ok) for(int sx = 0; sx < cs; sx++) colmap[sx] = (int)((long)sx * out_px / cs);
+	int cur = 0;
+	for(int sy = 0; ok && sy < cs; sy++){
+		int oy = (int)((long)sy * out_px / cs);
+		if(oy != cur){                          /* finalize the completed output row */
+			for(int ox = 0; ox < out_px; ox++){ uint32_t c = cn[ox] ? cn[ox] : 1;
+				orow[ox] = (uint16_t)(((aR[ox]/c) << 11) | ((aG[ox]/c) << 5) | (aB[ox]/c)); }
+			kf_psram_write(dst + (size_t)cur * out_px * 2, orow, (uint32_t)out_px * 2);
+			memset(aR, 0, out_px*4); memset(aG, 0, out_px*4); memset(aB, 0, out_px*4); memset(cn, 0, out_px*4);
+			cur = oy;
 		}
-		kf_psram_write(dst + (size_t)oy * out_px * 2, orow, (uint32_t)out_px * 2);
+		kf_psram_read(scratch + (size_t)sy * cs * 2, srow, (uint32_t)cs * 2);
+		for(int sx = 0; sx < cs; sx++){ int ox = colmap[sx]; uint16_t v = srow[sx];
+			aR[ox] += (v >> 11) & 0x1F; aG[ox] += (v >> 5) & 0x3F; aB[ox] += v & 0x1F; cn[ox]++; }
 	}
-	free(srow); free(orow);
+	if(ok){                                     /* final output row */
+		for(int ox = 0; ox < out_px; ox++){ uint32_t c = cn[ox] ? cn[ox] : 1;
+			orow[ox] = (uint16_t)(((aR[ox]/c) << 11) | ((aG[ox]/c) << 5) | (aB[ox]/c)); }
+		kf_psram_write(dst + (size_t)cur * out_px * 2, orow, (uint32_t)out_px * 2);
+	}
+	free(colmap); free(aR); free(aG); free(aB); free(cn); free(srow); free(orow);
 	kf_psram_free_to(mark);
 	return ok;
 }
