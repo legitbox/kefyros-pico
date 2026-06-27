@@ -186,19 +186,8 @@ static uint8_t key_to_joypad(uint8_t k){
  * be slow — the ring is ~250 ms deep, so it doesn't underrun while a (44 ms) 2x frame
  * transfers. Video naturally drops frames under load; audio stays smooth. */
 static void play_loop(void){
-	uint32_t dbg_hb = 0; int dbg_ever_blit = 0;   /* DIAG */
 	uint64_t next_us = time_us_64();              /* wall-clock pacer (used only if audio is off) */
 	while(s_state == ST_PLAY){
-		/* === DIAG (temporary) — left margin, mid-screen, clear of the bezel and of
-		 * the centred 1x GB image (x>=80). Three 30px squares stacked vertically:
-		 * [A] y100 : flickers blue/red every pass -> loop is ALIVE
-		 * [B] y140 : GREEN = audio ring allocated (sound on); DARK = audio starved (silent)
-		 * [C] y180 : GREEN once any frame has been blitted (game is actually running) */
-		dbg_hb++;
-		draw_rect_spi(20, 100, 50, 130, (dbg_hb & 0x10) ? 0x0000FF : 0xFF0000);
-		draw_rect_spi(20, 140, 50, 170, kf_audio_running() ? 0x00FF00 : 0x303030);
-		draw_rect_spi(20, 180, 50, 210, dbg_ever_blit      ? 0x00FF00 : 0x303030);
-
 		/* input — this loop monopolises the superloop, so we must drain the keyboard
 		   UART ourselves (the superloop's uart_poll() doesn't run while we're in here). */
 		uint8_t st, key;
@@ -241,7 +230,7 @@ static void play_loop(void){
 			if(next_us + 33486u < now) next_us = now; /* fell badly behind: resync */
 		}
 
-		if(did){ blit_frame(); dbg_ever_blit = 1; }   /* show the most recent frame */
+		if(did) blit_frame();                   /* show the most recent frame */
 		else    tight_loop_contents();          /* ahead of real time: idle */
 
 		kf_net_poll();                          // keep WiFi + SNTP time alive during play
