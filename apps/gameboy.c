@@ -184,16 +184,17 @@ static uint8_t key_to_joypad(uint8_t k){
 static void play_loop(void){
 	uint32_t dbg_hb = 0; int dbg_ever_blit = 0;   /* DIAG */
 	while(s_state == ST_PLAY){
-		/* === DIAG (temporary) — top strip is free at both 1x and 2x (y<16) ===
-		 * [A] 0..14  : flickers blue/red every pass  -> loop is ALIVE (not hung)
-		 * [B] 18..32 : turns green once a ROM page has streamed from PSRAM
-		 * [C] 36..50 : turns green once any frame has been blitted
-		 * Read it as: A frozen + B black -> first gb_run_frame hung in a PSRAM read.
-		 *             A alive  + B green + C green + screen black -> banks corrupting. */
+		/* === DIAG (temporary) — left margin, mid-screen, clear of the bezel and of
+		 * the centred 1x GB image (x>=80). Three 30px squares stacked vertically:
+		 * [A] y100 : flickers blue/red every pass  -> loop is ALIVE (not hung)
+		 * [B] y140 : green once a ROM page has streamed from PSRAM
+		 * [C] y180 : green once any frame has been blitted
+		 * Read it as: A frozen + B dark -> first gb_run_frame hung in a PSRAM read.
+		 *             A alive  + B green + C green + game black -> banks corrupting. */
 		dbg_hb++;
-		draw_rect_spi(0, 0, 14, 14, (dbg_hb & 0x10) ? 0x0000FF : 0xFF0000);
-		draw_rect_spi(18, 0, 32, 14, gbflash_loads() ? 0x00FF00 : 0x303030);
-		draw_rect_spi(36, 0, 50, 14, dbg_ever_blit   ? 0x00FF00 : 0x303030);
+		draw_rect_spi(20, 100, 50, 130, (dbg_hb & 0x10) ? 0x0000FF : 0xFF0000);
+		draw_rect_spi(20, 140, 50, 170, gbflash_loads() ? 0x00FF00 : 0x303030);
+		draw_rect_spi(20, 180, 50, 210, dbg_ever_blit   ? 0x00FF00 : 0x303030);
 
 		/* input — this loop monopolises the superloop, so we must drain the keyboard
 		   UART ourselves (the superloop's uart_poll() doesn't run while we're in here). */
