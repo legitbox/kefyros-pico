@@ -20,6 +20,9 @@ void gbflash_free(void);
 // Pinned SRAM copy of bank 0 (the first 16 KB) — valid after a successful load.
 const uint8_t *gbflash_page0(void);
 
+// DIAG: total number of 16 KB pages streamed from PSRAM since the last load.
+uint32_t gbflash_loads(void);
+
 // SRAM pointer to the 16 KB ROM page `pg` (= addr >> 14), streamed from PSRAM on a miss.
 const uint8_t *gbflash_page(uint32_t pg);
 

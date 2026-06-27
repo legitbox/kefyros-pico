@@ -18,6 +18,9 @@ static uint8_t *s_slot[NSLOT];
 static uint32_t s_pg[NSLOT];            // ROM page held in each slot (0xFFFFFFFF = empty)
 static uint32_t s_used[NSLOT], s_tick;  // LRU clock
 
+static volatile uint32_t s_loads = 0;   // DIAG: count of pages streamed from PSRAM
+uint32_t gbflash_loads(void){ return s_loads; }
+
 void gbflash_free(void){
 	for(int i = 0; i < NSLOT; i++){ free(s_slot[i]); s_slot[i] = NULL; s_pg[i] = 0xFFFFFFFFu; }
 	if(s_base != 0xFFFFFFFFu){ kf_psram_free_to(s_base); s_base = 0xFFFFFFFFu; }
@@ -28,6 +31,7 @@ const uint8_t *gbflash_page0(void){ return s_slot[0]; }
 
 /* Stream 16 KB page `pg` from PSRAM into slot `slot` (0xFF-fill past the ROM end). */
 static void load_page(int slot, uint32_t pg){
+	s_loads++;                                             // DIAG
 	uint32_t off = pg * PG_SZ;
 	if(off >= (uint32_t)s_sz){
 		memset(s_slot[slot], 0xFF, PG_SZ);                 // past end -> open bus

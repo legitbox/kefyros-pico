@@ -182,7 +182,19 @@ static uint8_t key_to_joypad(uint8_t k){
  * be slow — the ring is ~250 ms deep, so it doesn't underrun while a (44 ms) 2x frame
  * transfers. Video naturally drops frames under load; audio stays smooth. */
 static void play_loop(void){
+	uint32_t dbg_hb = 0; int dbg_ever_blit = 0;   /* DIAG */
 	while(s_state == ST_PLAY){
+		/* === DIAG (temporary) — top strip is free at both 1x and 2x (y<16) ===
+		 * [A] 0..14  : flickers blue/red every pass  -> loop is ALIVE (not hung)
+		 * [B] 18..32 : turns green once a ROM page has streamed from PSRAM
+		 * [C] 36..50 : turns green once any frame has been blitted
+		 * Read it as: A frozen + B black -> first gb_run_frame hung in a PSRAM read.
+		 *             A alive  + B green + C green + screen black -> banks corrupting. */
+		dbg_hb++;
+		draw_rect_spi(0, 0, 14, 14, (dbg_hb & 0x10) ? 0x0000FF : 0xFF0000);
+		draw_rect_spi(18, 0, 32, 14, gbflash_loads() ? 0x00FF00 : 0x303030);
+		draw_rect_spi(36, 0, 50, 14, dbg_ever_blit   ? 0x00FF00 : 0x303030);
+
 		/* input — this loop monopolises the superloop, so we must drain the keyboard
 		   UART ourselves (the superloop's uart_poll() doesn't run while we're in here). */
 		uint8_t st, key;
@@ -211,7 +223,7 @@ static void play_loop(void){
 			did = 1;
 		}
 
-		if(did) blit_frame();                   /* show the most recent frame */
+		if(did){ blit_frame(); dbg_ever_blit = 1; }   /* show the most recent frame */
 		else    tight_loop_contents();          /* ring full (ahead of real time): idle */
 
 		kf_net_poll();                          // keep WiFi + SNTP time alive during play
