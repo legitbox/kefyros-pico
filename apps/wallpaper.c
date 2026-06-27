@@ -16,7 +16,7 @@
 #define WPDIR KF_WALLS    /* "/kefyros/wallpapers" */
 #define MAXWP 32
 
-static lv_obj_t *scr, *prev_img, *prev_dim, *list, *lbl_fit, *lbl_dim;
+static lv_obj_t *scr, *prev_img, *prev_dim, *prev_msg, *list, *lbl_fit, *lbl_dim;
 static char files[MAXWP][128];
 static int  nfiles = 0;
 static char pend_src[256];
@@ -71,20 +71,49 @@ static void set_dim_label(void){
    second ENTER writes it out as a streamable <name>.bin and sets it as the wallpaper.
    The whole thing runs without ever holding a full frame in the SRAM heap. */
 static lv_obj_t *ed_scr, *ed_imgw, *ed_box, *ed_hint, *ed_keyc;
-static int   ed_active, ed_confirm;
+static int   ed_confirm;
 static char  ed_path[256], ed_name[128];
 static int   ed_W, ed_H;                 /* native source dims                     */
 static int   ed_st, ed_tw, ed_th;        /* thumbnail decode scale (1<<st) and dims */
-static uint32_t ed_mark, ed_thumb, ed_out;  /* PSRAM mark + thumbnail + baked 320^2 */
 static int   ed_cx, ed_cy, ed_side;      /* crop window (square) in NATIVE px       */
 static float ed_disp;                    /* displayed-px per thumbnail-px (contain) */
 static int   ed_offx, ed_offy;           /* thumbnail top-left on screen            */
 
-#define ED_OUT 320
+#define ED_OUT    320
+#define THUMB_MAX 512            /* max thumbnail side; fits any source up to ~4096 px @ 1/8 */
+
+/* Two PSRAM regions, allocated once and reused forever (the bump allocator can't free a
+   middle blob, and the global ESC-to-launcher gives us no teardown hook — so permanent
+   reservation is both simpler and leak-proof). g_thumb backs every JPEG preview/thumbnail;
+   g_out backs the baked 320x320 result. ~712 KB of the 8 MB PSRAM. */
+static uint32_t g_thumb = 0xFFFFFFFFu, g_out = 0xFFFFFFFFu;
+static int g_ensure(void){
+	if(!kf_psram_size()) return 0;
+	if(g_thumb == 0xFFFFFFFFu) g_thumb = kf_psram_alloc((uint32_t)THUMB_MAX * THUMB_MAX * 2);
+	if(g_out   == 0xFFFFFFFFu) g_out   = kf_psram_alloc((uint32_t)ED_OUT * ED_OUT * 2);
+	return g_thumb != 0xFFFFFFFFu && g_out != 0xFFFFFFFFu;
+}
 
 static int is_jpg_name(const char *n){
 	const char *d = strrchr(n, '.');
 	return d && (!strcasecmp(d, ".jpg") || !strcasecmp(d, ".jpeg"));
+}
+
+/* Decode `posix` (a baseline JPEG) into g_thumb at the coarsest 1/2^n that keeps the
+   longest side <= THUMB_MAX; fills *ow,*oh,*os (scale exponent). Returns 1 on success,
+   0 if the file isn't a decodable baseline JPEG or won't fit. */
+static int decode_thumb(const char *posix, int *ow, int *oh, int *os){
+	int w, h;
+	if(!g_ensure() || !wc_dims(posix, &w, &h) || w < 1 || h < 1) return 0;
+	int st = 0;
+	while(st < 3 && ((w >> st) > THUMB_MAX || (h >> st) > THUMB_MAX)) st++;
+	int tw = w >> st, th = h >> st;
+	if(tw < 1) tw = 1;
+	if(th < 1) th = 1;
+	if(tw > THUMB_MAX || th > THUMB_MAX) return 0;     /* source too large even at 1/8 */
+	if(!wc_decode_region(posix, st, 0, 0, tw, th, g_thumb)) return 0;
+	*ow = w; *oh = h; *os = st;
+	return 1;
 }
 static void ed_key_cb(lv_event_t *e);
 static void ed_click_cb(lv_event_t *e);
@@ -111,31 +140,19 @@ static void ed_update_box(void){
 	lv_obj_set_size(ed_box, bw, bw);
 }
 static void ed_teardown(void){
-	if(ed_imgw) lv_image_set_src(ed_imgw, NULL);  /* stop streaming before freeing the PSRAM */
-	if(ed_active){ kf_psram_free_to(ed_mark); ed_active = 0; }
+	if(ed_imgw) lv_image_set_src(ed_imgw, NULL);  /* stop streaming (PSRAM regions are permanent) */
 }
 
 /* open the editor for `posix` (source path) named `name`. Returns 1 if it took over the
-   screen, 0 on failure (caller should fall back to a plain preview). */
+   screen, 0 on failure (caller should show the can't-decode message). */
 static int ed_open(const char *posix, const char *name){
-	if(!kf_psram_size()) return 0;                 /* converter needs PSRAM scratch */
-	if(!wc_dims(posix, &ed_W, &ed_H) || ed_W < 1 || ed_H < 1) return 0;
-	snprintf(ed_path, sizeof ed_path, "%s", posix);
-	snprintf(ed_name, sizeof ed_name, "%s", name);
-
-	/* thumbnail: shrink the longest side to <= ~360 px for a crisp full-image preview */
-	ed_st = 0;
-	while(ed_st < 3 && ((ed_W >> ed_st) > 360 || (ed_H >> ed_st) > 360)) ed_st++;
+	if(!decode_thumb(posix, &ed_W, &ed_H, &ed_st)) return 0;   /* decodes into g_thumb */
 	ed_tw = ed_W >> ed_st; ed_th = ed_H >> ed_st;
 	if(ed_tw < 1) ed_tw = 1;
 	if(ed_th < 1) ed_th = 1;
-
-	ed_mark  = kf_psram_brk();
-	ed_thumb = kf_psram_alloc((uint32_t)ed_tw * ed_th * 2);
-	ed_out   = kf_psram_alloc((uint32_t)ED_OUT * ED_OUT * 2);
-	if(ed_thumb == 0xFFFFFFFFu || ed_out == 0xFFFFFFFFu){ kf_psram_free_to(ed_mark); return 0; }
-	if(!wc_decode_region(ed_path, ed_st, 0, 0, ed_tw, ed_th, ed_thumb)){ kf_psram_free_to(ed_mark); return 0; }
-	ed_active = 1; ed_confirm = 0;
+	snprintf(ed_path, sizeof ed_path, "%s", posix);
+	snprintf(ed_name, sizeof ed_name, "%s", name);
+	ed_confirm = 0;
 
 	/* start with the largest centered square crop */
 	ed_side = ed_W < ed_H ? ed_W : ed_H;
@@ -156,7 +173,7 @@ static int ed_open(const char *posix, const char *name){
 
 	ed_imgw = lv_image_create(ed_scr);
 	lv_obj_set_pos(ed_imgw, 0, 0);
-	kf_wallpaper_show_raw(ed_imgw, ed_thumb, ed_tw, ed_th, "fit");
+	kf_wallpaper_show_raw(ed_imgw, g_thumb, ed_tw, ed_th, "fit");
 
 	ed_box = lv_obj_create(ed_scr);
 	lv_obj_remove_style_all(ed_box);
@@ -196,17 +213,17 @@ static void ed_bake(void){
 	lv_obj_add_flag(ed_box, LV_OBJ_FLAG_HIDDEN);
 	lv_label_set_text(ed_hint, "converting...");
 	lv_refr_now(NULL);                             /* paint the label before the blocking decode */
-	if(!wc_bake(ed_path, ed_cx, ed_cy, ed_side, ED_OUT, ed_out)){
+	if(!wc_bake(ed_path, ed_cx, ed_cy, ed_side, ED_OUT, g_out)){
 		lv_label_set_text(ed_hint, "convert failed (out of memory)  -  BKSP back");
 		lv_obj_remove_flag(ed_box, LV_OBJ_FLAG_HIDDEN);
 		return;                                    /* stays in crop mode; ENTER retries */
 	}
-	kf_wallpaper_show_raw(ed_imgw, ed_out, ED_OUT, ED_OUT, "fill");
+	kf_wallpaper_show_raw(ed_imgw, g_out, ED_OUT, ED_OUT, "fill");
 	lv_label_set_text(ed_hint, "ENTER save  -  BKSP re-crop");
 	ed_confirm = 1;
 }
 static void ed_recrop(void){
-	kf_wallpaper_show_raw(ed_imgw, ed_thumb, ed_tw, ed_th, "fit");
+	kf_wallpaper_show_raw(ed_imgw, g_thumb, ed_tw, ed_th, "fit");
 	lv_obj_remove_flag(ed_box, LV_OBJ_FLAG_HIDDEN);
 	lv_label_set_text(ed_hint, "arrows move  =/- zoom  ENTER convert  BKSP back");
 	ed_update_box();
@@ -228,7 +245,7 @@ static void ed_save(void){
 		uint16_t *row = ok ? malloc((size_t)ED_OUT * 2) : NULL;
 		if(!row) ok = 0;
 		for(int y = 0; ok && y < ED_OUT; y++){
-			kf_psram_read(ed_out + (size_t)y * ED_OUT * 2, row, (uint32_t)ED_OUT * 2);
+			kf_psram_read(g_out + (size_t)y * ED_OUT * 2, row, (uint32_t)ED_OUT * 2);
 			if(fwrite(row, 1, (size_t)ED_OUT * 2, f) != (size_t)ED_OUT * 2) ok = 0;
 		}
 		free(row);
@@ -272,6 +289,35 @@ static void ed_key_cb(lv_event_t *e){
 	ed_update_box();
 }
 
+static void show_msg(const char *m){            /* centered note over a blanked preview */
+	lv_image_set_src(prev_img, NULL);
+	if(prev_msg){ lv_label_set_text(prev_msg, m); lv_obj_remove_flag(prev_msg, LV_OBJ_FLAG_HIDDEN); }
+}
+static void hide_msg(void){ if(prev_msg) lv_obj_add_flag(prev_msg, LV_OBJ_FLAG_HIDDEN); }
+
+/* live preview of file `idx` behind the chooser: JPEGs decode to a thumbnail (shown
+   whole, so you can judge the crop), .bin/.png/.bmp go through the normal apply path. */
+static void preview_file(int idx){
+	if(idx < 0 || idx >= nfiles) return;
+	char posix[256]; snprintf(posix, sizeof posix, "%s/%s", WPDIR, files[idx]);
+	if(is_jpg_name(files[idx])){
+		int w, h, st;
+		if(!decode_thumb(posix, &w, &h, &st)){
+			show_msg(kf_psram_size() ? "can't decode\n(progressive or\nunsupported JPEG)" : "no PSRAM");
+			return;
+		}
+		hide_msg();
+		kf_wallpaper_show_raw(prev_img, g_thumb, w >> st, h >> st, "fit");
+	} else {
+		hide_msg();
+		char lvp[256]; snprintf(lvp, sizeof lvp, "A:%s/%s", WPDIR, files[idx]);
+		kf_wallpaper_apply(prev_img, lvp, pend_fit);
+	}
+}
+static void focus_cb(lv_event_t *e){
+	preview_file((int)(intptr_t)lv_event_get_user_data(e));
+}
+
 static void item_cb(lv_event_t *e){
 	int idx = (int)(intptr_t)lv_event_get_user_data(e);
 	if(idx == -1){                                   /* cycle fit mode */
@@ -295,15 +341,19 @@ static void item_cb(lv_event_t *e){
 	}
 	if(is_jpg_name(files[idx])){                  /* a JPEG -> crop & convert on-device */
 		char posix[256]; snprintf(posix, sizeof posix, "%s/%s", WPDIR, files[idx]);
-		if(ed_open(posix, files[idx])) return;    /* editor took over; else fall through to preview */
+		if(ed_open(posix, files[idx])) return;    /* editor took over */
+		show_msg(kf_psram_size() ? "can't decode\n(progressive or\nunsupported JPEG)" : "no PSRAM");
+		return;
 	}
-	snprintf(pend_src,sizeof pend_src,"A:%s/%s",WPDIR,files[idx]);  /* a file */
+	snprintf(pend_src,sizeof pend_src,"A:%s/%s",WPDIR,files[idx]);  /* a .bin/.png/.bmp -> select it */
+	hide_msg();
 	apply_preview();
 }
 
 static void additem(lv_group_t *g, const char *txt, int idx){
 	lv_obj_t *b = lv_list_add_button(list, NULL, txt);
 	lv_obj_add_event_cb(b, item_cb, LV_EVENT_CLICKED, (void*)(intptr_t)idx);
+	if(idx >= 0) lv_obj_add_event_cb(b, focus_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)idx);  /* live preview */
 	lv_group_add_obj(g, b);
 	if(idx == -1) lbl_fit = lv_obj_get_child(b, lv_obj_get_child_cnt(b)-1);
 	if(idx == -4) lbl_dim = lv_obj_get_child(b, lv_obj_get_child_cnt(b)-1);
@@ -338,6 +388,24 @@ void app_wallpaper_open(void){
 	lv_obj_set_pos(prev_dim, 0, 0);
 	lv_obj_set_style_bg_color(prev_dim, lv_color_black(), 0);
 	lv_obj_clear_flag(prev_dim, LV_OBJ_FLAG_SCROLLABLE);
+
+	/* centered note shown (over a blanked preview) when an image can't be decoded */
+	prev_msg = lv_label_create(clip);
+	lv_label_set_text(prev_msg, "");
+	lv_obj_set_style_text_align(prev_msg, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_color(prev_msg, KF_AMBER_HOT, 0);
+	lv_obj_align(prev_msg, LV_ALIGN_CENTER, -76, 0);   /* centered in the area left of the panel */
+	lv_obj_add_flag(prev_msg, LV_OBJ_FLAG_HIDDEN);
+
+	/* one-line hint along the bottom of the preview area */
+	lv_obj_t *hint = lv_label_create(clip);
+	lv_label_set_text(hint, "ENTER  .jpg -> crop   .bin -> use");
+	lv_obj_set_style_text_color(hint, KF_TEXT, 0);
+	lv_obj_set_style_bg_color(hint, KF_BG_DEEP, 0);
+	lv_obj_set_style_bg_opa(hint, LV_OPA_70, 0);
+	lv_obj_set_style_pad_all(hint, 2, 0);
+	lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
 	apply_preview();
 
 	/* translucent panel with the chooser list on the right (inset under the OS bar;
