@@ -179,6 +179,7 @@ void        kf_back_to_launcher(void);
 void        kf_power_menu(void);
 void        kf_wallpaper_init(void);   /* register the PSRAM streaming wallpaper decoder */
 void        kf_wallpaper_apply(lv_obj_t *img, const char *src, const char *fit);
+void        kf_wallpaper_show_raw(lv_obj_t *img, uint32_t psram_off, int w, int h, const char *fit);
 
 /* apps kept on the PDA (terminal/web dropped; wifi is a stub tile) */
 void app_calc_open(void);

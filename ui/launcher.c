@@ -85,24 +85,42 @@ static uint32_t  wp_region = 0xFFFFFFFFu;     /* PSRAM offset of the wallpaper p
 static int       wp_valid  = 0;
 static char      wp_path[160] = "";           /* which file is currently loaded          */
 static lv_draw_buf_t *wp_strip = NULL;        /* reused 1-row SRAM buffer for streaming   */
+static lv_image_dsc_t raw_dsc;                /* a SECOND streamed image: a raw RGB565 region
+                                                already resident in PSRAM. Used by the on-device
+                                                wallpaper converter for its live preview and the
+                                                baked result (see kf_wallpaper_show_raw). The
+                                                desktop wallpaper (wp_dsc) is left untouched. */
+static uint32_t  raw_region = 0xFFFFFFFFu;     /* PSRAM offset backing raw_dsc            */
 
-/* ----- the custom decoder: claims ONLY our &wp_dsc image, streams rows from PSRAM ----- */
+/* Map an image source to its (header, PSRAM region). Both wp_dsc (desktop wallpaper) and
+   raw_dsc (converter scratch) are streamed by the one decoder below. */
+static lv_image_dsc_t *wp_pick(const void *src, uint32_t *region){
+	if(src == &wp_dsc){  *region = wp_region;  return &wp_dsc;  }
+	if(src == &raw_dsc){ *region = raw_region; return &raw_dsc; }
+	return NULL;
+}
+
+/* ----- the custom decoder: claims ONLY our &wp_dsc / &raw_dsc images, streams rows from PSRAM ----- */
 static lv_result_t wp_dec_info(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc, lv_image_header_t *hdr){
 	(void)d;
-	if(dsc->src_type != LV_IMAGE_SRC_VARIABLE || dsc->src != &wp_dsc) return LV_RESULT_INVALID;
-	*hdr = wp_dsc.header;
+	uint32_t region; lv_image_dsc_t *img = wp_pick(dsc->src, &region);
+	if(dsc->src_type != LV_IMAGE_SRC_VARIABLE || !img) return LV_RESULT_INVALID;
+	*hdr = img->header;
 	return LV_RESULT_OK;
 }
 static lv_result_t wp_dec_open(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc){
 	(void)d;
-	if(dsc->src != &wp_dsc) return LV_RESULT_INVALID;
-	dsc->header  = wp_dsc.header;
+	uint32_t region; lv_image_dsc_t *img = wp_pick(dsc->src, &region);
+	if(!img) return LV_RESULT_INVALID;
+	dsc->header  = img->header;
 	dsc->decoded = NULL;                       /* streamed via get_area */
 	return LV_RESULT_OK;
 }
 static lv_result_t wp_dec_get_area(lv_image_decoder_t *d, lv_image_decoder_dsc_t *dsc,
                                    const lv_area_t *full, lv_area_t *area){
 	(void)d;
+	uint32_t region; lv_image_dsc_t *img = wp_pick(dsc->src, &region);
+	if(!img) return LV_RESULT_INVALID;
 	int32_t w_px = lv_area_get_width(full);
 	if(area->y1 == LV_COORD_MIN){             /* first call: (re)size the 1-row strip */
 		lv_draw_buf_t *nb = lv_draw_buf_reshape(wp_strip, LV_COLOR_FORMAT_RGB565, w_px, 1, LV_STRIDE_AUTO);
@@ -119,7 +137,7 @@ static lv_result_t wp_dec_get_area(lv_image_decoder_t *d, lv_image_decoder_dsc_t
 		area->y1++; area->y2++;
 	}
 	if(area->y1 > full->y2) return LV_RESULT_INVALID;
-	uint32_t off = wp_region + (uint32_t)area->y1 * wp_dsc.header.stride + (uint32_t)area->x1 * 2u;
+	uint32_t off = region + (uint32_t)area->y1 * img->header.stride + (uint32_t)area->x1 * 2u;
 	kf_psram_read(off, wp_strip->data, (uint32_t)w_px * 2u);
 	dsc->decoded = wp_strip;
 	return LV_RESULT_OK;
@@ -168,19 +186,9 @@ static int wp_load_to_psram(const char *path){
 	return 1;
 }
 
-void kf_wallpaper_apply(lv_obj_t *img, const char *src, const char *fit){
-	const char *lvp  = (src && src[0] && strcmp(src, "default")) ? src : KF_WP_DEFAULT;
-	const char *path = (lvp[0]=='A' && lvp[1]==':') ? lvp + 2 : lvp;   /* "A:/x" -> "/x" */
-	lv_image_set_src(img, NULL);
-	if(!kfs_ready() || !kf_psram_size()) return;            /* no card / no PSRAM -> blank */
-	if(!wp_valid || strcmp(wp_path, path) != 0){            /* (re)load into PSRAM on change */
-		lv_image_cache_drop(&wp_dsc);
-		wp_valid = wp_load_to_psram(path);
-		if(wp_valid) snprintf(wp_path, sizeof wp_path, "%s", path);
-		else { wp_path[0] = 0; return; }
-	}
-	int iw = wp_dsc.header.w, ih = wp_dsc.header.h;
-	lv_image_set_src(img, &wp_dsc);
+/* Size `img` to the panel and apply a fit mode (fill/cover, fit/contain, center, stretch)
+   for a source of iw x ih. Shared by the .bin wallpaper path and the raw-PSRAM path. */
+static void wp_apply_fit(lv_obj_t *img, int iw, int ih, const char *fit){
 	if(iw <= 0) iw = LCD_W;
 	if(ih <= 0) ih = LCD_H;
 	lv_obj_set_size(img, LCD_W, LCD_H);
@@ -196,6 +204,42 @@ void kf_wallpaper_apply(lv_obj_t *img, const char *src, const char *fit){
 	int z = (int)(s*256 + 0.5f);
 	if(z < 1) z = 1;
 	lv_image_set_scale(img, z);
+}
+
+void kf_wallpaper_apply(lv_obj_t *img, const char *src, const char *fit){
+	const char *lvp  = (src && src[0] && strcmp(src, "default")) ? src : KF_WP_DEFAULT;
+	const char *path = (lvp[0]=='A' && lvp[1]==':') ? lvp + 2 : lvp;   /* "A:/x" -> "/x" */
+	lv_image_set_src(img, NULL);
+	if(!kfs_ready() || !kf_psram_size()) return;            /* no card / no PSRAM -> blank */
+	if(!wp_valid || strcmp(wp_path, path) != 0){            /* (re)load into PSRAM on change */
+		lv_image_cache_drop(&wp_dsc);
+		wp_valid = wp_load_to_psram(path);
+		if(wp_valid) snprintf(wp_path, sizeof wp_path, "%s", path);
+		else { wp_path[0] = 0; return; }
+	}
+	int iw = wp_dsc.header.w, ih = wp_dsc.header.h;
+	lv_image_set_src(img, &wp_dsc);
+	wp_apply_fit(img, iw, ih, fit);
+}
+
+/* Display a raw RGB565 image already resident in PSRAM (off, w, h) through the streaming
+   decoder, with the same fit modes as a .bin wallpaper. Used by the on-device converter
+   for both its live thumbnail and the baked 320x320 result — no SD round-trip. The PSRAM
+   at `off` must stay valid until the image is no longer shown (set src to NULL first). */
+void kf_wallpaper_show_raw(lv_obj_t *img, uint32_t off, int w, int h, const char *fit){
+	lv_image_set_src(img, NULL);
+	lv_image_cache_drop(&raw_dsc);             /* contents/dims may have changed since last show */
+	lv_memzero(&raw_dsc, sizeof raw_dsc);
+	raw_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
+	raw_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
+	raw_dsc.header.w      = w;
+	raw_dsc.header.h      = h;
+	raw_dsc.header.stride = (uint32_t)w * 2u;
+	raw_dsc.data          = wp_data_dummy;     /* non-NULL sentinel (pixels stream from PSRAM) */
+	raw_dsc.data_size     = (uint32_t)w * (uint32_t)h * 2u;
+	raw_region            = off;
+	lv_image_set_src(img, &raw_dsc);
+	wp_apply_fit(img, w, h, fit);
 }
 
 /* idle screen-off: dim the LCD backlight to 0 after `screen_timeout` s of no keys,
