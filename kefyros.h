@@ -129,6 +129,7 @@ void kf_audio_stop(void);                 /* stop + silence */
 void kf_audio_flush(void);                /* drop buffered audio + reset shaper (after a seek) */
 int  kf_audio_running(void);
 int  kf_audio_space(void);                /* free stereo frames in the ring */
+int  kf_audio_buffered(void);             /* frames queued but not yet played (latency gauge) */
 int  kf_audio_write_s32(const int32_t *stereo, int frames); /* full-scale L,R; frames accepted */
 int  kf_audio_write(const int16_t *stereo, int frames);     /* legacy 16-bit L,R; frames accepted */
 
@@ -193,6 +194,7 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
 void app_gameboy_open(void); /* Game Boy (DMG) emulator — Peanut-GB, ROMs from SD->flash */
+void app_morse_open(void);   /* Morse code: encoder (tone/lamp/backlight), decoder, trainer */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
 void editor_poll(void);
@@ -203,5 +205,6 @@ void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void cakespark_poll(void);   /* CakeSpark REPL: grabbed keys (no-op unless open) */
 void gameboy_poll(void);     /* Game Boy: picker keys + the blocking play loop (no-op idle) */
+void morse_poll(void);       /* Morse: grabbed keys + TX keyer/audio state machine (no-op idle) */
 
 #endif

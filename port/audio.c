@@ -184,6 +184,7 @@ void kf_audio_stop(void){
 
 int  kf_audio_running(void){ return running; }
 int  kf_audio_space(void){ return ring ? (int)(RING_N - (r_w - r_r)) : 0; }
+int  kf_audio_buffered(void){ return ring ? (int)(r_w - r_r) : 0; }   /* frames queued but unplayed */
 
 /* drop buffered audio + reset the shaper (used right after a seek so the new
    position is heard immediately; DMA keeps running and plays silence until refilled). */
