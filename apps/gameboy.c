@@ -183,18 +183,17 @@ static uint8_t key_to_joypad(uint8_t k){
  * transfers. Video naturally drops frames under load; audio stays smooth. */
 static void play_loop(void){
 	uint32_t dbg_hb = 0; int dbg_ever_blit = 0;   /* DIAG */
+	uint64_t next_us = time_us_64();              /* wall-clock pacer (used only if audio is off) */
 	while(s_state == ST_PLAY){
 		/* === DIAG (temporary) — left margin, mid-screen, clear of the bezel and of
 		 * the centred 1x GB image (x>=80). Three 30px squares stacked vertically:
-		 * [A] y100 : flickers blue/red every pass  -> loop is ALIVE (not hung)
-		 * [B] y140 : green once a ROM page has streamed from PSRAM
-		 * [C] y180 : green once any frame has been blitted
-		 * Read it as: A frozen + B dark -> first gb_run_frame hung in a PSRAM read.
-		 *             A alive  + B green + C green + game black -> banks corrupting. */
+		 * [A] y100 : flickers blue/red every pass -> loop is ALIVE
+		 * [B] y140 : GREEN = audio ring allocated (sound on); DARK = audio starved (silent)
+		 * [C] y180 : GREEN once any frame has been blitted (game is actually running) */
 		dbg_hb++;
 		draw_rect_spi(20, 100, 50, 130, (dbg_hb & 0x10) ? 0x0000FF : 0xFF0000);
-		draw_rect_spi(20, 140, 50, 170, gbflash_loads() ? 0x00FF00 : 0x303030);
-		draw_rect_spi(20, 180, 50, 210, dbg_ever_blit   ? 0x00FF00 : 0x303030);
+		draw_rect_spi(20, 140, 50, 170, kf_audio_running() ? 0x00FF00 : 0x303030);
+		draw_rect_spi(20, 180, 50, 210, dbg_ever_blit      ? 0x00FF00 : 0x303030);
 
 		/* input — this loop monopolises the superloop, so we must drain the keyboard
 		   UART ourselves (the superloop's uart_poll() doesn't run while we're in here). */
@@ -213,19 +212,33 @@ static void play_loop(void){
 		}
 		s_gb->direct.joypad = (uint8_t)~s_btn;
 
-		/* keep the audio ring fed (this is what paces us to real time). Each iteration
-		   emulates one frame; we stop once the ring is full or after a safety cap. */
+		/* Pacing. PREFERRED: the audio ring drains at 32768 Hz, so emulating only while
+		   it has space tracks real time AND produces sound. FALLBACK: if the ring failed
+		   to allocate (heap starved by the page cache + cart RAM — big MBC carts), audio
+		   never starts; pace by wall clock instead so the game still RUNS (silently)
+		   rather than freezing on a black screen waiting for ring space that never frees. */
 		int did = 0, guard = 0;
-		while(kf_audio_space() >= AUDIO_SAMPLES && guard++ < 24){
-			gb_run_frame(s_gb);
-			if(s_gberr){ stop_game_to_launcher(); return; }
-			minigb_apu_audio_callback(&s_apu, s_audio);
-			kf_audio_write(s_audio, AUDIO_SAMPLES);
-			did = 1;
+		if(kf_audio_running()){
+			while(kf_audio_space() >= AUDIO_SAMPLES && guard++ < 24){
+				gb_run_frame(s_gb);
+				if(s_gberr){ stop_game_to_launcher(); return; }
+				minigb_apu_audio_callback(&s_apu, s_audio);
+				kf_audio_write(s_audio, AUDIO_SAMPLES);
+				did = 1;
+			}
+		} else {
+			uint64_t now = time_us_64();
+			while(now >= next_us && guard++ < 4){     /* catch up at most 4 frames */
+				gb_run_frame(s_gb);
+				if(s_gberr){ stop_game_to_launcher(); return; }
+				next_us += 16743u;                    /* DMG frame period (59.7 Hz) */
+				did = 1;
+			}
+			if(next_us + 33486u < now) next_us = now; /* fell badly behind: resync */
 		}
 
 		if(did){ blit_frame(); dbg_ever_blit = 1; }   /* show the most recent frame */
-		else    tight_loop_contents();          /* ring full (ahead of real time): idle */
+		else    tight_loop_contents();          /* ahead of real time: idle */
 
 		kf_net_poll();                          // keep WiFi + SNTP time alive during play
 	}
