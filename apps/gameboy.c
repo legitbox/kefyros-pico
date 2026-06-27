@@ -80,7 +80,11 @@ static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr){
 	(void)gb;
 	if(addr < 0x4000u) return s_pg0[addr];
 	uint32_t pg = (uint32_t)addr >> 14;
-	if(pg != s_bpg){ s_bptr = gbflash_page(pg); s_bpg = pg; }
+	if(pg != s_bpg){
+		draw_rect_spi(60, 100, 90, 130, 0xFFFF00);   /* DIAG: about to stream a page */
+		s_bptr = gbflash_page(pg); s_bpg = pg;
+		draw_rect_spi(60, 100, 90, 130, 0x00FFFF);   /* DIAG: stream returned OK */
+	}
 	return s_bptr[addr & 0x3FFFu];
 }
 static uint8_t gb_cart_ram_read(struct gb_s *gb, const uint_fast32_t addr){
