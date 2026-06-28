@@ -52,12 +52,23 @@ int main(void){
 	launcher_init();           /* build + show the app launcher (loads config)  */
 	topbar_init();             /* persistent OS top bar (mem/clock/battery/wifi) */
 
-	/* Cold boot ran at the rock-solid 250 MHz default; now that everything's up, ramp to
-	   360 MHz for a smooth UI. Doing it warm (not at cold boot) avoids the marginal-XIP
-	   boot lottery that booting high caused. WiFi apps drop back to 250 as needed. */
-	kf_clock_normal();
+	/* Boot WiFi auto-connect: if any network is remembered, bring the radio up at the WiFi-safe
+	   eco clock (cold boot is already ~250 MHz) and kick off a scan-then-strongest-first campaign.
+	   We stay at eco until it resolves (so the <=270 MHz association window holds), then ramp to
+	   400 below. The cyw43 bus divider is retuned on that clock change, so a joined link survives
+	   the bump. Nothing saved -> skip the radio entirely and ramp to 400 immediately. */
+	int wifi_boot = kf_net_has_saved();
+	if(wifi_boot){
+		kf_clock_eco();
+		kf_net_init();
+		kf_net_autoconnect();
+	}
 
 	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
+
+	/* ramp to the smooth 400 MHz UI once the boot WiFi campaign resolves (or right away if there
+	   was none). Warm ramp (not at cold boot) avoids the marginal-XIP boot lottery. */
+	int ramped = 0;
 
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */
@@ -71,6 +82,7 @@ int main(void){
 		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
+		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);
 	}

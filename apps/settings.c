@@ -245,6 +245,59 @@ static void act_sfx(lv_event_t *e){ (void)e;
 	sfx_label();
 }
 
+/* --- Time: zone/city picker + 24h/12h toggle ---
+   The picker cycles a curated city list; each entry sets the UTC offset (minutes) and the DST rule
+   (0 none, 1 EU, 2 US), stored in deskconf (tz_city index + tz_offset + tz_dst). The clock (topbar)
+   re-derives immediately via kf_time_apply_locale(). */
+static const struct { const char *name; short off; char dst; } TZ[] = {
+	{ "UTC",            0,   0 },
+	{ "London",         0,   1 },
+	{ "Berlin Paris",   60,  1 },
+	{ "Vilnius Athens", 120, 1 },
+	{ "Moscow",         180, 0 },
+	{ "Dubai",          240, 0 },
+	{ "India",          330, 0 },
+	{ "Bangkok",        420, 0 },
+	{ "Beijing",        480, 0 },
+	{ "Tokyo",          540, 0 },
+	{ "Sydney",         600, 0 },
+	{ "Auckland",       720, 0 },
+	{ "Honolulu",      -600, 0 },
+	{ "Los Angeles",   -480, 2 },
+	{ "Denver",        -420, 2 },
+	{ "Chicago",       -360, 2 },
+	{ "New York",      -300, 2 },
+};
+#define NTZ ((int)(sizeof TZ / sizeof TZ[0]))
+#define TZ_DEFAULT 3              /* Vilnius Athens (preserves the old hardcoded EET locale) */
+
+static lv_obj_t *btn_tz, *btn_24;
+static void tz_label(void){
+	lv_obj_t *l = lv_obj_get_child(btn_tz, 0);
+	int i = deskconf_get_int("tz_city", TZ_DEFAULT);
+	if(i < 0 || i >= NTZ) i = TZ_DEFAULT;
+	int off = TZ[i].off;
+	if(l) lv_label_set_text_fmt(l, "Time zone: %s (UTC%s%d:%02d)", TZ[i].name,
+	          off < 0 ? "-" : "+", abs(off)/60, abs(off)%60);
+}
+static void act_tz(lv_event_t *e){ (void)e;
+	int i = deskconf_get_int("tz_city", TZ_DEFAULT) + 1;
+	if(i < 0 || i >= NTZ) i = 0;
+	deskconf_set_int("tz_city", i);
+	deskconf_set_int("tz_offset", TZ[i].off);
+	deskconf_set_int("tz_dst", TZ[i].dst);
+	kf_time_apply_locale();          /* update the clock now, not at the next SNTP poll */
+	tz_label();
+}
+static void clock24_label(void){
+	lv_obj_t *l = lv_obj_get_child(btn_24, 0);
+	if(l) lv_label_set_text_fmt(l, "Time format: %s", deskconf_get_int("clock24",1) ? "24-hour" : "12-hour");
+}
+static void act_clock24(lv_event_t *e){ (void)e;
+	deskconf_set_int("clock24", !deskconf_get_int("clock24",1));
+	clock24_label();
+}
+
 void app_settings_open(void){
 	bkl = deskconf_get_int("bkl", 5);
 	bk2 = deskconf_get_int("bk2", 2);
@@ -288,6 +341,8 @@ void app_settings_open(void){
 	additem(list,g, "LCD Light -",      act_bkl, (void*)(intptr_t)-1);
 	additem(list,g, "Keyboard Light +", act_bk2, (void*)(intptr_t)+1);
 	additem(list,g, "Keyboard Light -", act_bk2, (void*)(intptr_t)-1);
+	btn_tz = additem(list,g, "Time zone",   act_tz, NULL);      tz_label();
+	btn_24 = additem(list,g, "Time format", act_clock24, NULL); clock24_label();
 	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
 	additem(list,g, "Screen Test",      act_screentest, NULL);
 	btn_sfx = additem(list,g, "Sound FX: ON", act_sfx, NULL); sfx_label();

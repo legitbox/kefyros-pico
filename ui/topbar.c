@@ -5,6 +5,7 @@
 #include "../kefyros.h"
 #include "../port/clock.h"
 #include "theme.h"
+#include "deskconf.h"
 #include <malloc.h>
 #include <time.h>
 
@@ -27,14 +28,20 @@ static void tb_update(lv_timer_t *t){
 	/* live CPU clock in MHz (updates when dynamic clock-switching kicks in). */
 	lv_label_set_text_fmt(lbl_mhz, "%luMHz", (unsigned long)clock_sys_mhz());
 
-	/* clock: prefer the SNTP-synced software time (EET/EEST); fall back to the STM32 RTC. */
+	/* clock: prefer the SNTP-synced software time; fall back to the STM32 RTC. 12h/24h per
+	   deskconf "clock24" (Settings -> Time format). */
 	struct tm lt;
 	uint8_t tm[3];
-	if(kf_time_local(&lt))
-		lv_label_set_text_fmt(lbl_clock, "%02d:%02d", lt.tm_hour, lt.tm_min);
-	else if(reg_read(REG_RTC_TIME, tm, 3) >= 2)
-		lv_label_set_text_fmt(lbl_clock, "%02d:%02d", tm[0], tm[1]);
-	else lv_label_set_text(lbl_clock, "--:--");
+	int h24 = -1, mn = 0;
+	if(kf_time_local(&lt))                       { h24 = lt.tm_hour; mn = lt.tm_min; }
+	else if(reg_read(REG_RTC_TIME, tm, 3) >= 2)  { h24 = tm[0];      mn = tm[1];     }
+	if(h24 < 0) lv_label_set_text(lbl_clock, "--:--");
+	else if(deskconf_get_int("clock24", 1))
+		lv_label_set_text_fmt(lbl_clock, "%02d:%02d", h24, mn);
+	else {
+		int h12 = h24 % 12; if(h12 == 0) h12 = 12;
+		lv_label_set_text_fmt(lbl_clock, "%d:%02d%c", h12, mn, h24 < 12 ? 'a' : 'p');
+	}
 
 	/* WiFi: amber word, green when online, dim while connecting, red on fail.
 	   Hidden (empty) when no network is targeted, to keep the bar uncluttered. */

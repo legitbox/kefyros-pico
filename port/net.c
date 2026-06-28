@@ -26,8 +26,13 @@
 /* runtime cyw43 PIO bus divider (CYW43_PIO_CLOCK_DIV_DYNAMIC=1) */
 extern void cyw43_set_pio_clkdiv_int_frac8(uint32_t clock_div_int, uint8_t clock_div_frac8);
 
-/* --- remembered-credential keys in deskconf (KF_CONFIG) --- */
-#define K_SSID "wifi_ssid"
+/* --- remembered networks in deskconf (KF_CONFIG) ---
+   Up to KF_WIFI_MAX networks, stored as wifi_ssid0..N / wifi_pass0..N in MRU order (slot 0 =
+   most recently connected). The legacy single-network keys wifi_ssid/wifi_pass are migrated into
+   slot 0 on first run. On boot, kf_net_autoconnect() scans, ranks the visible saved networks by
+   signal, and tries them strongest-first until one joins or all fail. */
+#define KF_WIFI_MAX 8
+#define K_SSID "wifi_ssid"          /* legacy single-network keys (migrated then cleared) */
 #define K_PASS "wifi_pass"
 
 static int            s_present = 0;          /* radio inited OK */
@@ -44,7 +49,17 @@ static uint32_t       s_attempts = 0;
 /* --- scan state --- */
 static kf_scan_cb     s_scan_cb = NULL;
 static char           s_seen[24][33];          /* dedupe ring for one scan pass */
+static int            s_seen_rssi[24];         /* RSSI per s_seen entry (for autoconnect ranking) */
 static int            s_seen_n = 0;
+
+/* --- boot autoconnect campaign --- */
+enum { CAMP_NONE=0, CAMP_SCAN, CAMP_TRY, CAMP_DONE };
+static int      s_camp = CAMP_NONE;
+static char     s_try_ssid[KF_WIFI_MAX][33];   /* visible saved nets, strongest first */
+static char     s_try_pass[KF_WIFI_MAX][65];
+static int      s_try_rssi[KF_WIFI_MAX];
+static int      s_try_n = 0, s_try_idx = 0;
+static uint32_t s_camp_ms = 0;                 /* current attempt's start time */
 
 static uint32_t now_ms(void){ return (uint32_t)(time_us_64() / 1000u); }
 
@@ -56,6 +71,56 @@ static void set_bus_div(void){
 	uint32_t div = clock_get_hz(clk_sys) / (2u * 28000000u);
 	if(div < 2u) div = 2u;
 	cyw43_set_pio_clkdiv_int_frac8(div, 0);
+}
+
+/* ===== remembered-network store (deskconf slots, MRU order) ===== */
+static void known_get(int i, char *ssid, char *pass){
+	char k[16];
+	snprintf(k, sizeof k, "wifi_ssid%d", i); snprintf(ssid, 33, "%s", deskconf_get(k, ""));
+	snprintf(k, sizeof k, "wifi_pass%d", i); snprintf(pass, 65, "%s", deskconf_get(k, ""));
+}
+static void known_set(int i, const char *ssid, const char *pass){
+	char k[16];
+	snprintf(k, sizeof k, "wifi_ssid%d", i); deskconf_set(k, ssid);
+	snprintf(k, sizeof k, "wifi_pass%d", i); deskconf_set(k, pass);
+}
+/* one-time: fold the old single-network keys into slot 0 if the new store is empty. */
+static void known_migrate(void){
+	char s[33], p[65]; known_get(0, s, p);
+	if(s[0]) return;
+	const char *os = deskconf_get(K_SSID, "");
+	if(os[0]){ known_set(0, os, deskconf_get(K_PASS, "")); deskconf_set(K_SSID, ""); deskconf_set(K_PASS, ""); }
+}
+static int known_count(void){
+	known_migrate();
+	char s[33], p[65]; int n = 0;
+	for(int i=0;i<KF_WIFI_MAX;i++){ known_get(i, s, p); if(!s[0]) break; n++; }
+	return n;
+}
+/* Promote (ssid,pass) to MRU slot 0: drop any existing copy of ssid, shift the rest down. */
+static void known_remember(const char *ssid, const char *pass){
+	char s[KF_WIFI_MAX][33], p[KF_WIFI_MAX][65]; int n = 0;
+	for(int i=0;i<KF_WIFI_MAX;i++){
+		char es[33], ep[65]; known_get(i, es, ep);
+		if(!es[0]) break;
+		if(!strcmp(es, ssid)) continue;                 /* old copy of this ssid -> drop */
+		if(n < KF_WIFI_MAX-1){ snprintf(s[n],33,"%s",es); snprintf(p[n],65,"%s",ep); n++; }
+	}
+	known_set(0, ssid, pass);
+	for(int i=0;i<n;i++) known_set(i+1, s[i], p[i]);
+	for(int i=n+1;i<KF_WIFI_MAX;i++) known_set(i, "", "");   /* clear stale tail */
+}
+/* Remove ssid from the store (keeps the rest in order). */
+static void known_forget_one(const char *ssid){
+	char s[KF_WIFI_MAX][33], p[KF_WIFI_MAX][65]; int n = 0;
+	for(int i=0;i<KF_WIFI_MAX;i++){
+		char es[33], ep[65]; known_get(i, es, ep);
+		if(!es[0]) break;
+		if(!strcmp(es, ssid)) continue;
+		snprintf(s[n],33,"%s",es); snprintf(p[n],65,"%s",ep); n++;
+	}
+	for(int i=0;i<n;i++) known_set(i, s[i], p[i]);
+	for(int i=n;i<KF_WIFI_MAX;i++) known_set(i, "", "");
 }
 
 /* Single auth mode, patient connect. (Earlier we cycled a "ladder" of auth modes every
@@ -130,26 +195,32 @@ void kf_net_reclock(void){
 	if(s_present) set_bus_div();
 }
 
-void kf_net_connect(const char *ssid, const char *pass){
-	if(!ssid || !ssid[0]) return;
+/* aim the radio at a target without touching the saved store (used by the campaign too). */
+static void set_target(const char *ssid, const char *pass){
 	snprintf(s_ssid, sizeof s_ssid, "%s", ssid);
 	snprintf(s_pass, sizeof s_pass, "%s", pass ? pass : "");
 	s_have_target = 1;
 	s_badauth = 0;
 	s_attempts = 0;
 	s_auth_idx = 0;
-	/* persist so we auto-connect next boot. plaintext on SD — accepted tradeoff. */
-	deskconf_set(K_SSID, s_ssid);
-	deskconf_set(K_PASS, s_pass);
+}
+
+void kf_net_connect(const char *ssid, const char *pass){
+	if(!ssid || !ssid[0]) return;
+	s_camp = CAMP_NONE;                 /* a manual connect cancels any boot campaign */
+	set_target(ssid, pass);
+	/* remember at MRU slot 0 so it auto-connects (strongest-first) next boot.
+	   plaintext on SD — accepted tradeoff. */
+	known_remember(s_ssid, s_pass);
 	if(s_present) do_connect();
 }
 
 void kf_net_forget(void){
+	if(s_ssid[0]) known_forget_one(s_ssid);   /* drop it from the saved store */
+	s_camp = CAMP_NONE;
 	s_have_target = 0;
 	s_badauth = 0;
 	s_ssid[0] = 0; s_pass[0] = 0;
-	deskconf_set(K_SSID, "");
-	deskconf_set(K_PASS, "");
 	if(s_present){
 		cyw43_arch_disable_sta_mode();
 		sta_up();
@@ -158,37 +229,80 @@ void kf_net_forget(void){
 	snprintf(s_ip, sizeof s_ip, "0.0.0.0");
 }
 
+int kf_net_has_saved(void){ return known_count() > 0; }
+int kf_net_autoconnect_active(void){ return s_camp == CAMP_SCAN || s_camp == CAMP_TRY; }
+
+/* Boot auto-connect: scan, then try the visible saved networks strongest-first (campaign_tick
+   in kf_net_poll drives it). No-op if nothing saved or the radio isn't up. Caller must already
+   be at a WiFi-safe clock (<=270 MHz). */
 void kf_net_autoconnect(void){
-	const char *ssid = deskconf_get(K_SSID, "");
-	if(ssid && ssid[0]) kf_net_connect(ssid, deskconf_get(K_PASS, ""));
+	if(!s_present || known_count() == 0) return;
+	s_try_n = 0; s_try_idx = 0;
+	s_seen_n = 0;
+	s_scan_cb = NULL;                  /* internal scan — results captured into s_seen[] */
+	s_camp_ms = now_ms();
+	if(kf_net_scan_start(NULL) == 0) s_camp = CAMP_SCAN;
+	else                             s_camp = CAMP_NONE;   /* couldn't scan -> give up quietly */
 }
 
 /* ===== time sync (SNTP) + locality =====
-   We keep wall-clock time in software: SNTP gives UTC, we apply the locale offset and
-   anchor it to time_us_64(). Avoids the STM32 RTC's ambiguous BCD/binary format. The
-   locale is EET (Vilnius/Tallinn, UTC+2) with automatic EU summer time (UTC+3). */
+   We keep wall-clock time in software: SNTP gives UTC, we apply the configured locale offset and
+   anchor it to time_us_64(). Avoids the STM32 RTC's ambiguous BCD/binary format. The locale is set
+   in Settings (deskconf tz_offset minutes + tz_dst rule); default UTC+2 Vilnius with EU DST. */
 static volatile int s_time_ok = 0;
 static uint64_t     s_time_base_us;       /* time_us_64() at last sync */
 static time_t       s_time_base_local;    /* local epoch at last sync  */
+static time_t       s_time_base_utc;      /* UTC epoch at last sync (re-anchored on locale change) */
 
-/* EU DST: +3h between last-Sunday-March 01:00 UTC and last-Sunday-October 01:00 UTC. */
-static int eu_is_dst(int y, int mon, int day, int hour_utc){
+/* day of week, 0=Sun..6=Sat (Sakamoto). */
+static int dow(int y, int m, int d){
+	static const int t[] = {0,3,2,5,0,3,5,1,4,6,2,4};
+	if(m < 3) y -= 1;
+	return (y + y/4 - y/100 + y/400 + t[m-1] + d) % 7;
+}
+/* EU DST: +1h from last-Sunday-March to last-Sunday-October (transition ~01:00 UTC). */
+static int eu_is_dst(int y, int mon, int day){
 	if(mon < 3 || mon > 10) return 0;
 	if(mon > 3 && mon < 10) return 1;
-	int lsm = 31 - ((5*y/4 + 4) % 7);     /* last Sunday of March */
-	int lso = 31 - ((5*y/4 + 1) % 7);     /* last Sunday of October */
-	if(mon == 3)  return (day > lsm) || (day == lsm && hour_utc >= 1);
-	return (day < lso) || (day == lso && hour_utc < 1);
+	int last = 31 - dow(y, mon, 31);           /* last Sunday of this 31-day month */
+	if(mon == 3)  return day >= last;
+	return day < last;                         /* October */
+}
+/* US DST: +1h from 2nd-Sunday-March to 1st-Sunday-November (transition ~02:00 local). */
+static int us_is_dst(int y, int mon, int day){
+	if(mon < 3 || mon > 11) return 0;
+	if(mon > 3 && mon < 11) return 1;
+	if(mon == 3){ int first = 1 + ((7 - dow(y,3,1)) % 7); return day >= first + 7; }
+	int first = 1 + ((7 - dow(y,11,1)) % 7);   /* 1st Sunday of November */
+	return day < first;
+}
+/* DST hours for the configured rule on the given (UTC) date. rule: 0 none, 1 EU, 2 US. */
+static int dst_hours(int rule, int y, int mon, int day){
+	if(rule == 1) return eu_is_dst(y, mon, day);
+	if(rule == 2) return us_is_dst(y, mon, day);
+	return 0;
+}
+/* (re)derive the local-epoch anchor from a UTC epoch + the current deskconf locale. */
+static void anchor_local(time_t utc){
+	struct tm *g = gmtime(&utc);
+	int off  = deskconf_get_int("tz_offset", 120);   /* minutes east of UTC */
+	int rule = deskconf_get_int("tz_dst", 1);
+	int dst  = dst_hours(rule, g->tm_year+1900, g->tm_mon+1, g->tm_mday);
+	s_time_base_local = utc + (time_t)off*60 + (time_t)dst*3600;
+	s_time_base_utc   = utc;
+	s_time_base_us    = time_us_64();
+	s_time_ok = 1;
 }
 
 /* SNTP callback (wired via SNTP_SET_SYSTEM_TIME in lwipopts.h). sec = UTC epoch. */
-void kf_sntp_set_time(uint32_t sec){
-	time_t utc = (time_t)sec;
-	struct tm *g = gmtime(&utc);
-	int off = (2 + eu_is_dst(g->tm_year+1900, g->tm_mon+1, g->tm_mday, g->tm_hour)) * 3600;
-	s_time_base_local = utc + off;
-	s_time_base_us = time_us_64();
-	s_time_ok = 1;
+void kf_sntp_set_time(uint32_t sec){ anchor_local((time_t)sec); }
+
+/* Re-apply the locale immediately (called from Settings when the zone changes) so the clock
+   updates without waiting for the next SNTP poll. No-op until the first sync. */
+void kf_time_apply_locale(void){
+	if(!s_time_ok) return;
+	time_t utc = s_time_base_utc + (time_t)((time_us_64() - s_time_base_us) / 1000000ull);
+	anchor_local(utc);
 }
 
 int kf_time_synced(void){ return s_time_ok; }
@@ -285,6 +399,47 @@ static void bench_tick(void){
 	}
 }
 
+/* Boot auto-connect: after the scan settles, rank the visible saved networks by signal and try
+   them strongest-first. Each gets one clean ~15 s join window (re-issuing connect_async mid-
+   handshake is what broke joins before); a bad password fails fast. When the list is exhausted we
+   give up but leave the strongest as the target, so the normal watchdog keeps slow-retrying it. */
+static void campaign_tick(void){
+	if(s_camp == CAMP_SCAN){
+		if(kf_net_scan_active()) return;                  /* still scanning */
+		s_try_n = 0;
+		for(int k=0;k<KF_WIFI_MAX;k++){
+			char ks[33], kp[65]; known_get(k, ks, kp);
+			if(!ks[0]) break;
+			for(int i=0;i<s_seen_n;i++) if(!strcmp(s_seen[i], ks)){
+				snprintf(s_try_ssid[s_try_n],33,"%s",ks);
+				snprintf(s_try_pass[s_try_n],65,"%s",kp);
+				s_try_rssi[s_try_n] = s_seen_rssi[i];
+				s_try_n++;
+				break;
+			}
+		}
+		for(int a=0;a<s_try_n;a++) for(int b=a+1;b<s_try_n;b++) if(s_try_rssi[b] > s_try_rssi[a]){
+			int ri=s_try_rssi[a]; s_try_rssi[a]=s_try_rssi[b]; s_try_rssi[b]=ri;
+			char ts[33]; snprintf(ts,33,"%s",s_try_ssid[a]);
+			snprintf(s_try_ssid[a],33,"%s",s_try_ssid[b]); snprintf(s_try_ssid[b],33,"%s",ts);
+			char tp[65]; snprintf(tp,65,"%s",s_try_pass[a]);
+			snprintf(s_try_pass[a],65,"%s",s_try_pass[b]); snprintf(s_try_pass[b],65,"%s",tp);
+		}
+		if(s_try_n == 0){ s_camp = CAMP_DONE; return; }   /* none of ours in range */
+		s_try_idx = 0; s_camp = CAMP_TRY; s_camp_ms = now_ms();
+		set_target(s_try_ssid[0], s_try_pass[0]); do_connect();
+		return;
+	}
+	if(s_camp == CAMP_TRY){
+		if(s_badauth || now_ms() - s_camp_ms > 15000u){
+			s_try_idx++;
+			if(s_try_idx >= s_try_n){ s_camp = CAMP_DONE; return; }   /* exhausted -> give up */
+			s_camp_ms = now_ms();
+			set_target(s_try_ssid[s_try_idx], s_try_pass[s_try_idx]); do_connect();
+		}
+	}
+}
+
 void kf_net_poll(void){
 	if(!s_present) return;
 	cyw43_arch_poll();                 /* services CYW43 + lwIP timeouts (poll mode) */
@@ -294,8 +449,18 @@ void kf_net_poll(void){
 
 	if(link == CYW43_LINK_UP){
 		if(s_state != KF_NET_ONLINE){ s_state = KF_NET_ONLINE; s_attempts = 0; s_badauth = 0; }
+		if(s_camp == CAMP_SCAN || s_camp == CAMP_TRY) s_camp = CAMP_DONE;   /* campaign won */
 		update_ip();
 		sntp_begin();                  /* start time sync once we're online */
+		bench_tick();
+		return;
+	}
+
+	/* while a boot campaign runs, it owns the connection — skip the single-target watchdog */
+	if(s_camp == CAMP_SCAN || s_camp == CAMP_TRY){
+		s_badauth = (link == CYW43_LINK_BADAUTH);
+		s_state   = KF_NET_CONNECTING;
+		campaign_tick();
 		bench_tick();
 		return;
 	}
@@ -336,16 +501,20 @@ const char *kf_net_ssid(void){ return s_ssid; }
 /* --- scan --- */
 static int scan_result(void *env, const cyw43_ev_scan_result_t *r){
 	(void)env;
-	if(!r || !s_scan_cb) return 0;
+	if(!r) return 0;
 	char ssid[33];
 	int n = r->ssid_len; if(n > 32) n = 32;
 	memcpy(ssid, r->ssid, n); ssid[n] = 0;
 	if(!ssid[0]) return 0;                    /* skip hidden / blank */
 	for(int i=0;i<s_seen_n;i++) if(!strcmp(s_seen[i], ssid)) return 0;  /* dedupe */
-	if(s_seen_n < (int)(sizeof s_seen / sizeof s_seen[0]))
-		snprintf(s_seen[s_seen_n++], 33, "%s", ssid);
-	/* auth_mode 0 = open; anything else = secured. */
-	s_scan_cb(ssid, (int)r->rssi, r->auth_mode != 0);
+	if(s_seen_n < (int)(sizeof s_seen / sizeof s_seen[0])){
+		snprintf(s_seen[s_seen_n], 33, "%s", ssid);
+		s_seen_rssi[s_seen_n] = (int)r->rssi;     /* kept for autoconnect ranking */
+		s_seen_n++;
+	}
+	/* auth_mode 0 = open; anything else = secured. (cb is NULL during the internal
+	   autoconnect scan — results are read back from s_seen[] instead.) */
+	if(s_scan_cb) s_scan_cb(ssid, (int)r->rssi, r->auth_mode != 0);
 	return 0;
 }
 

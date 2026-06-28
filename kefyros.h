@@ -156,7 +156,9 @@ const char    *kf_net_ip(void);           /* dotted IPv4, "0.0.0.0" until online
 const char    *kf_net_ssid(void);         /* current/last target SSID ("" if none) */
 void           kf_net_connect(const char *ssid, const char *pass);  /* async; persists creds */
 void           kf_net_forget(void);       /* disconnect + clear saved creds */
-void           kf_net_autoconnect(void);  /* connect to saved creds, if any (call at boot) */
+void           kf_net_autoconnect(void);  /* scan + join the strongest saved network (call at boot, at eco) */
+int            kf_net_autoconnect_active(void); /* 1 while a boot campaign is still scanning/trying */
+int            kf_net_has_saved(void);    /* 1 if any network is remembered */
 /* scan: cb invoked once per (deduped) AP. secured=0 for open networks. */
 typedef void (*kf_scan_cb)(const char *ssid, int rssi, int secured);
 int            kf_net_scan_start(kf_scan_cb cb);  /* 0 on start, <0 = cyw43/err code */
@@ -172,6 +174,7 @@ uint32_t       kf_net_bench_bytes(void);          /* bytes received so far */
 int            kf_time_synced(void);              /* 1 once SNTP has set the time */
 struct tm;
 int            kf_time_local(struct tm *out);     /* fill broken-down LOCAL time; 0 if unsynced */
+void           kf_time_apply_locale(void);        /* re-derive local time after a tz/DST change in Settings */
 
 /* ===== fault handling / panic screen (port/fault.c) ===== */
 void kf_fault_init(void);    /* enable precise fault traps (call early in main) */
