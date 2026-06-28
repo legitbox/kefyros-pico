@@ -195,6 +195,7 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
 void app_morse_open(void);   /* Morse code: encoder (tone/lamp/backlight), decoder, trainer */
+void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
 void editor_poll(void);

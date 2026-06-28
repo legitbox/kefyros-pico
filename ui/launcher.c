@@ -36,6 +36,7 @@ static const desk_app_t dapps[] = {
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "cakespark",  "CakeSpark",   app_cakespark_open,   11 },
 	{ "morse",      "Morse",       app_morse_open,       12 },
+	{ "help",       "Help",        app_help_open,        13 },
 };
 #define NAPPS  (int)(sizeof(dapps)/sizeof(dapps[0]))
 #define GCOLS  4
