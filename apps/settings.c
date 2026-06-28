@@ -144,19 +144,18 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static uint8_t row[LCD_W * 3];        /* one RGB888 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
-	/* Overclock ladder. The panel SPI is CLAMPED to <=105 MHz on every rung (NOT clk_sys/4),
-	   so the panel is never the variable — this ladder hunts the CORE ceiling. The SPI
-	   divider granularity lands the top rungs around 73–83 MHz, comfortably inside the
-	   panel's validated 110 MHz, so any corruption/crash up there is the core, not the bus.
-	   Every rung past 400 overvolts above the 1.30 V longevity cap — held ONLY while this
-	   test is open; the entry clock + voltage are restored on exit (ESC). The 480/500 rungs
-	   are DANGER tests: this chip's core previously died there even at 1.60 V. Use briefly. */
+	/* Overclock ladder. Panel SPI = clk_sys/4 on every rung, so it scales with the core:
+	   400->100, 420->105, 440->110, 480->120, 500->125 MHz. The panel was validated clean
+	   only to 110 (440); the 480/500 rungs push SPI to 120/125 (UNTESTED panel territory)
+	   AND the core past its old limit AND overvolt past the 1.30 V longevity cap. All of it
+	   is held ONLY while this test is open; the entry clock + voltage are restored on exit
+	   (ESC). 480/500 are DANGER rungs - watch the scrolling bars for panel corruption. */
 	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
-		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* UI default                           */
-		{420000, VREG_VOLTAGE_1_35, 105000000u},   /* calc clock                           */
-		{440000, VREG_VOLTAGE_1_40, 105000000u},   /* prev validated ceiling (SPI clamped) */
-		{480000, VREG_VOLTAGE_1_50, 105000000u},   /* DANGER: overvolt core test           */
-		{500000, VREG_VOLTAGE_1_60, 105000000u},   /* DANGER: max - core died here @1.60 V  */
+		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* 400/4 = 100  (UI default)             */
+		{420000, VREG_VOLTAGE_1_35, 105000000u},   /* 420/4 = 105  (calc clock)             */
+		{440000, VREG_VOLTAGE_1_40, 110000000u},   /* 440/4 = 110  (validated panel ceiling)*/
+		{480000, VREG_VOLTAGE_1_50, 120000000u},   /* 480/4 = 120  DANGER: SPI past 110     */
+		{500000, VREG_VOLTAGE_1_60, 125000000u},   /* 500/4 = 125  DANGER: max              */
 	};
 	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
 	int step = 0;
@@ -177,7 +176,7 @@ static void act_screentest(lv_event_t *e){ (void)e;
 		while(uart_pop_key(&kst, &key)){
 			if(key == DK_ESC || key == DK_BREAK){ running = 0; break; }
 			if(kst == KS_PRESS && key == DK_UP && step < NSTEP-1){
-				/* climb a rung: raise the rail+clock, then set the clamped panel SPI */
+				/* climb a rung: raise the rail+clock, then set the panel SPI (clk_sys/4) */
 				if(kf_clock_set_bare(STEP[step+1].khz, STEP[step+1].v, true)){
 					step++;
 					spi_set_baudrate(Pico_LCD_SPI_MOD, STEP[step].spi);
