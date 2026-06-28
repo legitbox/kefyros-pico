@@ -52,23 +52,21 @@ int main(void){
 	launcher_init();           /* build + show the app launcher (loads config)  */
 	topbar_init();             /* persistent OS top bar (mem/clock/battery/wifi) */
 
-	/* Boot WiFi auto-connect: if any network is remembered, bring the radio up at the WiFi-safe
-	   eco clock (cold boot is already ~250 MHz) and kick off a scan-then-strongest-first campaign.
-	   We stay at eco until it resolves (so the <=270 MHz association window holds), then ramp to
-	   400 below. The cyw43 bus divider is retuned on that clock change, so a joined link survives
-	   the bump. Nothing saved -> skip the radio entirely and ramp to 400 immediately. */
-	int wifi_boot = kf_net_has_saved();
-	if(wifi_boot){
-		kf_clock_eco();
-		kf_net_init();
-		kf_net_autoconnect();
-	}
+	/* Ramp to the smooth 400 MHz UI. Warm (not at cold boot) avoids the marginal-XIP boot lottery. */
+	kf_clock_normal();
 
 	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
 
-	/* ramp to the smooth 400 MHz UI once the boot WiFi campaign resolves (or right away if there
-	   was none). Warm ramp (not at cold boot) avoids the marginal-XIP boot lottery. */
-	int ramped = 0;
+	/* Boot WiFi auto-connect AT 400 MHz — no eco dip. kf_net_init() sets the cyw43 bus divider for
+	   the current clk_sys (div 7 -> ~28 MHz) BEFORE cyw43_arch_init, so the bring-up handshake gets a
+	   correct bus at 400 (the old "bring-up hangs at 400" was the wrong/static divider, same root
+	   cause as the link-drop bug). If anything's saved, bring the radio up and run the strongest-first
+	   campaign in the background via kf_net_poll. (If association turns out NOT to work at 400, restore
+	   the eco dip here.) */
+	if(kf_net_has_saved()){
+		kf_net_init();
+		kf_net_autoconnect();
+	}
 
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */
@@ -82,7 +80,6 @@ int main(void){
 		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
-		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);
 	}
