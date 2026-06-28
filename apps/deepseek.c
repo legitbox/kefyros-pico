@@ -371,7 +371,7 @@ static void send_current(void){
 	if(busy) return;
 	const char *t = lv_textarea_get_text(input_ta);
 	if(!t || !t[0]) return;
-	if(!ds_key[0]){ set_status("no API key - go back, open Settings"); return; }
+	if(!ds_key[0]){ set_status("No API key - go back & open the 'API key' row to set it"); return; }
 	if(kf_net_state() != KF_NET_ONLINE){ set_status("WiFi offline - connect in WiFi app"); return; }
 	if(!ensure_arena()){ set_status("no PSRAM arena"); return; }
 

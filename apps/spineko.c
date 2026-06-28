@@ -329,9 +329,10 @@ static const char START_HTML[] =
 	"<li><a href=\"http://textfiles.com/\">textfiles.com</a></li>"
 	"</ul>"
 	"<hr>"
-	"<p>HTTP and HTTPS both work (TLS 1.2 via BearSSL, no cert check). Pages render as a "
-	"plain web page (white background, black text, blue links) with inline JPEG/PNG/SVG "
-	"images (downscaled); scripts/styling ignored.</p>";
+	"<p><b>Security:</b> HTTPS uses TLS 1.2 (BearSSL) with <b>no certificate check</b>, so the "
+	"connection is encrypted but not verified - don't enter passwords or anything sensitive.</p>"
+	"<p>Pages render as a plain web page (white background, black text, blue links) with inline "
+	"JPEG/PNG/SVG images (downscaled); scripts/styling ignored.</p>";
 
 static void render_start_page(void){
 	if(s_arena==0xFFFFFFFFu) return;
