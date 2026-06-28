@@ -150,8 +150,10 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
      sleep   150 MHz @ 1.10 V /  75 MHz SPI  - idle screen-off; kf_clock_wake() restores prior
      eco     250 MHz @ 1.20 V / 100 MHz SPI  - WiFi-safe (radio won't associate >~270 MHz)
      normal  400 MHz @ 1.30 V / 100 MHz SPI  - the default the UI / apps / audio sit at
-     boost   420 MHz @ 1.35 V / 105 MHz SPI  - max, one rung below the 440 MHz validated
-                                               ceiling; callers drop back to normal on exit. */
+     boost   420 MHz @ 1.35 V / 105 MHz SPI  - the fastest mode, one voltage notch above normal.
+                                               Brief use (the calc's 3D render); callers drop
+                                               back to normal on exit. (500 was tried but the
+                                               panel SPI dies above 110, so 420 is the ceiling.) */
 
 void kf_clock_eco(void){
 	if(s_cur_khz == 250000u) return;   /* == not <=, so kf_clock_wake() can restore eco from 150 */
@@ -160,15 +162,15 @@ void kf_clock_eco(void){
 	   ruled out as the cause of the ECDSA-verify failure — it's a software issue.) */
 	clock_apply(250000u, VREG_VOLTAGE_1_20, 100000000u, false);
 }
-/* Steady-state default the whole UI returns to. main() WARM-ramps here from the 250 MHz
-   cold-boot clock (cold-boot 400 is marginal). Panel validated clean to 110 MHz SPI. */
+/* The steady-state default the whole UI returns to: 400 MHz / 100 MHz SPI, warm-ramped from
+   the 250 MHz cold boot (cold-boot 400 is marginal). Panel validated clean to 110 MHz SPI. */
 void kf_clock_normal(void){
 	if(s_cur_khz == 400000u) return;
 	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, 400000u > s_cur_khz);
 }
-/* Max: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One rung below this chip's validated
-   440 MHz ceiling (480/500 died even at 1.60 V), one voltage notch above normal. Held
-   only while an app needs the headroom (the Calculator); the app restores normal on exit. */
+/* The fastest mode: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One voltage notch above
+   normal; brief use only (the calc's 3D render); callers return to normal on exit. (500 MHz
+   ran but the panel SPI dies above 110 MHz, so 420 is the practical ceiling.) */
 void kf_clock_boost(void){
 	if(s_cur_khz == 420000u) return;
 	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);

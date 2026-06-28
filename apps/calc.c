@@ -745,7 +745,7 @@ void calc_poll(void){
 }
 
 void app_calc_open(void){
-	kf_clock_boost();             /* run the panel at this chip's max: 420 MHz / 105 MHz SPI */
+	kf_clock_normal();            /* calc runs at the normal 400 MHz; only 3D render bumps to 500 */
 	calc_settings_load();         /* restore result mode + angle from the SD config */
 	active = 1; hpos = -1; mode = CMODE_REPL;
 	home_sel = 0; form_scr = NULL;

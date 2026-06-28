@@ -144,18 +144,13 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static uint8_t row[LCD_W * 3];        /* one RGB888 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
-	/* Overclock ladder. Panel SPI = clk_sys/4 on every rung, so it scales with the core:
-	   400->100, 420->105, 440->110, 480->120, 500->125 MHz. The panel was validated clean
-	   only to 110 (440); the 480/500 rungs push SPI to 120/125 (UNTESTED panel territory)
-	   AND the core past its old limit AND overvolt past the 1.30 V longevity cap. All of it
-	   is held ONLY while this test is open; the entry clock + voltage are restored on exit
-	   (ESC). 480/500 are DANGER rungs - watch the scrolling bars for panel corruption. */
+	/* Overclock ladder. Panel SPI = clk_sys/4 on each rung: 400->100, 420->105 MHz. Capped at
+	   420/105 - the panel SPI corrupts above ~110, so 420 is the practical ceiling. The 420 rung
+	   overvolts to 1.35 V (above the 1.30 V longevity cap) - held ONLY while this test is open;
+	   the entry clock + voltage are restored on exit (ESC). */
 	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
-		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* 400/4 = 100  (UI default)             */
-		{420000, VREG_VOLTAGE_1_35, 105000000u},   /* 420/4 = 105  (calc clock)             */
-		{440000, VREG_VOLTAGE_1_40, 110000000u},   /* 440/4 = 110  (validated panel ceiling)*/
-		{480000, VREG_VOLTAGE_1_50, 120000000u},   /* 480/4 = 120  DANGER: SPI past 110     */
-		{500000, VREG_VOLTAGE_1_60, 125000000u},   /* 500/4 = 125  DANGER: max              */
+		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* 400/4 = 100  (UI default) */
+		{420000, VREG_VOLTAGE_1_35, 105000000u},   /* 420/4 = 105  (fastest)    */
 	};
 	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
 	int step = 0;
@@ -208,8 +203,7 @@ static void act_screentest(lv_event_t *e){ (void)e;
 			snprintf(buf, sizeof buf, "SPI %lu  SYS %lu  FPS %d  ",
 			         (unsigned long)mhz, (unsigned long)clock_sys_mhz(), fps);
 			draw_rect_spi(0, 0, LCD_W - 1, 19, 0x000000);
-			int fg = (step >= 3) ? 0xe03c32 : 0xffc94d;   /* red on the 480/500 danger rungs */
-			st_puts(6, 6, buf, 2, fg, 0x000000);
+			st_puts(6, 6, buf, 2, 0xffc94d, 0x000000);
 			shown_fps = fps; shown_mhz = mhz;
 		}
 

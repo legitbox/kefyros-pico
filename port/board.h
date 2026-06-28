@@ -55,7 +55,7 @@
      * kf_clock_sleep()  -> 150 MHz @ 1.10 V  (idle screen-off; kf_clock_wake() restores the prior tier)
      * kf_clock_eco()    -> 250 MHz @ 1.20 V  (WiFi apps: radio can't associate above ~270 MHz)
      * kf_clock_normal() -> 400 MHz @ 1.30 V  (the UI / apps / audio default)
-     * kf_clock_boost()  -> 420 MHz @ 1.35 V  (max; the Calculator. Restores normal on exit)
+     * kf_clock_boost()  -> 420 MHz @ 1.35 V  (fastest mode; the calc's 3D render. Restores normal)
    The QMI flash divider is sized once at boot for the 420 MHz peak, so all tiers are safe. */
 #define KF_SYS_KHZ        250000      /* cold-boot clock; warm-ramps to the normal 400 MHz */
 #define KF_VREG_MV        1200        /* VREG_VOLTAGE_1_20 (boot rail; raised to 1.30/1.35 to ramp) */

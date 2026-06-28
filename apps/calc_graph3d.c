@@ -325,6 +325,7 @@ void calc_graph3d_open(const cnode *f){
 	if(!strip) strip = malloc((size_t)GW*STRIP_H*2);   /* one strip; freed on exit */
 	if(!strip){ calc_note("out of memory"); return; }
 	if(!g3d_alloc()){ free(strip); strip=NULL; calc_note("out of memory"); return; }
+	kf_clock_boost();             /* 3D render compute: bump to the fastest clock (420 MHz) while open */
 	cn_free(fn3); fn3=cn_clone(f);
 	yaw=0.7; pitch=0.45; zoom=1.0; vyaw=vpitch=vzoomr=0; held=0; auto_rot=0;
 
@@ -347,7 +348,9 @@ void calc_graph3d_key(uint8_t key, int mods, int pressed){
 		case DK_ESC: case DK_BREAK:
 			cn_free(fn3); fn3=NULL; free(strip); strip=NULL; g3d_free();
 			held=0; vyaw=vpitch=vzoomr=0; auto_rot=0;
-			lv_obj_delete(scr3); scr3=NULL; calc_show_worksheet(); return;
+			lv_obj_delete(scr3); scr3=NULL;
+			kf_clock_normal();    /* 3D render done: drop back to 400 MHz */
+			calc_show_worksheet(); return;
 		case DK_F1:           shaded     = !shaded;     render3(); return;   /* F1 */
 		case DK_F1+1:         show_plane = !show_plane; render3(); return;   /* F2 */
 		case ' ':             auto_rot   = !auto_rot;   last_us = time_us_64(); return;
