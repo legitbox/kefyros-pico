@@ -521,7 +521,7 @@ static void on_del(lv_event_t *e){ (void)e;
 	scr=NULL; doc=NULL; lbl_url=NULL; lbl_status=NULL;
 	kf_http_abort();
 	kf_grab_input(0);
-	kf_clock_ui();             /* back to the 360 MHz smooth-UI clock off the network */
+	kf_clock_normal();         /* back to the normal 400 MHz clock off the network */
 }
 
 /* PSRAM round-trip check at the CURRENT clock. Spineko is the first code to drive
@@ -614,7 +614,7 @@ void app_spineko_open(void){
 	} else {
 		uint32_t bad = psram_check();              /* verify the arena at the eco clock */
 		if(bad){
-			kf_clock_boost();                      /* re-test at 400 to localise the fault */
+			kf_clock_normal();                     /* re-test at the normal 400 MHz to localise the fault */
 			uint32_t bad2 = psram_check();
 			kf_clock_eco();
 			char m[120];

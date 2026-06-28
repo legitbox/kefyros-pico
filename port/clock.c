@@ -90,10 +90,11 @@ void clock_init(void){
 	/* 2) Bring up the 250 MHz default. set_sys_clock_khz(.., false) returns false rather
 	 *    than faulting if it can't hit the rate. */
 	if(set_sys_clock_khz(KF_SYS_KHZ, false)){
-		/* Size the QMI flash divider for the PEAK clock we'll ever switch to (400 MHz via
+		/* Size the QMI flash divider for the PEAK clock we'll ever switch to (420 MHz via
 		 * kf_clock_boost) — clock_apply() deliberately never retunes flash timing, so the
-		 * boot divider must stay valid at 400 too. /6 -> 66 MHz @400, 41 MHz @250: safe at both. */
-		qmi_set_flash_div(400000000u);
+		 * boot divider must stay valid at every tier. /6 -> 70 MHz @420, 66 @400, 41 @250:
+		 * all under the 90 MHz cap. (420 and 400 both round to the same /6 divider.) */
+		qmi_set_flash_div(420000000u);
 	} else {
 		/* 3) Fallback: 150 MHz is the RP2350's happy default — boots with the
 		 *    stock 1.10 V rail and stock flash divider, so no QMI retune needed.

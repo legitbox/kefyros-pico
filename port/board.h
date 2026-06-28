@@ -50,14 +50,15 @@
 /* ---- clock tiers ----
    COLD BOOT at 250 MHz @ 1.20 V: PSRAM- and WiFi-safe, and unlike a high cold boot it
    comes up cleanly every power-up (booting at 400 was an intermittent marginal-XIP/PSRAM
-   lottery). main() then ramps WARM to the 360 MHz UI clock (kf_clock_ui) for smooth menus
-   — a warm ramp dodges the cold-boot marginality. From there:
-     * kf_clock_boost() -> 400 MHz  (FLAC playback: extra carrier bit + decode headroom)
-     * kf_clock_eco()   -> 250 MHz  (WiFi apps: radio can't associate above ~270 MHz)
-     * kf_clock_ui()    -> 360 MHz  (return to the smooth-UI default on app exit)
-   The QMI flash divider is sized once at boot for the 400 MHz peak, so all tiers are safe. */
-#define KF_SYS_KHZ        250000      /* cold-boot clock; UI ramps to 360, FLAC to 400 */
-#define KF_VREG_MV        1200        /* VREG_VOLTAGE_1_20 (boot rail; raised to 1.30 to ramp) */
+   lottery). main() then ramps WARM to the normal 400 MHz clock (kf_clock_normal) for smooth
+   menus — a warm ramp dodges the cold-boot marginality. The three tiers the whole OS uses:
+     * kf_clock_eco()    -> 250 MHz @ 1.20 V  (WiFi apps: radio can't associate above ~270 MHz)
+     * kf_clock_normal() -> 400 MHz @ 1.30 V  (the UI / apps / audio default)
+     * kf_clock_boost()  -> 420 MHz @ 1.35 V  (max; the Calculator. Restores normal on exit)
+   The QMI flash divider is sized once at boot for the 420 MHz peak, so all tiers are safe.
+   A future kf_clock_sleep() (deep low-power / display-off) would slot in below eco. */
+#define KF_SYS_KHZ        250000      /* cold-boot clock; warm-ramps to the normal 400 MHz */
+#define KF_VREG_MV        1200        /* VREG_VOLTAGE_1_20 (boot rail; raised to 1.30/1.35 to ramp) */
 
 #define KF_BOARD_NAME     "PicoCalc / Pico 2 W"
 #endif

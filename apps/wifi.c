@@ -174,10 +174,10 @@ static void rebuild_list(void){
 static void on_del(lv_event_t *e){ (void)e;
 	if(wtimer){ lv_timer_delete(wtimer); wtimer = NULL; }
 	scr = NULL; pw_box = NULL;
-	/* Back to the 360 MHz smooth-UI clock on exit. NOTE: 360 > ~270 MHz, so the radio
+	/* Back to the normal 400 MHz clock on exit. NOTE: 400 > ~270 MHz, so the radio
 	   can't hold a link here — leaving WiFi drops the connection (re-entering WiFi
 	   auto-reconnects, since it drops to 250 on open and creds are remembered). */
-	kf_clock_ui();
+	kf_clock_normal();
 }
 
 void app_wifi_open(void){

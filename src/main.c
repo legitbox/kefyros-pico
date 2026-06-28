@@ -55,7 +55,7 @@ int main(void){
 	/* Cold boot ran at the rock-solid 250 MHz default; now that everything's up, ramp to
 	   360 MHz for a smooth UI. Doing it warm (not at cold boot) avoids the marginal-XIP
 	   boot lottery that booting high caused. WiFi apps drop back to 250 as needed. */
-	kf_clock_ui();
+	kf_clock_normal();
 
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */

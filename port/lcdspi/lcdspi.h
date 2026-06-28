@@ -10,7 +10,7 @@
                                        speed is tied to the UI clock: 400→100. The Screen Test
                                        validated the panel clean to 110 (440 MHz); 480/500 killed the
                                        *core*, so 440 is this chip's ceiling. Calc runs 420→105 via
-                                       kf_clock_calc(); the rest of the UI sits here at 100. */
+                                       kf_clock_boost() (the Calculator); the rest of the UI sits at 100. */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI

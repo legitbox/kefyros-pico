@@ -16,7 +16,7 @@ no camera).
 - **Numeric** solve / integral / nderiv + 2-eqn system (`calc_solve.c`).
 - Graphing: 2D cartesian/polar/parametric, 3D surface, tables.
 - Engine files are **pure C, board-agnostic** (`calc.h` line 2) → host-testable.
-- Runs at **420 MHz / 105 MHz SPI @ 1.35 V** while open (`kf_clock_calc()`).
+- Runs at **420 MHz / 105 MHz SPI @ 1.35 V** while open (`kf_clock_boost()`).
 
 The scaffolding is a real CAS; the hole is that **every number is an inexact `double`**.
 Fixing that is V2.0.

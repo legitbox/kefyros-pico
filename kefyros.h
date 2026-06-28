@@ -113,10 +113,11 @@ void     kf_psram_reclock(void);                      /* re-derive PIO clkdiv af
    Apps/WiFi bracket their needs with these. boost = full speed; eco = WiFi-safe + low
    power. The switch pauses the Core-1 display pump and re-derives all clk_sys-derived
    peripheral clocks, so it's safe to call from app code (NOT from inside an LVGL flush). */
-void     kf_clock_boost(void);                        /* 400 MHz @ 1.30 V (FLAC etc.) */
-void     kf_clock_ui(void);                           /* 400 MHz @ 1.30 V / 100 MHz SPI (UI default) */
-void     kf_clock_calc(void);                         /* 420 MHz @ 1.35 V / 105 MHz SPI (calc only) */
-void     kf_clock_eco(void);                          /* 250 MHz @ 1.20 V (under WiFi ~270 ceiling) */
+/* Three clock tiers — the whole OS uses exactly these (see port/clock.c). A future
+   deep low-power kf_clock_sleep() for display-off sleep would slot in below eco. */
+void     kf_clock_eco(void);     /* 250 MHz @ 1.20 V             - WiFi-safe (radio <~270 MHz) */
+void     kf_clock_normal(void);  /* 400 MHz @ 1.30 V / 100 MHz SPI - UI / apps / audio default */
+void     kf_clock_boost(void);   /* 420 MHz @ 1.35 V / 105 MHz SPI - max (Calculator)         */
 uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
 
 /* ===== audio (port/audio.c) — PWM DAC on GP26/27, DMA-paced, noise-shaped =====

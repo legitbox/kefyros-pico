@@ -160,7 +160,7 @@ static void stop_game_to_launcher(void){
 	free(s_cartram); s_cartram = NULL; s_cartram_sz = 0;
 	s_active = 0; s_state = ST_OFF;
 	kf_grab_input(0);
-	kf_clock_ui();
+	kf_clock_normal();
 	kf_back_to_launcher();
 }
 
@@ -283,7 +283,7 @@ static void start_game(const char *name){
 	/* enter play at the OS 360 MHz clock. clk_peri now follows clk_sys, so the panel SPI
 	   runs at the full LCD_SPI_SPEED (90 MHz) — double the old hard-capped 45 — which is
 	   what makes 2x usable. */
-	kf_clock_ui();
+	kf_clock_normal();
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
 	disp_pause_core1();
 	draw_rect_spi(0, 0, LCD_W - 1, LCD_H - 1, 0x000000);

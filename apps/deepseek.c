@@ -462,7 +462,7 @@ static void on_scr_del(lv_event_t *e){
 			kf_http_abort();
 			kf_grab_input(0);
 			free_msgs(); free_names();
-			kf_clock_ui();
+			kf_clock_normal();
 		}
 	}
 }
