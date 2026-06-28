@@ -691,7 +691,7 @@ void app_deepseek_open(void){
 	mkdir(DS_CHATDIR, 0755);
 
 	/* radio only associates <=~270 MHz; run eco the whole session, restore UI on exit */
-	kf_clock_eco();
+	kf_clock_normal();
 	kf_net_init();
 
 	open_list();

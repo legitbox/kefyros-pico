@@ -552,7 +552,7 @@ static void do_seek(int dsec){
 /* ================================================================= keys ===== */
 static void m_exit(void){
 	close_dec();               /* stop the decoder + audio BEFORE dropping the clock */
-	kf_clock_normal();         /* hand the panel clock back to the normal 400 MHz UI */
+	kf_clock_normal();         /* hand the panel clock back to the 200 MHz default UI */
 	g_active = 0;
 	g_cover_ok = 0;
 	free(g_thumb); g_thumb = NULL;       /* return the ~29 KB to the shared heap */
@@ -696,7 +696,7 @@ void app_music_open(void){
 	lv_label_set_text(g_l_empty, "");
 
 	if(!g_thumb) g_thumb = malloc((size_t)THUMB*THUMB*2);   /* cover scratch (freed on exit) */
-	kf_clock_normal();                /* the normal 400 MHz clock: 13-bit carrier + decode headroom */
+	kf_clock_boost();                 /* turbo 420 MHz: 13-bit audio carrier + FLAC decode headroom */
 	g_active = 1;
 	lv_screen_load(g_scr);
 

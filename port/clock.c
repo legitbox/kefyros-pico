@@ -151,38 +151,32 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
 
 /* ===== Clock tiers — the WHOLE OS uses these. =====
      sleep   150 MHz @ 1.10 V /  75 MHz SPI  - idle screen-off; kf_clock_wake() restores prior
-     eco     250 MHz @ 1.20 V / 100 MHz SPI  - WiFi-safe (radio won't associate >~270 MHz)
-     normal  400 MHz @ 1.30 V / 100 MHz SPI  - the default the UI / apps / audio sit at
-     boost   420 MHz @ 1.35 V / 105 MHz SPI  - the fastest mode, one voltage notch above normal.
-                                               Brief use (the calc's 3D render); callers drop
-                                               back to normal on exit. (500 was tried but the
-                                               panel SPI dies above 110, so 420 is the ceiling.) */
+     normal  200 MHz @ 1.15 V / 100 MHz SPI  - THE default: UI + nearly every app. 200 is the
+                                               LOWEST core that still feeds the panel a full
+                                               100 MHz SPI (PL022 prescaler is even-only: 200/2=100;
+                                               250 can't make 100, only 125-too-fast or 62.5). It is
+                                               also under the ~270 MHz WiFi ceiling, so the radio
+                                               (bring-up + association + live link) all run here —
+                                               no eco dip anymore. cyw43 bus lands ~33 MHz (div 3).
+     turbo   420 MHz @ 1.35 V / 105 MHz SPI  - heavy compute ONLY (Music decode, the calc's 3D
+                                               render); callers drop back to normal on exit. (Panel
+                                               SPI dies above ~110, so 420/105 is the ceiling.) */
 
-void kf_clock_eco(void){
-	if(s_cur_khz == 250000u) return;   /* == not <=, so kf_clock_wake() can restore eco from 150 */
-	/* 250 MHz: under the ~270 MHz WiFi ceiling, faster than stock 150. The dynamic
-	   cyw43 bus divider (port/net.c) auto-tunes to ~31 MHz here. (Voltage 1.20 V was
-	   ruled out as the cause of the ECDSA-verify failure — it's a software issue.) */
-	clock_apply(250000u, VREG_VOLTAGE_1_20, 100000000u, false);
-}
-/* The steady-state default the whole UI returns to: 400 MHz / 100 MHz SPI, warm-ramped from
-   the 250 MHz cold boot (cold-boot 400 is marginal). Panel validated clean to 110 MHz SPI. */
+/* The steady-state default the whole UI + nearly every app sits at: 200 MHz / 100 MHz SPI @ 1.15 V.
+   WiFi-safe, cool, full panel-blit speed. Warm-ramped from the 250 MHz cold boot. */
 void kf_clock_normal(void){
-	if(s_cur_khz == 400000u) return;
-	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, 400000u > s_cur_khz);
+	if(s_cur_khz == 200000u) return;
+	clock_apply(200000u, VREG_VOLTAGE_1_15, 100000000u, 200000u > s_cur_khz);
 }
-/* The fastest mode: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One voltage notch above
-   normal; brief use only (the calc's 3D render); callers return to normal on exit. (500 MHz
-   ran but the panel SPI dies above 110 MHz, so 420 is the practical ceiling.) */
+/* Heavy-compute turbo: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. Brief use only (Music FLAC
+   decode + 13-bit audio carrier, the calc's 3D render); callers return to normal on exit. */
 void kf_clock_boost(void){
 	if(s_cur_khz == 420000u) return;
 	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);
 }
-/* Deep low-power sleep: 150 MHz @ the stock 1.10 V rail (the QMI flash divider stays valid
-   down here), panel SPI dialed to 75 MHz. The launcher's idle timer drops here (and kills
-   both backlights) after the screen-off timeout; kf_clock_wake() restores the tier we slept
-   FROM. WiFi is NOT babysat — the cyw43 bus divider isn't retuned, so the bus just slows with
-   the clock; if a live link survives that, bonus, otherwise the WiFi app reconnects on entry. */
+/* Deep low-power sleep: 150 MHz @ the stock 1.10 V rail (the QMI flash divider stays valid down
+   here), panel SPI 75 MHz. The launcher's idle timer drops here (and kills both backlights) after
+   the screen-off timeout; kf_clock_wake() restores the tier we slept FROM. */
 static uint32_t s_pre_sleep_khz = 0;
 void kf_clock_sleep(void){
 	if(s_cur_khz == 150000u) return;
@@ -191,10 +185,9 @@ void kf_clock_sleep(void){
 }
 void kf_clock_wake(void){
 	if(s_cur_khz != 150000u) return;             /* only meaningful when actually asleep */
-	uint32_t k = s_pre_sleep_khz ? s_pre_sleep_khz : 400000u;
-	if(k >= 420000u)      kf_clock_boost();
-	else if(k <= 250000u) kf_clock_eco();
-	else                  kf_clock_normal();
+	uint32_t k = s_pre_sleep_khz ? s_pre_sleep_khz : 200000u;
+	if(k >= 420000u) kf_clock_boost();
+	else             kf_clock_normal();
 }
 uint32_t kf_clock_khz(void){ return clock_get_hz(clk_sys) / 1000u; }
 

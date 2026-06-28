@@ -546,7 +546,7 @@ static uint32_t psram_check(void){
 }
 
 void app_spineko_open(void){
-	kf_clock_eco();            /* radio only associates <=~270 MHz */
+	kf_clock_normal();            /* radio only associates <=~270 MHz */
 	kf_net_init();
 	/* Only kick off a connect if nothing is already targeted. Calling autoconnect
 	   unconditionally re-issues do_connect()'s cyw43_wifi_leave(), which would DROP a
@@ -616,7 +616,7 @@ void app_spineko_open(void){
 		if(bad){
 			kf_clock_normal();                     /* re-test at the normal 400 MHz to localise the fault */
 			uint32_t bad2 = psram_check();
-			kf_clock_eco();
+			kf_clock_normal();
 			char m[120];
 			snprintf(m,sizeof m,"PSRAM corrupts @250MHz (+%luKB). @400MHz: %s",
 			         (unsigned long)(bad-1), bad2?"also bad":"CLEAN -> eco-clock bug");
