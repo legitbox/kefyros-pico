@@ -114,7 +114,8 @@ void     kf_psram_reclock(void);                      /* re-derive PIO clkdiv af
    power. The switch pauses the Core-1 display pump and re-derives all clk_sys-derived
    peripheral clocks, so it's safe to call from app code (NOT from inside an LVGL flush). */
 /* Clock tiers — the whole OS uses these (see port/clock.c). */
-void     kf_clock_normal(void);  /* 200 MHz @ 1.15 V / 100 MHz SPI - THE default (UI/apps/WiFi); WiFi-safe */
+void     kf_clock_eco(void);     /* 250 MHz @ 1.20 V              - WiFi-safe; brief, wraps the radio join */
+void     kf_clock_normal(void);  /* 400 MHz @ 1.30 V / 100 MHz SPI - UI / apps / audio default   */
 void     kf_clock_boost(void);   /* 420 MHz @ 1.35 V / 105 MHz SPI - turbo: Music decode + calc 3D render  */
 void     kf_clock_sleep(void);   /* 150 MHz @ 1.10 V              - idle screen-off low-power     */
 void     kf_clock_wake(void);    /* restore the tier active before kf_clock_sleep()             */

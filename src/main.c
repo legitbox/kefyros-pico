@@ -52,19 +52,25 @@ int main(void){
 	launcher_init();           /* build + show the app launcher (loads config)  */
 	topbar_init();             /* persistent OS top bar (mem/clock/battery/wifi) */
 
-	/* Warm-ramp to the 200 MHz default UI clock (100 MHz SPI). 200 is under the ~270 MHz WiFi
-	   ceiling, so the radio comes up right here — no eco dip. (Bring-up at 400 was tried and STALLS
-	   cyw43_arch_init ~60s because it's ABOVE the ceiling; 200 is on the safe side like the old 250,
-	   just lower, so it's fine.) Boot WiFi auto-connect: if anything's saved, bring the radio up and
-	   run the scan-then-strongest-first campaign in the background via kf_net_poll. */
-	kf_clock_normal();
-
-	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
-
-	if(kf_net_has_saved()){
+	/* Boot WiFi auto-connect: if any network is remembered, bring the radio up at the WiFi-safe
+	   eco clock (cold boot is already ~250 MHz) and kick off a scan-then-strongest-first campaign.
+	   We stay at eco until it resolves (the JOIN needs <=270 MHz), then ramp to 400 below; the cyw43
+	   bus divider is retuned on that switch so the joined link survives the bump and rides 400.
+	   Nothing saved -> skip the radio and ramp immediately.
+	   NOTE: bring-up + association at 400 HANG cyw43_arch_init (~270 MHz silicon ceiling, confirmed),
+	   and 200 was tried as the default but the LVGL UI paints in visible bands there (CPU-bound), so
+	   400 is the default and the eco dip wraps the join only. */
+	int wifi_boot = kf_net_has_saved();
+	if(wifi_boot){
+		kf_clock_eco();
 		kf_net_init();
 		kf_net_autoconnect();
 	}
+
+	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
+
+	/* ramp to the smooth 400 MHz UI once the boot WiFi campaign resolves (or right away if none) */
+	int ramped = 0;
 
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */
@@ -78,6 +84,7 @@ int main(void){
 		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
+		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);
 	}

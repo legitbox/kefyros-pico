@@ -176,8 +176,8 @@ void kf_net_init(void){
 	set_bus_div();
 	/* IMPORTANT: bring the radio up only at a WiFi-safe clock (<=~270 MHz). cyw43's
 	   STA bring-up (wifi_on's ioctl handshake) STALLS ~60s then fails above the ceiling
-	   (confirmed at 400). The OS default (kf_clock_normal) is now 200 MHz — under the
-	   ceiling — so init runs at the default; no special dip needed. */
+	   (confirmed at 400). So this runs at the eco clock (250) from the boot dip / WiFi
+	   app; once joined, the OS ramps to 400 and the link rides it (kf_net_reclock). */
 	if(cyw43_arch_init_with_country(KF_WIFI_COUNTRY)){
 		s_present = 0; s_state = KF_NET_OFF; return;
 	}

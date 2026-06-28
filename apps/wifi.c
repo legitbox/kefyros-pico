@@ -186,7 +186,7 @@ void app_wifi_open(void){
 	/* WiFi needs <=~270 MHz: the cyw43 bring-up HANGS at 400 MHz. Drop to eco (250 MHz)
 	   before bringing the radio up. (We confirmed 400 hangs init — overclock + password
 	   were two separate bugs.) */
-	kf_clock_normal();
+	kf_clock_eco();
 	kf_net_init();         /* bring the radio up NOW, at the safe clock (idempotent) */
 
 	scr = lv_obj_create(NULL);
