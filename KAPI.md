@@ -95,7 +95,7 @@ enum { KF_OK=0, KF_ERR=-1, KF_ENOMEM=-2, KF_EIO=-5, KF_ENOENT=-2, KF_EINVAL=-22,
        KF_EUNSUPP=-95, KF_AGAIN=-11 };
 
 /* sys->caps() bitfield */
-enum { KF_CAP_PSRAM=1, KF_CAP_WIFI=2, KF_CAP_AUDIO_OUT=4, KF_CAP_AUDIO_IN=8,
+enum { KF_CAP_PSRAM=1, KF_CAP_WIFI=2, KF_CAP_AUDIO_OUT=4, /* 8 reserved (no audio-in HW) */
        KF_CAP_FLASH_SCRATCH=16, KF_CAP_IMG=32, KF_CAP_RNG=64, KF_CAP_TLS=128 };
 
 enum kf_perf { KF_PERF_ECO, KF_PERF_NORMAL, KF_PERF_BOOST };  /* app-requestable tiers, §7.3   */
@@ -257,13 +257,10 @@ struct k_aud {
   int    (*out_running)(void);
   void   (*out_stop)(void);
   void   (*tone)(int hz, int ms);                          /* convenience beep         */
-  /* input (cap KF_CAP_AUDIO_IN — may be absent on this HW; check caps!) */
-  kf_err (*in_start)(int rate); int (*in_read)(int16_t* buf, int nsamp); void (*in_stop)(void);
+  /* NOTE: the PicoCalc has NO mic/ADC, so there is no audio input. If a future board ever
+     gains one, an aud->in_* group is appended here under a new cap + minor bump (§6, §11). */
 };
 ```
-> **Open hardware question:** confirm whether the PicoCalc exposes a mic/ADC. If not,
-> `KF_CAP_AUDIO_IN` is always clear and acoustic Morse RX must key off the keyboard
-> (input timing) instead.
 
 ### k_fs — storage (+ flash-scratch staging)
 ```c
@@ -443,7 +440,6 @@ arbitrated). A reader app ships `eco` for battery; the GB emulator ships `boost`
 | `KF_CAP_WIFI` | `net->*` | offline app |
 | `KF_CAP_TLS` | `tls->*`, `http` | http:// only / no net |
 | `KF_CAP_AUDIO_OUT` | `aud->out_*`, `tone` | silent |
-| `KF_CAP_AUDIO_IN` | `aud->in_*` | no acoustic capture (Morse RX via keys) |
 | `KF_CAP_IMG` | `img->*` | no image display |
 | `KF_CAP_FLASH_SCRATCH` | `fs->stage` | big blobs via PSRAM paging instead |
 | `KF_CAP_RNG` | `sys->rng` | seed from `time->micros` |
@@ -476,7 +472,7 @@ against minor *N* runs on kernel minor ≥ *N*. Breaking changes bump `abi`.
 | Spineko | windowed + net | `net`, `tls`, `http`+`doc` **or** `gfx`+`txt` (custom) |
 | DeepSeek | windowed + net | `net`, `tls`, `http`, `ui` |
 | Music (FLAC) | windowed + real-time audio | `ui`, **`aud->out_*`**, `fs` (streaming), **`img`** (album art), app-side FLAC decode |
-| Morse | windowed + tone (+ mic?) | `aud->tone`/`out_*`, `time` (timing), `in`; `aud->in_*` **iff** `KF_CAP_AUDIO_IN` |
+| Morse | windowed + tone | `aud->tone`/`out_*` (TX sidetone), `time` (timing), `in` (RX = keyed on the keyboard — no mic on this HW) |
 | Game Boy / games | **exclusive** | **`gfx->lease/region/push/set_panel_hz`**, **`aud->out_*`**, `in`, `sys->pump`+`perf`, `mem->psram`/`fs->stage` (ROM), `time->micros` |
 | Wallpaper | windowed + image | **`img->decode/encode_file`**, `gfx`, `fs` |
 
@@ -487,12 +483,11 @@ codec (`k_img`), perf/clock (`sys->perf`), the own-loop pump (`sys->pump`), audi
 
 ## 13. Open decisions
 
-1. **Mic/ADC:** does the hardware have audio input? Gates `KF_CAP_AUDIO_IN` and Morse RX.
-   *(the only remaining hardware unknown)*
-2. **FLAC/codec libs:** ship as Layer-1 kernel services or as static SDK libs the app
+1. **FLAC/codec libs:** ship as Layer-1 kernel services or as static SDK libs the app
    bundles? (size/sharing vs version freedom.)
-3. **Arena size vs PSRAM/PIC** (from the loader spec) — fixed-arena bytes to reserve.
+2. **Arena size vs PSRAM/PIC** (from the loader spec) — fixed-arena bytes to reserve.
 
 **Resolved:** windowed perf → live composited canvas + optional direct-SPI turbo, ~0% loss
 (§7.2, §gfx); privilege boundary → apps consume/observe/request, never configure (§7.1);
-performance modes → arbitrated tier requests + per-app idle policy (§7.3).
+performance modes → arbitrated tier requests + per-app idle policy (§7.3); audio input →
+none (no mic/ADC on this hardware), Morse RX keys off the keyboard.
