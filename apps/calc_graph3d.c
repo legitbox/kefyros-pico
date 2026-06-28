@@ -15,6 +15,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 extern char font8x8_basic[128][8];
 #define GW 320
@@ -44,6 +47,9 @@ static double    X0=-5, X1=5, Y0=-5, Y1=5;
    the play button with no sound). They now live in ONE heap arena allocated on open
    (g3d_alloc) and freed on close (g3d_free); pointer-to-array types keep s_z[i][j]. */
 static double (*s_z)[NG];  static int (*s_ok)[NG];
+static double (*s_wx)[NG], (*s_wy)[NG];          /* world x,y per vertex (spherical mode; in
+                                                    Cartesian mode x,y come straight from i,j) */
+static int    s_sph = 0;                          /* F3: 0 = z=f(x,y) Cartesian, 1 = r=f(x,y) spherical */
 static double s_zmin, s_zmax, s_zlo, s_zhi;     /* data range + nice box range */
 static int    (*s_sx)[NG], (*s_sy)[NG];          /* per-frame projected screen coords */
 static double (*s_vd)[NG];                        /* per-frame vertex depth (for sorting) */
@@ -113,20 +119,46 @@ static uint16_t shade_lit(double t, double inten){
 	return RGB(r,g,b);
 }
 
-/* evaluate the surface once + derive a nice box z-range */
+/* evaluate the surface once + derive a nice box range. Two modes:
+     Cartesian  z = f(x,y)   over X0..X1, Y0..Y1   (s_z = height; x,y from the grid index)
+     Spherical  r = f(x,y)   with x = azimuth th in [0,2pi], y = polar phi in [0,pi]; the
+                point is (r sinphi costh, r sinphi sinth, r cosphi). All three world coords
+                are stored per vertex (s_wx,s_wy,s_z) and the box is a symmetric cube so a
+                plain r=const renders as a true sphere. s_zmin/s_zmax stay the z-extent so the
+                amber height-ramp colouring is unchanged. */
 static void mesh_eval(void){
 	s_zmin=1e300; s_zmax=-1e300;
-	for(int i=0;i<NG;i++) for(int j=0;j<NG;j++){
-		double wx=X0+(X1-X0)*i/(NG-1), wy=Y0+(Y1-Y0)*j/(NG-1);
-		calc_set_var("x",wx); calc_set_var("y",wy);
-		int o=1; double v=calc_eval(fn3,&o); s_ok[i][j]= o && isfinite(v);
-		s_z[i][j]=v;
-		if(s_ok[i][j]){ if(v<s_zmin) s_zmin=v; if(v>s_zmax) s_zmax=v; }
+	if(!s_sph){
+		X0=-5; X1=5; Y0=-5; Y1=5;                /* fixed Cartesian domain (spherical clobbers these) */
+		for(int i=0;i<NG;i++) for(int j=0;j<NG;j++){
+			double wx=X0+(X1-X0)*i/(NG-1), wy=Y0+(Y1-Y0)*j/(NG-1);
+			calc_set_var("x",wx); calc_set_var("y",wy);
+			int o=1; double v=calc_eval(fn3,&o); s_ok[i][j]= o && isfinite(v);
+			s_z[i][j]=v; s_wx[i][j]=wx; s_wy[i][j]=wy;
+			if(s_ok[i][j]){ if(v<s_zmin) s_zmin=v; if(v>s_zmax) s_zmax=v; }
+		}
+		if(s_zmin>s_zmax){ s_zmin=0; s_zmax=1; }     /* no finite samples */
+		double pad=(s_zmax-s_zmin)*0.08; if(!(pad>1e-9)) pad=1;
+		s_zlo=floor(s_zmin-pad); s_zhi=ceil(s_zmax+pad);
+		if(s_zhi-s_zlo < 1) s_zhi = s_zlo + 1;
+		return;
 	}
-	if(s_zmin>s_zmax){ s_zmin=0; s_zmax=1; }     /* no finite samples */
-	double pad=(s_zmax-s_zmin)*0.08; if(!(pad>1e-9)) pad=1;
-	s_zlo=floor(s_zmin-pad); s_zhi=ceil(s_zmax+pad);
-	if(s_zhi-s_zlo < 1) s_zhi = s_zlo + 1;
+	/* spherical: x = theta, y = phi; r = f(theta,phi) */
+	double m=0;                                      /* half-extent of the bounding cube */
+	for(int i=0;i<NG;i++) for(int j=0;j<NG;j++){
+		double th=2*M_PI*i/(NG-1), ph=M_PI*j/(NG-1);
+		calc_set_var("x",th); calc_set_var("y",ph);
+		int o=1; double r=calc_eval(fn3,&o); int ok = o && isfinite(r);
+		s_ok[i][j]=ok;
+		double wx=0,wy=0,wz=0;
+		if(ok){ double sp=sin(ph); wx=r*sp*cos(th); wy=r*sp*sin(th); wz=r*cos(ph);
+			if(fabs(wx)>m)m=fabs(wx); if(fabs(wy)>m)m=fabs(wy); if(fabs(wz)>m)m=fabs(wz);
+			if(wz<s_zmin)s_zmin=wz; if(wz>s_zmax)s_zmax=wz; }
+		s_wx[i][j]=wx; s_wy[i][j]=wy; s_z[i][j]=wz;
+	}
+	if(!(m>1e-9)) m=1;
+	if(s_zmin>s_zmax){ s_zmin=-m; s_zmax=m; }
+	X0=-m; X1=m; Y0=-m; Y1=m; s_zlo=-m; s_zhi=m;     /* symmetric cube box */
 }
 
 static void setup_view(void){
@@ -178,12 +210,26 @@ static double nice_step(double range, int target){
 	return s * mag;
 }
 
+/* One z-axis segment za..zb (the pole at x=0,y=0): spine + perpendicular ticks, plus the
+   arrowhead and "z" label when `top` (the segment that reaches s_zhi). The pole is split at the
+   box-centre height so the half nearer the camera can be drawn ON TOP of the surface and the far
+   half behind it — otherwise the surface overpaints the whole pole and it reads as a layer
+   *under* the model instead of passing through it. */
+static void zaxis_seg(double za, double zb, int top){
+	if(zb - za < 1e-9) return;
+	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
+	double zs = nice_step(s_zhi-s_zlo, 8);
+	if(top) arrow(0,0,za, 0,0,zb, C_AXIS); else linw(0,0,za, 0,0,zb, C_AXIS);
+	projw(0,0,za,&e0x,&e0y); projw(0,0,zb,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
+	for(double g=ceil(za/zs)*zs; g<=zb+1e-9; g+=zs){ if(fabs(g)<zs/4) continue; projw(0,0,g,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+	if(top){ projw(0,0,s_zhi,&tx,&ty); blit_str(tx+4,ty-8,"z",C_LBL); }
+}
+
 /* Reference frame: a BIG ground grid plane + the y-axis spine (both gated by F2/show_plane),
    plus the always-on x and z axes. Ticks are little perpendicular marks, not numbers. */
 static void draw_frame(void){
 	double zp = (s_zlo<=0.0 && 0.0<=s_zhi) ? 0.0 : s_zlo;
 	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
-	double zr=s_zhi-s_zlo, zs = nice_step(zr, 8);
 
 	if(show_plane){
 		double Ex=2.5*v_hx, Ey=2.5*v_hy;                 /* a big floor, ~5x the data span */
@@ -200,11 +246,17 @@ static void draw_frame(void){
 	projw(X0,0,zp,&e0x,&e0y); projw(X1,0,zp,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
 	for(double g=ceil(X0); g<=X1+1e-9; g+=1){ if(fabs(g)<0.5) continue; projw(g,0,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
 	projw(X1,0,zp,&tx,&ty); blit_str(tx+4,ty-4,"x",C_LBL);
-	/* z-axis (always) */
-	arrow(0,0,s_zlo, 0,0,s_zhi, C_AXIS);
-	projw(0,0,s_zlo,&e0x,&e0y); projw(0,0,s_zhi,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
-	for(double g=ceil(s_zlo/zs)*zs; g<=s_zhi+1e-9; g+=zs){ if(fabs(g)<zs/4) continue; projw(0,0,g,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
-	projw(0,0,s_zhi,&tx,&ty); blit_str(tx+4,ty-8,"z",C_LBL);
+	/* z-axis: only the FAR half here (behind the surface); the near half is painted on top
+	   afterwards by draw_zaxis_front(). v_sb>=0 (looking down) => the upper pole is nearer. */
+	double zc=(s_zlo+s_zhi)/2;
+	if(v_sb>=0.0) zaxis_seg(s_zlo, zc, 0);   /* upper half near -> lower (far) half drawn now */
+	else          zaxis_seg(zc, s_zhi, 1);
+}
+/* the camera-near half of the z-axis pole — drawn AFTER the surface so it overlays it */
+static void draw_zaxis_front(void){
+	double zc=(s_zlo+s_zhi)/2;
+	if(v_sb>=0.0) zaxis_seg(zc, s_zhi, 1);   /* upper half is near */
+	else          zaxis_seg(s_zlo, zc, 0);
 }
 
 static int qcmp(const void *a,const void *b){
@@ -218,7 +270,7 @@ static void render3(void){
 	setup_view();
 	double zh=(s_zmax-s_zmin)/2; if(!(zh>1e-9)) zh=1;
 	for(int i=0;i<NG;i++) for(int j=0;j<NG;j++){
-		double wx=X0+(X1-X0)*i/(NG-1), wy=Y0+(Y1-Y0)*j/(NG-1), wz=s_z[i][j];
+		double wx=s_wx[i][j], wy=s_wy[i][j], wz=s_z[i][j];   /* both modes store world coords */
 		double nx=(wx-v_cx)/v_hx, ny=(wy-v_cy)/v_hy, nz=(wz-v_cz)/v_hz;
 		double xr=nx*v_ca - ny*v_sa, yr=nx*v_sa + ny*v_ca;
 		double scr=yr*v_sb + nz*v_cb;
@@ -247,8 +299,10 @@ static void render3(void){
 			double nx=ay*bz-aaz*by, ny=aaz*bx-ax*bz, nz=ax*by-ay*bx;
 			double nl=sqrt(nx*nx+ny*ny+nz*nz); if(nl<1e-12) nl=1;
 			nx/=nl; ny/=nl; nz/=nl;
-			if(nz<0){ nx=-nx; ny=-ny; nz=-nz; }       /* up-facing (height field) */
-			double diff=nx*Lx+ny*Ly+nz*Lz; if(diff<0)diff=0;
+			double diff;
+			if(s_sph){ diff=fabs(nx*Lx+ny*Ly+nz*Lz); }   /* closed surface: light both faces */
+			else { if(nz<0){ nx=-nx; ny=-ny; nz=-nz; }    /* height field: force the normal up */
+				diff=nx*Lx+ny*Ly+nz*Lz; if(diff<0)diff=0; }
 			s_qc[q]=shade_lit((az-s_zmin)/(2*zh+1e-9), 0.32 + 0.78*diff);   /* ambient + diffuse */
 		}
 	}
@@ -278,7 +332,9 @@ static void render3(void){
 				if(j<NG-1 && s_ok[i][j+1]) line(s_sx[i][j],s_sy[i][j],s_sx[i][j+1],s_sy[i][j+1],c);
 			}
 		}
-		blit_str(2,2,"F1 shade  F2 plane  space spin  R reset  ESC", RGB(0x9a,0x8d,0x7a));
+		draw_zaxis_front();              /* near half of the z-axis pole, on top of the surface */
+		blit_str(2,2, s_sph ? "F1 shade F2 plane F3 xyz  arrows R ESC"
+		                    : "F1 shade F2 plane F3 sphere  arrows R ESC", RGB(0x9a,0x8d,0x7a));
 		draw_buffer_spi(0, KF_CONTENT_Y + cur_y0, GW-1, KF_CONTENT_Y + cur_y0 + cur_h - 1,
 		                (unsigned char*)strip);
 	}
@@ -322,7 +378,7 @@ static int g3d_alloc(void){
 	if(g3d_arena) return 1;
 	const size_t dbl = sizeof(double[NG][NG]);   /* one NGxNG double grid */
 	const size_t ib  = sizeof(int[NG][NG]);      /* one NGxNG int grid    */
-	size_t need = dbl*5 + sizeof(double[NQ])      /* s_z,s_vd,s_nx,s_ny,s_nz + s_qd */
+	size_t need = dbl*7 + sizeof(double[NQ])      /* s_z,s_vd,s_nx,s_ny,s_nz,s_wx,s_wy + s_qd */
 	            + ib*3  + sizeof(int[NQ])         /* s_ok,s_sx,s_sy        + s_ord  */
 	            + sizeof(uint16_t[NQ]);           /* s_qc                           */
 	char *p = malloc(need);
@@ -333,6 +389,8 @@ static int g3d_alloc(void){
 	s_nx=(double(*)[NG])p; p+=dbl;
 	s_ny=(double(*)[NG])p; p+=dbl;
 	s_nz=(double(*)[NG])p; p+=dbl;
+	s_wx=(double(*)[NG])p; p+=dbl;
+	s_wy=(double(*)[NG])p; p+=dbl;
 	s_qd=(double*)p;       p+=sizeof(double[NQ]);
 	s_ok=(int(*)[NG])p;    p+=ib;
 	s_sx=(int(*)[NG])p;    p+=ib;
@@ -343,7 +401,7 @@ static int g3d_alloc(void){
 }
 static void g3d_free(void){
 	free(g3d_arena); g3d_arena=NULL;
-	s_z=NULL; s_vd=NULL; s_nx=NULL; s_ny=NULL; s_nz=NULL; s_qd=NULL;
+	s_z=NULL; s_vd=NULL; s_nx=NULL; s_ny=NULL; s_nz=NULL; s_wx=NULL; s_wy=NULL; s_qd=NULL;
 	s_ok=NULL; s_sx=NULL; s_sy=NULL; s_ord=NULL; s_qc=NULL;
 }
 
@@ -355,6 +413,7 @@ void calc_graph3d_open(const cnode *f){
 	kf_clock_boost();             /* 3D render compute: bump to the fastest clock (420 MHz) while open */
 	cn_free(fn3); fn3=cn_clone(f);
 	yaw=0.7; pitch=0.45; zoom=1.0; vyaw=vpitch=vzoomr=0; held=0; auto_rot=0;
+	s_sph=0;                       /* always open in Cartesian; F3 toggles spherical in-viewer */
 
 	scr3 = lv_obj_create(NULL);
 	lv_obj_set_style_pad_all(scr3,0,0); lv_obj_set_style_bg_color(scr3, lv_color_black(), 0);
@@ -380,6 +439,10 @@ void calc_graph3d_key(uint8_t key, int mods, int pressed){
 			calc_show_worksheet(); return;
 		case DK_F1:           shaded     = !shaded;     render3(); return;   /* F1 */
 		case DK_F1+1:         show_plane = !show_plane; render3(); return;   /* F2 */
+		case DK_F1+2:         /* F3: toggle Cartesian z=f(x,y) <-> spherical r=f(x,y) */
+			s_sph = !s_sph;
+			yaw=0.7; pitch=0.45; zoom=1.0; vyaw=vpitch=vzoomr=0;   /* new box -> reset the camera */
+			mesh_eval(); render3(); return;
 		case ' ':             auto_rot   = !auto_rot;   last_us = time_us_64(); return;
 		case 'r': case 'R':
 			yaw=0.7; pitch=0.45; zoom=1.0; vyaw=vpitch=vzoomr=0; held=0; render3(); return;

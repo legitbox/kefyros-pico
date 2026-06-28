@@ -158,6 +158,23 @@ void kf_audio_clock_change_end(void){
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 }
 
+/* Park the speaker pins high-Z for the WHOLE duration of CPU sleep (not just the relock).
+   The PWM carrier frequency scales with clk_sys: carrier = clk_sys / (TOP+1). At the normal
+   400 MHz clock a 13-bit carrier sits ~48 kHz (inaudible), but the idle PWM slice keeps
+   running, so at the 150 MHz sleep clock that same carrier drops to ~18 kHz — a steady
+   high-pitch whine through the amp the whole time we're asleep. Audio apps are tagged
+   no-sleep, so the slice is always idle here; just float the pins until wake, then restore.
+   (kf_clock_wake()'s clock_apply already calls kf_audio_clock_change_end, so unpark mainly
+   covers the no-clock-change paths and makes the restore explicit.) */
+void kf_audio_idle_park(void){
+	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_R_PIN, GPIO_IN);
+	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_L_PIN, GPIO_IN);
+}
+void kf_audio_idle_unpark(void){
+	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_PWM);
+	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
+}
+
 void kf_audio_start(int hz){
 	if(hz < 8000) hz = 8000; else if(hz > 48000) hz = 48000;
 	if(running){ dma_channel_abort(dch); running = 0; }

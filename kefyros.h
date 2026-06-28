@@ -130,6 +130,8 @@ void kf_audio_start(int hz);              /* begin playback at sample rate hz (<
 void kf_audio_stop(void);                 /* stop + silence */
 void kf_audio_clock_change_begin(void);   /* tristate speaker pins across a clk_sys change (anti-pop) */
 void kf_audio_clock_change_end(void);     /* restore speaker pins after the clock settles */
+void kf_audio_idle_park(void);            /* float speaker pins for the whole sleep (kills the 150 MHz carrier whine) */
+void kf_audio_idle_unpark(void);          /* restore speaker pins on wake */
 void kf_audio_flush(void);                /* drop buffered audio + reset shaper (after a seek) */
 int  kf_audio_running(void);
 int  kf_audio_space(void);                /* free stereo frames in the ring */

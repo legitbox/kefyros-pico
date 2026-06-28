@@ -504,6 +504,7 @@ static lv_obj_t *build_graph3d(void){
 		"  Space   - toggle auto-spin\n"
 		"  F1      - flat shading / wireframe\n"
 		"  F2      - ground plane on / off\n"
+		"  F3      - spherical r=f(x,y): x=angle 0..2pi, y=tilt 0..pi\n"
 		"  R       - reset the view\n"
 		"  ESC     - back to this screen");
 	return s;

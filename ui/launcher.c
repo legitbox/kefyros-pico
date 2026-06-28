@@ -16,11 +16,15 @@ static lv_group_t *grp_home;
 static lv_group_t *app_group = NULL;   /* the CURRENT app's input group; freed on reuse / return home */
 
 /* --- desktop apps --- */
+#define APP_NO_SLEEP 1     /* "always active": idle dims the backlight but never downclocks the
+                              CPU to the 150 MHz sleep tier — for apps (music) whose realtime work
+                              (audio playback) would break at sleep clocks. */
 typedef struct {
 	const char *id;            /* also the SD icon filename: /kefyros/icons/<id>.png */
 	const char *label;
 	void (*open)(void);
 	int   def_slot;
+	int   flags;               /* APP_NO_SLEEP, ... (0 = ordinary) */
 } desk_app_t;
 
 static const desk_app_t dapps[] = {
@@ -30,7 +34,7 @@ static const desk_app_t dapps[] = {
 	{ "settings",   "Settings",    app_settings_open,    4 },
 	{ "appearance", "Wallpaper",   app_wallpaper_open,   5 },
 	{ "editor",     "Editor",      app_editor_open,      6 },
-	{ "music",      "Music",       app_music_open,       7 },
+	{ "music",      "Music",       app_music_open,       7, APP_NO_SLEEP },  /* playback dies at sleep clocks */
 	{ "electronics","Electronics", app_electronics_open, 8 },
 	{ "spineko",    "Spineko",     app_spineko_open,     9 },
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
@@ -38,6 +42,12 @@ static const desk_app_t dapps[] = {
 	{ "morse",      "Morse",       app_morse_open,       12 },
 	{ "help",       "Help",        app_help_open,        13 },
 };
+/* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
+   consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */
+static int s_cur_app = -1;
+static int kf_app_allows_sleep(void){
+	return s_cur_app < 0 || !(dapps[s_cur_app].flags & APP_NO_SLEEP);
+}
 #define NAPPS  (int)(sizeof(dapps)/sizeof(dapps[0]))
 #define GCOLS  4
 #define GROWS  3
@@ -246,13 +256,20 @@ void kf_wallpaper_show_raw(lv_obj_t *img, uint32_t off, int w, int h, const char
    low-power sleep clock (150 MHz / 1.10 V); the next key restores them. Runs everywhere (not
    just the desktop). The clock is restored (kf_clock_wake) to whatever tier was active before
    sleeping, so idling inside a WiFi session wakes back at eco rather than normal. */
-static int s_idle_dimmed = 0;
+static int s_idle_dimmed = 0;   /* backlights off */
+static int s_idle_slept  = 0;   /* dropped to the 150 MHz sleep clock (+ parked audio) */
 static void idle_wake(void){
-	if(!s_idle_dimmed) return;
-	kf_clock_wake();
-	uint8_t v=(uint8_t)deskconf_get_int("bkl",5); reg_write(REG_BKL,&v,1);
-	uint8_t k=(uint8_t)deskconf_get_int("bk2",2); reg_write(REG_BK2,&k,1);
-	s_idle_dimmed = 0;
+	if(!s_idle_dimmed && !s_idle_slept) return;
+	if(s_idle_slept){                         /* only restore the clock if we actually slept */
+		kf_clock_wake();
+		kf_audio_idle_unpark();
+		s_idle_slept = 0;
+	}
+	if(s_idle_dimmed){
+		uint8_t v=(uint8_t)deskconf_get_int("bkl",5); reg_write(REG_BKL,&v,1);
+		uint8_t k=(uint8_t)deskconf_get_int("bk2",2); reg_write(REG_BK2,&k,1);
+		s_idle_dimmed = 0;
+	}
 }
 static void idle_timer(lv_timer_t *t){
 	(void)t;
@@ -264,8 +281,15 @@ static void idle_timer(lv_timer_t *t){
 			uint8_t z=0;
 			reg_write(REG_BKL,&z,1);          /* LCD backlight off */
 			reg_write(REG_BK2,&z,1);          /* keyboard backlight off */
-			kf_clock_sleep();                 /* 150 MHz / 1.10 V */
 			s_idle_dimmed = 1;
+		}
+		/* no-sleep apps (music) dim the screen but hold their clock — sleeping would
+		   break realtime playback. Park the speaker before the downclock so the idle
+		   PWM carrier doesn't whine at the lower sleep clock. */
+		if(!s_idle_slept && kf_app_allows_sleep()){
+			kf_clock_sleep();                 /* 150 MHz / 1.10 V */
+			kf_audio_idle_park();
+			s_idle_slept = 1;
 		}
 	} else idle_wake();
 }
@@ -387,7 +411,7 @@ static void cell_click_cb(lv_event_t *e){          /* short ENTER: launch or dro
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
 	if(carrying >= 0){ drop_at(i); return; }
 	int a = slot_app[gslot(i)];
-	if(a >= 0 && dapps[a].open){ kf_sfx_play("open"); dapps[a].open(); }
+	if(a >= 0 && dapps[a].open){ s_cur_app = a; kf_sfx_play("open"); dapps[a].open(); }
 }
 static void cell_long_cb(lv_event_t *e){           /* long ENTER: pick up */
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -537,6 +561,7 @@ void launcher_show(void){
 	   can DELETE it (apps don't free their own screen on exit -> the big leak). */
 	lv_obj_t *prev = lv_screen_active();
 
+	s_cur_app = -1;                /* back on the desktop — idle may sleep again */
 	kf_grab_input(0);
 	if(carrying >= 0){ carrying = -1; render_page(); lv_obj_add_flag(lbl_hint, LV_OBJ_FLAG_HIDDEN); }
 	/* a sub-app (the chooser) may have changed the wallpaper / dim choice */
