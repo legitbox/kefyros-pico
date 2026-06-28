@@ -22,6 +22,12 @@ stock widgets — so KAPI is split into two layers and serves two execution prof
 The GB emulator touches *zero* of Layer 1. Files touches almost nothing *but* Layer 1.
 Same API, opposite ends.
 
+**What migrates:** almost all non-essential apps become class-1 KAPI bundles on SD —
+**including the calculator** (which must port at ~0% performance loss, §7.2). Class-0 stays
+minimal: the kernel, the launcher, and the **system-config apps that hold the privileges
+class-1 apps are denied** (Settings, WiFi — §7.1), plus a recovery Files for when `/apps`
+is broken.
+
 > **Design note:** KAPI invents no capabilities — it draws a stable vtable around
 > kernel facilities that already exist (`kf_audio_*`, `disp_pause_core1`,
 > `define_region_spi`/`spi_write_fast`/`spi_set_baudrate`, `kf_clock_*`, `imgdec`,
@@ -81,6 +87,7 @@ typedef struct kf_sock*   kf_sock;
 typedef struct kf_tls*    kf_tls;
 typedef struct kf_file*   kf_file;
 typedef struct kf_dir*    kf_dir;
+typedef struct kf_view*   kf_view;    /* windowed direct-blit content viewport (turbo)*/
 typedef uint32_t          kf_mem;     /* PSRAM block handle (0 = invalid)            */
 typedef struct kui_obj*   kui_obj;    /* Layer-1 widget handle                       */
 
@@ -91,7 +98,11 @@ enum { KF_OK=0, KF_ERR=-1, KF_ENOMEM=-2, KF_EIO=-5, KF_ENOENT=-2, KF_EINVAL=-22,
 enum { KF_CAP_PSRAM=1, KF_CAP_WIFI=2, KF_CAP_AUDIO_OUT=4, KF_CAP_AUDIO_IN=8,
        KF_CAP_FLASH_SCRATCH=16, KF_CAP_IMG=32, KF_CAP_RNG=64, KF_CAP_TLS=128 };
 
-enum kf_perf { KF_PERF_ECO, KF_PERF_NORMAL, KF_PERF_BOOST };  /* -> kf_clock_eco/normal/boost */
+enum kf_perf { KF_PERF_ECO, KF_PERF_NORMAL, KF_PERF_BOOST };  /* app-requestable tiers, §7.3   */
+/* KF_PERF_SLEEP (150 MHz) is kernel-only — entered on idle, never app-requestable.            */
+enum kf_idle { KF_IDLE_NORMAL,        /* default: dim + drop to sleep tier when idle           */
+               KF_IDLE_KEEP_CLOCK,    /* allow dim, but DON'T downclock (audio apps)           */
+               KF_IDLE_KEEP_AWAKE };  /* no dim, no downclock (games / active playback)        */
 ```
 
 ## 4. Root table
@@ -136,13 +147,17 @@ struct k_sys {
   /* EXCLUSIVE scheduling: app owns the loop, pumps the kernel itself */
   void (*pump)(void);             /* one kernel housekeeping pass: net/SNTP/battery/sleep
                                      (does NOT touch the leased panel) — call ~each frame */
-  /* performance */
-  void     (*perf)(enum kf_perf);  /* request clock tier (kf_clock_eco/normal/boost)     */
+  /* performance — a TRANSIENT request, NOT system config: the kernel arbitrates/caps it
+     for thermal & battery and restores the prior tier on app exit. */
+  void     (*perf)(enum kf_perf);  /* hint clock tier (kf_clock_eco/normal/boost)         */
   uint32_t (*clock_hz)(void);
-  /* system info / control (some setters privileged -> KF_EUNSUPP for untrusted apps) */
+  void     (*idle_policy)(enum kf_idle);  /* override the manifest idle policy at runtime
+                                             (a wakelock: e.g. KEEP_CLOCK while audio plays) */
+  /* system info — READ-ONLY. Apps observe; they do NOT configure the system. Setting
+     brightness, volume, keyboard backlight, and all WiFi config live ONLY in the
+     class-0 Settings/WiFi apps (see §7.1 Privilege model). */
   int  (*battery_pct)(void); int (*charging)(void);
-  int  (*get_brightness)(void); kf_err (*set_brightness)(int);
-  int  (*get_volume)(void);     kf_err (*set_volume)(int);
+  int  (*get_brightness)(void); int (*get_volume)(void);
   uint32_t (*caps)(void);
   uint32_t (*rng)(void);                                   /* HW TRNG (cap KF_CAP_RNG)   */
   const char* (*kernel_version)(void);
@@ -170,9 +185,13 @@ struct k_mem {
 ```c
 struct k_gfx {
   void (*screen_size)(int* w, int* h);                     /* 320x320 here              */
-  /* --- WINDOWED: draw into a canvas, kernel composites below the topbar --- */
-  kf_canvas (*canvas_create)(int w, int h); void (*canvas_destroy)(kf_canvas);
-  void (*present)(kf_canvas, int x, int y);
+  /* --- WINDOWED, zero-copy (the calculator's path) --- A LIVE on-screen canvas, inset
+     below the topbar. The app draws straight into its buffer with the primitives below;
+     the kernel composites it in its normal LVGL flush — there is NO present-copy. Cost is
+     identical to drawing into LVGL today => ~0% rendering loss vs the baked-in app. */
+  kf_canvas (*canvas)(int x, int y, int w, int h);        /* live, composited             */
+  void (*canvas_destroy)(kf_canvas);
+  void (*present)(kf_canvas);                             /* mark dirty -> composite      */
   void (*clear)(kf_canvas, kf_color);
   void (*pixel)(kf_canvas, int, int, kf_color);
   void (*line)(kf_canvas, int, int, int, int, kf_color);
@@ -180,6 +199,14 @@ struct k_gfx {
   void (*fill)(kf_canvas, int, int, int, int, kf_color);
   void (*blit)(kf_canvas, int x, int y, int w, int h, const kf_color* px);
   void (*clip)(kf_canvas, int, int, int, int);
+  /* --- WINDOWED TURBO (optional) --- direct panel SPI into a content sub-rect, bypassing
+     the compositor for windowed apps that must EXCEED LVGL throughput (a windowed game,
+     a fast scope). Topbar persists; the kernel arbitrates the SPI bus so its ~1 Hz refresh
+     still lands. Same raw path as exclusive mode, scoped to a rectangle below the topbar. */
+  kf_view (*view_open)(int x, int y, int w, int h);
+  void (*view_region)(kf_view, int x0, int y0, int x1, int y1);
+  void (*view_push)(kf_view, const void* px, size_t nbytes);
+  void (*view_flush)(kf_view); void (*view_close)(kf_view);
   /* --- EXCLUSIVE: own the panel (parks Core 1) for max-throughput full-screen --- */
   kf_err (*lease)(void);          /* disp_pause_core1 + take SPI; topbar hidden         */
   void   (*release)(void);        /* restore Core 1, panel clock, topbar                */
@@ -264,10 +291,9 @@ struct k_net {
   int  (*send)(kf_sock, const void*, int); int (*recv)(kf_sock, void*, int); /* KF_AGAIN */
   int  (*status)(kf_sock); void (*close)(kf_sock);
   kf_err (*resolve)(const char* host, uint32_t* ip4);
-  /* WiFi management (cap KF_CAP_WIFI; join/forget may be privileged) */
+  /* WiFi STATUS — read-only. Apps consume the connection; they do NOT manage it.
+     scan/join/forget are class-0 Settings ONLY (see §7.1). */
   int  (*online)(void); int  (*rssi)(void); uint32_t (*ip)(void);
-  int  (*scan)(char ssids[][33], int* rssi, int max);
-  kf_err (*join)(const char* ssid, const char* pass); kf_err (*forget)(const char* ssid);
 };
 ```
 
@@ -335,6 +361,80 @@ struct k_doc { void (*render)(kf_canvas, const char* markup, int fmt); };
 - **Errors:** check the documented sentinel; pull detail from `sys->last_error()/err_str()`.
 - **Capabilities:** never call a cap-gated module without checking `sys->caps()` first.
 
+## 7.1 Privilege model — apps consume, they don't configure
+
+A hard line: **class-1 apps use resources and observe state; they never configure the
+system.** System configuration is a class-0 privilege, exercised only through the
+built-in Settings / WiFi apps.
+
+| Apps MAY (consume / read / request) | Apps MAY NOT (system config — class-0 only) |
+|---|---|
+| open sockets, TLS, fetch | scan / join / forget WiFi networks |
+| read battery %, charge, online, RSSI, IP | set brightness, set volume |
+| read brightness/volume *levels* | keyboard backlight / any "BIOS"-level control |
+| **request** a perf tier (`sys->perf`, arbitrated) | set the system clock / timezone, power off/reboot |
+| play audio, draw, read input, read/write their own files | touch another app's files / GPIO / raw registers |
+
+`sys->perf` is the one "control"-looking call, and it's deliberately *not* configuration:
+it's a transient, kernel-arbitrated hint (the kernel may cap it for thermal/battery) that
+is reverted when the app exits. This is what lets the calculator request `BOOST` for a 3D
+plot without being able to dim the screen or drop your WiFi.
+
+## 7.2 Performance — what "~0% loss" means, honestly
+
+A ported app's hot paths cost the same as baked-in, because:
+- **Pure compute** (calc bignum/CAS, an emulator's CPU core) makes **zero KAPI calls** in
+  its inner loops — it runs native from SRAM, which is as fast as flash XIP or faster.
+- **Rendering** goes through a **live composited canvas** (windowed) or **direct SPI**
+  (turbo/exclusive) — no extra buffer copy, and draw calls are *coarse* (a whole line/row
+  per call), so the one added pointer-indirection is amortized to nothing.
+
+The only real costs are a ~few-ms one-time **load from SD at launch** (not runtime) and a
+1–2-cycle vtable indirection on coarse calls — imperceptible. "Smooth as shit" holds.
+
+## 7.3 Performance modes (clock tiers, idle, arbitration)
+
+### The tiers (kernel-defined; `port/clock.c`)
+| tier | clock / volt | SPI | role |
+|---|---|---|---|
+| `KF_PERF_ECO` | 250 MHz @ 1.20 V | 62.5 M | WiFi-safe; brief — wraps radio join |
+| `KF_PERF_NORMAL` | 400 MHz @ 1.30 V | 100 M | default for UI / apps |
+| `KF_PERF_BOOST` | 420 MHz @ 1.35 V | 105 M | turbo: GB blit, calc 3D, decode |
+| *SLEEP* (kernel-only) | 150 MHz @ 1.10 V | — | idle screen-off; never app-requested |
+
+Note the panel-SPI coupling: SPI = clk_sys/2 (even prescaler), dies above ~110 MHz, so
+`BOOST` is also what buys the fast blit. Apps don't pick SPI — they pick a tier.
+
+### `sys->perf()` is a *request*, not a setting — the kernel arbitrates against a stack:
+1. **Hardware constraints win.** A WiFi *join* needs ≤ ~270 MHz, so a `BOOST` request is
+   deferred to ECO until the radio associates (a *joined* link then rides 400 with a bus
+   retune). The panel can't exceed ~110 MHz SPI. Low battery / thermal caps the ceiling.
+2. **System power profile** (class-0 Settings: *Performance / Balanced / Saver*) sets the
+   ceiling. *Saver* caps app requests at `NORMAL` and idles aggressively. Apps **cannot**
+   change this (privilege model, §7.1) — they live under it.
+3. **The app's request** is honored within 1–2. On exit the kernel restores the prior tier.
+
+So the calculator can ask for `BOOST` to render a 3D plot and the kernel grants it — unless
+WiFi is mid-join or you're in Saver, in which case it's capped and the app still works,
+just slower. The app never has to know why.
+
+### Idle policy — the thing that broke the music player
+The kernel dims the backlight and drops to the SLEEP tier after inactivity. SLEEP's 150 MHz
+collapses the PWM-audio carrier into the audible band, so an app playing sound must opt out.
+Two controls, manifest default + runtime override:
+
+- **Manifest:** `"idle": "normal" | "keep_clock" | "keep_awake"` (default `normal`).
+- **Runtime:** `sys->idle_policy(KF_IDLE_*)` — a wakelock the app raises while busy and drops
+  when not (e.g. `KEEP_CLOCK` during playback, back to `NORMAL` when paused).
+
+`keep_clock` (audio apps: music, Morse sidetone) allows the screen to dim but holds the
+clock up. `keep_awake` (games, active video) holds both. This generalizes the old
+`APP_NO_SLEEP` tag into a first-class, per-app policy.
+
+### Manifest perf hint
+`"perf": "eco" | "normal" | "boost"` sets the tier the loader requests at launch (still
+arbitrated). A reader app ships `eco` for battery; the GB emulator ships `boost`.
+
 ## 8. Capability flags
 
 | flag | guards | absent ⇒ |
@@ -372,7 +472,7 @@ against minor *N* runs on kernel minor ≥ *N*. Breaking changes bump `abi`.
 | App | Profile | KAPI surface used |
 |---|---|---|
 | Files / Settings / Notes / Help / Electronics | windowed | `ui`, `fs`, `in`, `sys` |
-| Calculator | windowed + canvas + perf | `ui`, `gfx`(canvas), `txt`, `sys->perf(BOOST)` for 3D, heavy compute |
+| Calculator | windowed + live canvas + perf | `ui` (keypad/chrome), `gfx->canvas` (live, 0%-loss graphs), `txt`, `sys->perf(BOOST)` for 3D, native compute |
 | Spineko | windowed + net | `net`, `tls`, `http`+`doc` **or** `gfx`+`txt` (custom) |
 | DeepSeek | windowed + net | `net`, `tls`, `http`, `ui` |
 | Music (FLAC) | windowed + real-time audio | `ui`, **`aud->out_*`**, `fs` (streaming), **`img`** (album art), app-side FLAC decode |
@@ -388,10 +488,11 @@ codec (`k_img`), perf/clock (`sys->perf`), the own-loop pump (`sys->pump`), audi
 ## 13. Open decisions
 
 1. **Mic/ADC:** does the hardware have audio input? Gates `KF_CAP_AUDIO_IN` and Morse RX.
-2. **Canvas vs raw fb for windowed apps:** is the composited `present()` fast enough for
-   the calc 3D grapher, or does it also need a (windowed) fast-blit path?
-3. **FLAC/codec libs:** ship as Layer-1 kernel services or as static SDK libs the app
-   bundles? (Per §Layer-1: size/sharing vs version freedom.)
-4. **Privileged setters:** which of `set_brightness/volume`, `net->join/forget` are open
-   to untrusted apps vs system-only?
-5. **Arena size vs PSRAM/PIC** (from the loader spec) — fixed-arena bytes to reserve.
+   *(the only remaining hardware unknown)*
+2. **FLAC/codec libs:** ship as Layer-1 kernel services or as static SDK libs the app
+   bundles? (size/sharing vs version freedom.)
+3. **Arena size vs PSRAM/PIC** (from the loader spec) — fixed-arena bytes to reserve.
+
+**Resolved:** windowed perf → live composited canvas + optional direct-SPI turbo, ~0% loss
+(§7.2, §gfx); privilege boundary → apps consume/observe/request, never configure (§7.1);
+performance modes → arbitrated tier requests + per-app idle policy (§7.3).
