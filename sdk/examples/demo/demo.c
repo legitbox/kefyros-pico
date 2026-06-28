@@ -30,8 +30,8 @@ static kf_canvas   CV;              /* our live windowed canvas           */
 static kf_font     F_HUD;           /* mono 13 — HUD line + labels        */
 static kf_font     F_BIG;           /* mono 20 — scroller text            */
 
-#define CW   256                    /* canvas width  (RGB565, 90 KB cap)  */
-#define CH   176                    /* canvas height                      */
+#define CW   192                    /* canvas width  (RGB565, carved from the 64 KB arena) */
+#define CH   144                    /* canvas height (192*144*2 = 55 KB)  */
 #define HW   (CW/2)                 /* half-res width  = 128              */
 #define HH   ((CH-12)/2)            /* half-res height (leave HUD row)    */
 

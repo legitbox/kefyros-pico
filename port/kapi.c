@@ -38,15 +38,15 @@ static void (*s_on_key)(void*, int, int);         static void *s_on_key_ud;
 static void (*s_on_close)(void*);                 static void *s_on_close_ud;
 
 /* ===================== canvas implementation ===================== */
-struct kf_canvas_s { lv_obj_t *obj; uint16_t *buf; int w, h, from_static; };
+struct kf_canvas_s { lv_obj_t *obj; uint16_t *buf; int w, h, from_arena; };
 #define MAXCANV 4
 static struct kf_canvas_s *s_canv[MAXCANV];
 static int s_ncanv;
-/* one windowed canvas backed by a STATIC buffer (up to 256x176) so it can never fail to
-   allocate / fragment the heap while the launcher screen is still resident. Bigger or
-   additional canvases fall back to malloc. */
-static uint16_t s_cbuf[256 * 176] __attribute__((aligned(4)));
-static int s_cbuf_used = 0;
+/* Canvas buffers are carved from the ARENA's free space (after the loaded app image):
+   guaranteed-contiguous, fragmentation-proof, and costing the desktop heap NOTHING (the
+   arena is reserved either way — so the launcher's icon decodes keep their heap). Overflow
+   falls back to malloc. s_arena_top is the bump cursor, set by the loader after image+bss. */
+static uint8_t *s_arena_top;
 
 static inline lv_color_t c565(kf_color c){
     uint8_t r = (c >> 11) & 0x1f, g = (c >> 5) & 0x3f, b = c & 0x1f;
@@ -57,12 +57,16 @@ static kf_canvas g_canvas(int x, int y, int w, int h){
     if(s_ncanv >= MAXCANV || !s_scr) return NULL;
     struct kf_canvas_s *c = malloc(sizeof *c);
     if(!c) return NULL;
-    if(!s_cbuf_used && (size_t)w * h <= sizeof s_cbuf / 2){ c->buf = s_cbuf; s_cbuf_used = 1; c->from_static = 1; }
-    else { c->buf = malloc((size_t)w * h * 2); if(!c->buf){ free(c); return NULL; } c->from_static = 0; }
+    size_t need = (size_t)w * h * 2;
+    uint8_t *aend = g_kapi_arena + sizeof g_kapi_arena;
+    if(s_arena_top && s_arena_top + need <= aend){    /* carve from the arena (preferred) */
+        c->buf = (uint16_t*)s_arena_top; s_arena_top += (need + 3) & ~(size_t)3; c->from_arena = 1;
+    } else {                                          /* arena full -> heap */
+        c->buf = malloc(need); if(!c->buf){ free(c); return NULL; } c->from_arena = 0;
+    }
     c->w = w; c->h = h;
     c->obj = lv_canvas_create(s_scr);
-    lv_canvas_set_buffer(c->obj, c->buf, w, h, LV_COLOR_FORMAT_RGB565);
-    lv_obj_set_size(c->obj, w, h);                /* don't rely on image auto-size */
+    lv_canvas_set_buffer(c->obj, c->buf, w, h, LV_COLOR_FORMAT_RGB565);   /* lv_image auto-sizes */
     lv_obj_set_pos(c->obj, x, y);
     s_canv[s_ncanv++] = c;
     return (kf_canvas)c;
@@ -71,7 +75,7 @@ static void g_canvas_destroy(kf_canvas h){
     struct kf_canvas_s *c = (struct kf_canvas_s*)h; if(!c) return;
     for(int i = 0; i < s_ncanv; i++) if(s_canv[i] == c){ s_canv[i] = s_canv[--s_ncanv]; break; }
     if(c->obj) lv_obj_delete(c->obj);
-    if(c->from_static) s_cbuf_used = 0; else free(c->buf);
+    if(!c->from_arena) free(c->buf);
     free(c);
 }
 static void g_present(kf_canvas h){ struct kf_canvas_s *c = (void*)h; if(c) lv_obj_invalidate(c->obj); }
@@ -283,8 +287,8 @@ static const kapi G_KAPI = {
 static void kapi_teardown(void){
     if(s_on_close) s_on_close(s_on_close_ud);
     for(int i = 0; i < s_ncanv; i++) if(s_canv[i]){ if(s_canv[i]->obj) lv_obj_delete(s_canv[i]->obj);
-        if(s_canv[i]->from_static) s_cbuf_used = 0; else free(s_canv[i]->buf); free(s_canv[i]); s_canv[i] = NULL; }
-    s_ncanv = 0;
+        if(!s_canv[i]->from_arena) free(s_canv[i]->buf); free(s_canv[i]); s_canv[i] = NULL; }
+    s_ncanv = 0; s_arena_top = NULL;
     s_on_frame = NULL; s_on_key = NULL; s_on_close = NULL;
     s_active = 0; s_exit = 0;
     kf_grab_input(0);
@@ -319,6 +323,7 @@ static int kapi_run(const char *path){
     if(fread(g_kapi_arena, 1, h.image_size, f) != h.image_size){ fclose(f); return -7; }
     fclose(f);
     memset(g_kapi_arena + h.image_size, 0, h.bss_size);
+    s_arena_top = g_kapi_arena + (((size_t)h.image_size + h.bss_size + 31) & ~(size_t)31);  /* canvas pool start */
     __dsb(); __isb();
 
     /* derive the app's data dir from its path: ".../demo/demo.kx" -> ".../demo" */
