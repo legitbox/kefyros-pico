@@ -38,8 +38,7 @@ static const desk_app_t dapps[] = {
 	{ "electronics","Electronics", app_electronics_open, 8 },
 	{ "spineko",    "Spineko",     app_spineko_open,     9 },
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
-	{ "cakespark",  "CakeSpark",   app_cakespark_open,   11 },
-	{ "help",       "Help",        app_help_open,        12 },
+	{ "help",       "Help",        app_help_open,        11 },
 };
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */

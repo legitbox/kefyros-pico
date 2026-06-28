@@ -6,8 +6,8 @@
 // A topic folder holding exactly one .md opens straight to that article (no 1-item submenu).
 //
 // The article view does light Markdown rendering tuned for the amber theme + ASCII Plex
-// Mono font: # headings, fenced ``` code blocks (rendered as bordered cards — for CakeSpark
-// scripts, calculator expressions, etc.), - bullet lists, --- rules, and paragraphs. LVGL 9
+// Mono font: # headings, fenced ``` code blocks (rendered as bordered cards — for
+// calculator expressions, etc.), - bullet lists, --- rules, and paragraphs. LVGL 9
 // here has no inline recolor, so emphasis is block-level; inline ** and ` markers are stripped.
 //
 // Pure LVGL (no raw-key grab, no main-loop poll): list levels use the keypad focus group
@@ -125,7 +125,7 @@ static void emit_rule(lv_obj_t *v){
 	lv_obj_set_style_bg_color(r, KF_BORDER_HI, 0);
 	lv_obj_set_style_bg_opa(r, LV_OPA_COVER, 0);
 }
-/* fenced code block -> a bordered card (CakeSpark scripts, calc expressions, ...) */
+/* fenced code block -> a bordered card (calc expressions, code samples, ...) */
 static void emit_code(lv_obj_t *v, const char *code){
 	lv_obj_t *card = lv_obj_create(v);
 	lv_obj_remove_style_all(card);

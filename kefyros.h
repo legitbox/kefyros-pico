@@ -212,7 +212,6 @@ void app_wifi_open(void);    /* WiFi manager: status, scan, connect, forget */
 void app_music_open(void);   /* FLAC player (recursively indexes /kefyros/music) */
 void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
-void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
 void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
@@ -222,6 +221,5 @@ void electronics_poll(void);
 void music_poll(void);       /* key handling + FLAC decode pump */
 void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
-void cakespark_poll(void);   /* CakeSpark REPL: grabbed keys (no-op unless open) */
 
 #endif
