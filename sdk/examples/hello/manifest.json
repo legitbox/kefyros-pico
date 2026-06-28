@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "abi": 1,
+  "mode": "windowed",
+  "exec": "hello.kx",
+  "icon": "icon.png",
+  "perf": "normal",
+  "idle": "normal",
+  "flags": []
+}
