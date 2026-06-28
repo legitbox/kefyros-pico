@@ -45,6 +45,7 @@
 
 /* re-derived after a clk_sys change (defined in psram.c / disp.c) */
 extern void kf_psram_reclock(void);
+extern void kf_net_reclock(void);                /* retune cyw43 gSPI bus for the new clk_sys */
 extern void disp_pause_core1(void);
 extern void disp_resume_core1(void);
 extern void kf_audio_clock_change_begin(void);   /* tristate speaker pins across the switch (anti-pop) */
@@ -128,6 +129,8 @@ static void reclock_peripherals(void){
 	spi_set_baudrate(KF_SD_SPI,  24000000u);    /* SD   (CONF_SD_TRX_FREQUENCY)*/
 	uart_set_baudrate(KF_KBD_UART, KF_KBD_BAUD);
 	kf_psram_reclock();                          /* PSRAM PIO bus back to ~18 MHz */
+	kf_net_reclock();                            /* cyw43 gSPI bus back to ~28 MHz (keeps a live
+	                                                link alive across a clk_sys change) */
 }
 
 static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool up){

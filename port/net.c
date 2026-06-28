@@ -48,6 +48,16 @@ static int            s_seen_n = 0;
 
 static uint32_t now_ms(void){ return (uint32_t)(time_us_64() / 1000u); }
 
+/* Set the cyw43 PIO gSPI bus divider for the CURRENT clk_sys, targeting the proven ~28 MHz
+   window. bus = clk_sys / (2*div). 400 MHz -> div 7 (~28.6 MHz), 250 -> div 4 (~31), 150 -> div 3.
+   Must be re-applied on EVERY clk_sys change (see kf_net_reclock), or the bus runs at the old
+   ratio after a clock switch (e.g. ~50 MHz at 400 with the eco-era div) and a live link drops. */
+static void set_bus_div(void){
+	uint32_t div = clock_get_hz(clk_sys) / (2u * 28000000u);
+	if(div < 2u) div = 2u;
+	cyw43_set_pio_clkdiv_int_frac8(div, 0);
+}
+
 /* Single auth mode, patient connect. (Earlier we cycled a "ladder" of auth modes every
    4 s; that churn re-issued connect_async mid-handshake and never let a clean attempt
    finish -> BADAUTH loop even with a correct password.) The target AP is WPA3-Personal,
@@ -97,10 +107,8 @@ void kf_net_init(void){
 	if(s_present) return;            /* idempotent — safe to call lazily/repeatedly */
 	/* Set the cyw43 PIO bus divider for the CURRENT clk_sys, targeting ~28 MHz (the
 	   proven window for wifi_on's handshake). Dynamic so WiFi works at any clock we
-	   bring it up at: 400 MHz -> div 7 (~28 MHz), 150 MHz -> div 3 (~25 MHz). */
-	uint32_t div = clock_get_hz(clk_sys) / (2u * 28000000u);
-	if(div < 2u) div = 2u;
-	cyw43_set_pio_clkdiv_int_frac8(div, 0);
+	   bring it up at; kf_net_reclock() re-applies it whenever the OS changes clk_sys. */
+	set_bus_div();
 	/* IMPORTANT: bring the radio up only at a WiFi-safe clock (<=~270 MHz). cyw43's
 	   STA bring-up (wifi_on's ioctl handshake) fails above the ceiling, and once it
 	   fails the chip stays stuck (ensure_up won't re-run on an already-inited chip).
@@ -114,6 +122,13 @@ void kf_net_init(void){
 }
 
 int kf_net_present(void){ return s_present; }
+
+/* Re-tune the cyw43 gSPI bus for the new clk_sys. Called from the clock-change path
+   (reclock_peripherals) so a link associated at eco keeps its bus in spec — and thus the
+   link alive — after the OS bumps to 400. No-op until the radio is up. */
+void kf_net_reclock(void){
+	if(s_present) set_bus_div();
+}
 
 void kf_net_connect(const char *ssid, const char *pass){
 	if(!ssid || !ssid[0]) return;

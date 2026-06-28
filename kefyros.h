@@ -149,6 +149,7 @@ typedef enum { KF_NET_OFF=0, KF_NET_CONNECTING, KF_NET_ONLINE, KF_NET_FAILED } k
 void           kf_net_init(void);        /* cyw43 arch init + STA mode (once, at boot) */
 int            kf_net_present(void);      /* 1 if the radio inited OK */
 void           kf_net_poll(void);         /* pump cyw43+lwip + reconnect watchdog (superloop) */
+void           kf_net_reclock(void);      /* retune the cyw43 gSPI bus for the current clk_sys (clock-change hook) */
 kf_net_state_t kf_net_state(void);
 const char    *kf_net_state_str(void);    /* "off"/"connecting"/"online"/"failed" */
 const char    *kf_net_ip(void);           /* dotted IPv4, "0.0.0.0" until online */
