@@ -49,6 +49,7 @@ static int    (*s_sx)[NG], (*s_sy)[NG];          /* per-frame projected screen c
 static double (*s_vd)[NG];                        /* per-frame vertex depth (for sorting) */
 static double (*s_nx)[NG], (*s_ny)[NG], (*s_nz)[NG];  /* normalised model coords (for normals) */
 static int    *s_ord; static double *s_qd; static int s_qn;   /* shaded quad order */
+static uint16_t *s_qc;                            /* per-quad lit colour (computed once/frame) */
 static void   *g3d_arena;                         /* single heap block backing all of the above */
 
 /* view params set per frame by setup_view(), consumed by projw() */
@@ -68,6 +69,8 @@ static inline void px(int x,int y,uint16_t c){
 	if((unsigned)x<GW && (unsigned)yy<(unsigned)cur_h) strip[yy*GW+x]=c;
 }
 static void line(int x0,int y0,int x1,int y1,uint16_t c){
+	int yl=y0<y1?y0:y1, yh=y0<y1?y1:y0;
+	if(yh<cur_y0 || yl>=cur_y0+cur_h) return;     /* whole line outside this strip — skip */
 	int dx=abs(x1-x0), sx=x0<x1?1:-1, dy=-abs(y1-y0), sy=y0<y1?1:-1, e=dx+dy;
 	for(;;){ px(x0,y0,c); if(x0==x1&&y0==y1) break; int e2=2*e;
 		if(e2>=dy){ e+=dy; x0+=sx; } if(e2<=dx){ e+=dx; y0+=sy; } }
@@ -86,7 +89,9 @@ static void tri(int xa,int ya,int xb,int yb,int xc,int yc,uint16_t col){
 		if(y < yb) xo = (yb==ya)? xa : xa + (int)((long)(xb-xa)*(y-ya)/(yb-ya));
 		else       xo = (yc==yb)? xb : xb + (int)((long)(xc-xb)*(y-yb)/(yc-yb));
 		int xl=xac<xo?xac:xo, xr=xac<xo?xo:xac;
-		for(int x=xl; x<=xr; x++) px(x,y,col);
+		if(xl<0) xl=0; if(xr>=GW) xr=GW-1;
+		uint16_t *row = strip + (size_t)(y-cur_y0)*GW;   /* y already clamped to the strip */
+		for(int x=xl; x<=xr; x++) row[x]=col;
 	}
 }
 static void blit_ch(int x,int y,char ch,uint16_t c){ if((unsigned char)ch>=128) return;
@@ -161,13 +166,24 @@ static void tick_mark(int tx,int ty,double pxx,double pyy,uint16_t c){
 	int ox=(int)lround(3*pxx), oy=(int)lround(3*pyy);
 	line(tx-ox,ty-oy, tx+ox,ty+oy, c);
 }
+/* a "nice" tick step (1/2/5 x 10^k) giving roughly `target` ticks across `range`. Keeps the
+   z-axis tick COUNT bounded no matter how huge the data range is (e.g. x^4*y^4 spans ~400k):
+   the old capped step (max 10) drew tens of thousands of marks per frame and tanked FPS. */
+static double nice_step(double range, int target){
+	if(!(range > 0) || target < 1) return 1;
+	double raw = range / target;
+	double mag = pow(10.0, floor(log10(raw)));
+	double n = raw / mag;
+	double s = (n <= 1.5) ? 1 : (n <= 3) ? 2 : (n <= 7) ? 5 : 10;
+	return s * mag;
+}
 
 /* Reference frame: a BIG ground grid plane + the y-axis spine (both gated by F2/show_plane),
    plus the always-on x and z axes. Ticks are little perpendicular marks, not numbers. */
 static void draw_frame(void){
 	double zp = (s_zlo<=0.0 && 0.0<=s_zhi) ? 0.0 : s_zlo;
 	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
-	double zr=s_zhi-s_zlo, zs = zr>40?10: zr>16?5: zr>8?2:1;
+	double zr=s_zhi-s_zlo, zs = nice_step(zr, 8);
 
 	if(show_plane){
 		double Ex=2.5*v_hx, Ey=2.5*v_hy;                 /* a big floor, ~5x the data span */
@@ -221,6 +237,20 @@ static void render3(void){
 			}
 		}
 		qsort(s_ord, s_qn, sizeof(int), qcmp);
+		/* per-quad lit colour — computed ONCE here, not re-derived for every strip below
+		   (that was ~8x the normal + sqrt + lighting math per frame). */
+		const double Lx=0.32, Ly=0.42, Lz=0.85;   /* light from above-front-right (model space) */
+		for(int o=0;o<s_qn;o++){ int q=s_ord[o], i=q/(NG-1), j=q%(NG-1);
+			double az=(s_z[i][j]+s_z[i+1][j]+s_z[i][j+1]+s_z[i+1][j+1])*0.25;
+			double ax=s_nx[i+1][j]-s_nx[i][j], ay=s_ny[i+1][j]-s_ny[i][j], aaz=s_nz[i+1][j]-s_nz[i][j];
+			double bx=s_nx[i][j+1]-s_nx[i][j], by=s_ny[i][j+1]-s_ny[i][j], bz=s_nz[i][j+1]-s_nz[i][j];
+			double nx=ay*bz-aaz*by, ny=aaz*bx-ax*bz, nz=ax*by-ay*bx;
+			double nl=sqrt(nx*nx+ny*ny+nz*nz); if(nl<1e-12) nl=1;
+			nx/=nl; ny/=nl; nz/=nl;
+			if(nz<0){ nx=-nx; ny=-ny; nz=-nz; }       /* up-facing (height field) */
+			double diff=nx*Lx+ny*Ly+nz*Lz; if(diff<0)diff=0;
+			s_qc[q]=shade_lit((az-s_zmin)/(2*zh+1e-9), 0.32 + 0.78*diff);   /* ambient + diffuse */
+		}
 	}
 	disp_pause_core1();
 	for(cur_y0 = 0; cur_y0 < GH; cur_y0 += STRIP_H){
@@ -228,20 +258,15 @@ static void render3(void){
 		for(int k = 0; k < GW*cur_h; k++) strip[k] = C_BG;
 		draw_frame();                            /* gizmo + ground plane (behind the surface) */
 		if(shaded){
-			/* directional light in object (normalised) space, from above-front-right */
-			const double Lx=0.32, Ly=0.42, Lz=0.85;
+			/* surface (painter-sorted); colour precomputed once above, not per strip */
 			for(int o=0;o<s_qn;o++){ int q=s_ord[o], i=q/(NG-1), j=q%(NG-1);
-				double az=(s_z[i][j]+s_z[i+1][j]+s_z[i][j+1]+s_z[i+1][j+1])*0.25;
-				/* face normal from two edges (normalised model space) */
-				double ax=s_nx[i+1][j]-s_nx[i][j], ay=s_ny[i+1][j]-s_ny[i][j], aaz=s_nz[i+1][j]-s_nz[i][j];
-				double bx=s_nx[i][j+1]-s_nx[i][j], by=s_ny[i][j+1]-s_ny[i][j], bz=s_nz[i][j+1]-s_nz[i][j];
-				double nx=ay*bz-aaz*by, ny=aaz*bx-ax*bz, nz=ax*by-ay*bx;
-				double nl=sqrt(nx*nx+ny*ny+nz*nz); if(nl<1e-12) nl=1;
-				nx/=nl; ny/=nl; nz/=nl;
-				if(nz<0){ nx=-nx; ny=-ny; nz=-nz; }      /* up-facing (height field) */
-				double diff=nx*Lx+ny*Ly+nz*Lz; if(diff<0)diff=0;
-				double inten=0.32 + 0.78*diff;            /* ambient + diffuse */
-				uint16_t c=shade_lit((az-s_zmin)/(2*zh+1e-9), inten);
+				int ya=s_sy[i][j], yb=s_sy[i+1][j], yc=s_sy[i][j+1], yd=s_sy[i+1][j+1];
+				int ymin=ya, ymax=ya;                 /* cheap bbox-y cull: skip off-strip quads */
+				if(yb<ymin)ymin=yb; else if(yb>ymax)ymax=yb;
+				if(yc<ymin)ymin=yc; else if(yc>ymax)ymax=yc;
+				if(yd<ymin)ymin=yd; else if(yd>ymax)ymax=yd;
+				if(ymax<cur_y0 || ymin>=cur_y0+cur_h) continue;
+				uint16_t c=s_qc[q];
 				tri(s_sx[i][j],s_sy[i][j], s_sx[i+1][j],s_sy[i+1][j], s_sx[i+1][j+1],s_sy[i+1][j+1], c);
 				tri(s_sx[i][j],s_sy[i][j], s_sx[i+1][j+1],s_sy[i+1][j+1], s_sx[i][j+1],s_sy[i][j+1], c);
 			}
@@ -298,7 +323,8 @@ static int g3d_alloc(void){
 	const size_t dbl = sizeof(double[NG][NG]);   /* one NGxNG double grid */
 	const size_t ib  = sizeof(int[NG][NG]);      /* one NGxNG int grid    */
 	size_t need = dbl*5 + sizeof(double[NQ])      /* s_z,s_vd,s_nx,s_ny,s_nz + s_qd */
-	            + ib*3  + sizeof(int[NQ]);        /* s_ok,s_sx,s_sy        + s_ord  */
+	            + ib*3  + sizeof(int[NQ])         /* s_ok,s_sx,s_sy        + s_ord  */
+	            + sizeof(uint16_t[NQ]);           /* s_qc                           */
 	char *p = malloc(need);
 	if(!p) return 0;
 	g3d_arena = p;
@@ -311,13 +337,14 @@ static int g3d_alloc(void){
 	s_ok=(int(*)[NG])p;    p+=ib;
 	s_sx=(int(*)[NG])p;    p+=ib;
 	s_sy=(int(*)[NG])p;    p+=ib;
-	s_ord=(int*)p;
+	s_ord=(int*)p;         p+=sizeof(int[NQ]);
+	s_qc=(uint16_t*)p;
 	return 1;
 }
 static void g3d_free(void){
 	free(g3d_arena); g3d_arena=NULL;
 	s_z=NULL; s_vd=NULL; s_nx=NULL; s_ny=NULL; s_nz=NULL; s_qd=NULL;
-	s_ok=NULL; s_sx=NULL; s_sy=NULL; s_ord=NULL;
+	s_ok=NULL; s_sx=NULL; s_sy=NULL; s_ord=NULL; s_qc=NULL;
 }
 
 void calc_graph3d_open(const cnode *f){
