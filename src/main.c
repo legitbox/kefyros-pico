@@ -48,6 +48,8 @@ int main(void){
 	indev_init();              /* LVGL keypad input device                     */
 	tick_init();               /* lv_tick from the 64-bit us timer             */
 
+	kf_sd_gate();              /* first-launch: block w/ guidance until the SD card is healthy */
+
 	kf_wallpaper_init();       /* register the PSRAM streaming wallpaper decoder */
 	launcher_init();           /* build + show the app launcher (loads config)  */
 	topbar_init();             /* persistent OS top bar (mem/clock/battery/wifi) */
@@ -81,7 +83,6 @@ int main(void){
 		browser_poll();        /* Spineko keys + HTTP pump (no-op unless open) */
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
 		cakespark_poll();      /* CakeSpark REPL keys (no-op unless open) */
-		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
 		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }

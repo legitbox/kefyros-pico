@@ -33,14 +33,13 @@ static const desk_app_t dapps[] = {
 	{ "wifi",       "WiFi",        app_wifi_open,        3 },
 	{ "settings",   "Settings",    app_settings_open,    4 },
 	{ "appearance", "Wallpaper",   app_wallpaper_open,   5 },
-	{ "editor",     "Editor",      app_editor_open,      6 },
+	{ "notes",      "Notes",       app_editor_open,      6 },
 	{ "music",      "Music",       app_music_open,       7, APP_NO_SLEEP },  /* playback dies at sleep clocks */
 	{ "electronics","Electronics", app_electronics_open, 8 },
 	{ "spineko",    "Spineko",     app_spineko_open,     9 },
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "cakespark",  "CakeSpark",   app_cakespark_open,   11 },
-	{ "morse",      "Morse",       app_morse_open,       12 },
-	{ "help",       "Help",        app_help_open,        13 },
+	{ "help",       "Help",        app_help_open,        12 },
 };
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */

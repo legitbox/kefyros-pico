@@ -14,7 +14,9 @@
 
 #define DOCDIR  KF_NOTES
 #define MAXLOAD (64*1024)
-#define LEGEND  "F1 Save  F2 SaveAs  F3 Open  F4 New  F5 Quit"
+/* two rows so it fits 320 px in plex_mono_13 (~7 px/char) instead of clipping off-screen */
+#define LEGEND  "F1 Save  F2 SaveAs  F3 Open\nF4 New  F5 Quit"
+#define LEGEND_H 28
 
 static lv_obj_t  *scr, *ta, *lbl_title, *lbl_keys;
 static lv_obj_t  *prompt_box, *prompt_ta;
@@ -251,7 +253,7 @@ static void open_editor(const char *p){
 
 	/* text area */
 	ta = lv_textarea_create(scr);
-	lv_obj_set_size(ta, LCD_W, KF_CONTENT_H - 20 - 16);
+	lv_obj_set_size(ta, LCD_W, KF_CONTENT_H - 20 - LEGEND_H);
 	lv_obj_align(ta, LV_ALIGN_TOP_MID, 0, 20);
 	lv_textarea_set_placeholder_text(ta, "type here...");
 	lv_obj_set_style_bg_color(ta, KF_BG, 0);
@@ -263,9 +265,9 @@ static void open_editor(const char *p){
 	lv_obj_set_style_outline_width(ta, 0, 0);
 	lv_obj_set_style_outline_width(ta, 0, LV_STATE_FOCUSED);
 
-	/* bottom bar: F-key legend / transient status */
+	/* bottom bar: F-key legend (two rows) / transient status */
 	lv_obj_t *bot = lv_obj_create(scr);
-	lv_obj_set_size(bot, LCD_W, 16);
+	lv_obj_set_size(bot, LCD_W, LEGEND_H);
 	lv_obj_align(bot, LV_ALIGN_BOTTOM_MID, 0, 0);
 	lv_obj_set_style_bg_color(bot, KF_CARD, 0);
 	lv_obj_set_style_bg_opa(bot, LV_OPA_COVER, 0);
@@ -309,7 +311,7 @@ static void build_picker(void){
 	kf_inset_top(scr);                  /* clear the persistent OS top bar */
 
 	lv_obj_t *title = lv_label_create(scr);
-	lv_label_set_text(title, "Editor  -  " DOCDIR);
+	lv_label_set_text(title, "Notes  -  " DOCDIR);
 	lv_obj_set_style_text_color(title, KF_AMBER_BR, 0);
 	lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
 	lv_obj_set_width(title, LCD_W-8);

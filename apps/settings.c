@@ -298,6 +298,45 @@ static void act_clock24(lv_event_t *e){ (void)e;
 	clock24_label();
 }
 
+/* --- About modal (version + hardware + credit) --- */
+static lv_obj_t  *s_list = NULL, *about_box = NULL;
+static lv_group_t *s_grp = NULL;
+static void about_ok(lv_event_t *e){ (void)e;
+	if(about_box){ lv_obj_delete(about_box); about_box = NULL; }
+	if(s_list){ lv_obj_t *c = lv_obj_get_child(s_list, 0); if(c) lv_group_focus_obj(c); }
+}
+static void act_about(lv_event_t *e){ (void)e;
+	if(about_box) return;
+	about_box = lv_obj_create(scr);
+	lv_obj_set_size(about_box, LCD_W-24, 220);
+	lv_obj_center(about_box);
+	lv_obj_set_style_bg_color(about_box, KF_CARD, 0);
+	lv_obj_set_style_bg_opa(about_box, LV_OPA_COVER, 0);
+	lv_obj_set_style_border_color(about_box, KF_AMBER, 0);
+	lv_obj_set_style_border_width(about_box, 2, 0);
+	lv_obj_set_style_radius(about_box, 0, 0);
+	lv_obj_set_flex_flow(about_box, LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_flex_align(about_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+	lv_obj_set_style_pad_row(about_box, 10, 0);
+	lv_obj_clear_flag(about_box, LV_OBJ_FLAG_SCROLLABLE);
+
+	lv_obj_t *t = lv_label_create(about_box);
+	lv_label_set_long_mode(t, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(t, LCD_W-48);
+	lv_obj_set_style_text_align(t, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_set_style_text_color(t, KF_AMBER_BR, 0);
+	lv_label_set_text(t,
+		"Kefyros " KF_VERSION "\n\n"
+		"A pocket OS for the PicoCalc\n"
+		"RP2350 / Pico 2 W  -  LVGL 9\n\n"
+		"Made for the PicoCalc community");
+
+	lv_obj_t *ok = lv_button_create(about_box);
+	lv_obj_t *okl = lv_label_create(ok); lv_label_set_text(okl, "OK");
+	lv_obj_add_event_cb(ok, about_ok, LV_EVENT_CLICKED, NULL);
+	if(s_grp){ lv_group_add_obj(s_grp, ok); lv_group_focus_obj(ok); }
+}
+
 void app_settings_open(void){
 	bkl = deskconf_get_int("bkl", 5);
 	bk2 = deskconf_get_int("bk2", 2);
@@ -335,8 +374,10 @@ void app_settings_open(void){
 	lv_obj_t *list = lv_list_create(scr);
 	lv_obj_set_size(list, LCD_W-8, KF_CONTENT_H-68);
 	lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 64);
+	s_list = list;
 
 	lv_group_t *g = kf_use_group();
+	s_grp = g;  about_box = NULL;
 	additem(list,g, "LCD Light +",      act_bkl, (void*)(intptr_t)+1);
 	additem(list,g, "LCD Light -",      act_bkl, (void*)(intptr_t)-1);
 	additem(list,g, "Keyboard Light +", act_bk2, (void*)(intptr_t)+1);
@@ -346,6 +387,7 @@ void app_settings_open(void){
 	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
 	additem(list,g, "Screen Test",      act_screentest, NULL);
 	btn_sfx = additem(list,g, "Sound FX: ON", act_sfx, NULL); sfx_label();
+	additem(list,g, "About Kefyros",    act_about, NULL);
 	additem(list,g, "Power...",         act_power, NULL);
 
 	refresh_bat();

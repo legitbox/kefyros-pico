@@ -87,9 +87,13 @@ lv_indev_t *indev_get(void);
 uint32_t    map_key(uint8_t devkey);
 void        kf_grab_input(int on);   /* raw-key consumer mode (calc/electronics/editor) */
 
+/* ===== release identity ===== */
+#define KF_VERSION  "1.0"            /* Kefyros release version (shown in Settings -> About) */
+
 /* ===== storage (port/storage_sd.c, pico-vfs POSIX over FatFs/SD) ===== */
 int  kfs_mount(void);                /* mount the SD card at "/"; 0 ok. ensures /kefyros tree */
 int  kfs_ready(void);                /* 1 if the card mounted */
+void kf_sd_gate(void);               /* boot: block with guidance until the SD card is healthy (ui/firstrun.c) */
 /* Apps use standard POSIX (fopen/opendir/...) via pico-vfs; these are convenience helpers. */
 #define KF_ROOT     "/kefyros"
 #define KF_NOTES    "/kefyros/notes"
@@ -209,7 +213,6 @@ void app_music_open(void);   /* FLAC player (recursively indexes /kefyros/music)
 void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
-void app_morse_open(void);   /* Morse code: encoder (tone/lamp/backlight), decoder, trainer */
 void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
@@ -220,6 +223,5 @@ void music_poll(void);       /* key handling + FLAC decode pump */
 void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void cakespark_poll(void);   /* CakeSpark REPL: grabbed keys (no-op unless open) */
-void morse_poll(void);       /* Morse: grabbed keys + TX keyer/audio state machine (no-op idle) */
 
 #endif
