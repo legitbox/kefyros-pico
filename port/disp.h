@@ -21,8 +21,8 @@ void disp_core1_main(void);
 void disp_pause_core1(void);
 void disp_resume_core1(void);
 
-/* Halt Core 1 entirely for a flash write, then relaunch a fresh flush pump. Used by the
- * Game Boy ROM loader (port/gbflash.c) so neither core executes from XIP mid-erase. */
+/* Halt Core 1 entirely for a flash write, then relaunch a fresh flush pump, so neither
+ * core executes from XIP mid-erase. (Currently unused — kept for flash-write paths.) */
 void disp_core1_reset(void);
 void disp_core1_relaunch(void);
 

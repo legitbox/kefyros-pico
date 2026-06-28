@@ -66,7 +66,6 @@ int main(void){
 		browser_poll();        /* Spineko keys + HTTP pump (no-op unless open) */
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
 		cakespark_poll();      /* CakeSpark REPL keys (no-op unless open) */
-		gameboy_poll();        /* Game Boy picker keys + play loop (no-op idle) */
 		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
 		lv_timer_handler();    /* render + dispatch LVGL timers                */

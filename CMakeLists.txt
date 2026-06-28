@@ -50,9 +50,7 @@ add_executable(kefyros
     port/html.c
     port/tls.c
     port/imgdec.c
-    port/gbflash.c                 # Game Boy ROM -> reserved flash region (XIP)
     lib/miniz/miniz_tinfl.c        # streaming DEFLATE inflate for the PNG decoder
-    lib/peanut-gb/minigb_apu.c     # Game Boy APU (audio) for the emulator app
     ${APP_SRC}
     ${UI_SRC}
     ${LVGL_SRC}
@@ -89,10 +87,6 @@ target_compile_definitions(kefyros PRIVATE
     # clk_peri follows clk_sys (360 MHz), so the panel SPI can actually run fast;
     # reclock_peripherals() re-derives the SPI/SD/UART bauds after each clock change.
     PICO_CLOCK_ADJUST_PERI_CLOCK_WITH_SYS_CLOCK=1
-    # Game Boy APU (lib/peanut-gb/minigb_apu): 16-bit native-endian stereo samples at
-    # 32768 Hz, fed to the PWM audio path via kf_audio_write().
-    MINIGB_APU_AUDIO_FORMAT_S16SYS=1
-    AUDIO_SAMPLE_RATE=32768
 )
 
 # PSRAM PIO program -> build/.../psram.pio.h
@@ -111,7 +105,6 @@ target_include_directories(kefyros PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/lib/nanosvg/src   # nanosvg.h, nanosvgrast.h (SVG)
     ${CMAKE_CURRENT_LIST_DIR}/lib/cakespark         # cakespark.h (embedding C API)
     ${CMAKE_CURRENT_LIST_DIR}/lib/cakespark/nim/cnim # nimbase.h + generated headers
-    ${CMAKE_CURRENT_LIST_DIR}/lib/peanut-gb         # peanut_gb.h + minigb_apu.h (Game Boy)
 )
 
 # pico-vfs filesystem support (SD-FAT only; no flash fs)
@@ -138,7 +131,6 @@ target_link_libraries(kefyros PRIVATE
     pico_cyw43_arch_lwip_poll
     pico_lwip_sntp        # SNTP time sync
     pico_rand             # RP2350 hardware TRNG -> BearSSL entropy seed
-    hardware_flash        # flash_range_erase/program for the Game Boy ROM loader (port/gbflash.c)
 )
 
 # debug log on uart0 (GP0/GP1); USB free for BOOTSEL flashing

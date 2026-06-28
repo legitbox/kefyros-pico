@@ -35,7 +35,6 @@ static const desk_app_t dapps[] = {
 	{ "spineko",    "Spineko",     app_spineko_open,     9 },
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "cakespark",  "CakeSpark",   app_cakespark_open,   11 },
-	{ "gameboy",    "Game Boy",    app_gameboy_open,     0  },
 	{ "morse",      "Morse",       app_morse_open,       12 },
 };
 #define NAPPS  (int)(sizeof(dapps)/sizeof(dapps[0]))

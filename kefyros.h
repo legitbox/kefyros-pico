@@ -194,7 +194,6 @@ void app_music_open(void);   /* FLAC player (recursively indexes /kefyros/music)
 void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_cakespark_open(void);/* CakeSpark scripting REPL (embedded Nim VM) */
-void app_gameboy_open(void); /* Game Boy (DMG) emulator — Peanut-GB, ROMs from SD->flash */
 void app_morse_open(void);   /* Morse code: encoder (tone/lamp/backlight), decoder, trainer */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
@@ -205,7 +204,6 @@ void music_poll(void);       /* key handling + FLAC decode pump */
 void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void cakespark_poll(void);   /* CakeSpark REPL: grabbed keys (no-op unless open) */
-void gameboy_poll(void);     /* Game Boy: picker keys + the blocking play loop (no-op idle) */
 void morse_poll(void);       /* Morse: grabbed keys + TX keyer/audio state machine (no-op idle) */
 
 #endif
