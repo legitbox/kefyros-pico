@@ -83,10 +83,6 @@ static int wc_run(const char *path, int scale, int sx0, int sy0, int dstW, int d
 	return ok;
 }
 
-int wc_decode_region(const char *path, int scale, int sx0, int sy0, int dstW, int dstH, uint32_t dst){
-	return wc_run(path, scale, sx0, sy0, dstW, dstH, dst);
-}
-
 int wc_dims(const char *path, int *w, int *h){
 	FILE *f = fopen(path, "rb");
 	if(!f) return 0;
@@ -101,60 +97,68 @@ int wc_dims(const char *path, int *w, int *h){
 	return ok;
 }
 
-#define WC_SCRATCH_MAX 1024   /* decode the crop into a bounded PSRAM scratch (<=2 MB) */
+/* Bound the decode scratch by BYTES (not max-dim) so most sources decode at full
+   resolution (s=0) before averaging — half-res-first is what made thumbnails mushy. */
+#define WC_SCRATCH_BYTES (4u*1024*1024)
+#define WC_CW_MAX  1664   /* cap the decoded scratch WIDTH (raise s past it) so the static
+                             per-row buffers below are bounded; a 4 MB square crop is <=1448 wide */
+#define WC_OUT_MAX 320    /* max output width (the panel) */
 
-int wc_bake(const char *path, int cx, int cy, int side, int out_px, uint32_t dst){
-	/* Decode the crop as large as a bounded scratch allows — full-res (s=0) for crops up to
-	   WC_SCRATCH_MAX, a power-of-two descale for bigger ones — then BOX-AVERAGE down to
-	   out_px. Area averaging (not nearest) is what keeps the result smooth instead of the
-	   chunky 'pixelator' look. Worst-case ~2x-3x supersample feeds the average. */
+/* Working buffers are STATIC, not malloc'd: the ~150 KB SRAM heap is often fragmented while
+   the editor is open, and a width-proportional malloc was failing for LARGE crops (small
+   crops malloc less, which is why only big crops failed -> "convert failed" -> user quits).
+   ~17 KB .bss, always reserved. */
+static int      wc_colmap[WC_CW_MAX];
+static uint16_t wc_srow[WC_CW_MAX];
+static uint32_t wc_aR[WC_OUT_MAX], wc_aG[WC_OUT_MAX], wc_aB[WC_OUT_MAX], wc_cn[WC_OUT_MAX];
+static uint16_t wc_orow[WC_OUT_MAX];
+
+int wc_render(const char *path, int rx0, int ry0, int rw, int rh, int outW, int outH, uint32_t dst){
+	/* Box-average the native rectangle (rx0,ry0,rw,rh) of `path` down to outW x outH RGB565
+	   at `dst`. Decode at the largest 1/2^s whose scratch fits WC_SCRATCH_BYTES and whose width
+	   fits WC_CW_MAX (preferring full res for sharpness), then area-average — smooth, not
+	   nearest-neighbour blocky. Iterates OUTPUT rows so it's robust to down- and up-scaling. */
+	if(outW > WC_OUT_MAX) return 0;
 	int s = 0;
-	while(s < 3 && (side >> s) > WC_SCRATCH_MAX) s++;
-	int cs = side >> s;
-	if(cs < 1) cs = 1;
-	int sx0 = cx >> s, sy0 = cy >> s;
+	while(s < 3 && ((uint32_t)(rw >> s) * (uint32_t)(rh >> s) * 2u > WC_SCRATCH_BYTES
+	             || (rw >> s) > WC_CW_MAX)) s++;
 
-	uint32_t mark = kf_psram_brk();
-	uint32_t scratch = kf_psram_alloc((uint32_t)cs * cs * 2);
-	if(scratch == 0xFFFFFFFFu) return 0;
+	uint32_t mark = kf_psram_brk(), scr;
+	int cw, ch, sx0, sy0;
+	for(;;){                                  /* shrink (raise s) until the scratch alloc fits */
+		cw = rw >> s; ch = rh >> s; if(cw < 1) cw = 1; if(ch < 1) ch = 1;
+		if(cw > WC_CW_MAX) cw = WC_CW_MAX;    /* only bites on extreme aspect ratios */
+		sx0 = rx0 >> s; sy0 = ry0 >> s;
+		scr = kf_psram_alloc((uint32_t)cw * ch * 2);
+		if(scr != 0xFFFFFFFFu) break;
+		if(s >= 3) return 0;                  /* won't fit even at 1/8 */
+		s++;
+	}
 
-	/* zero the scratch so any 1px rounding gap at the image edge stays black, not garbage */
+	/* zero the scratch so any 1px edge-rounding gap stays black, not garbage */
 	{
 		static uint8_t z[512] = { 0 };
-		uint32_t tot = (uint32_t)cs * cs * 2, off = 0;
-		while(off < tot){ uint32_t n = tot - off; if(n > sizeof z) n = sizeof z; kf_psram_write(scratch + off, z, n); off += n; }
+		uint32_t tot = (uint32_t)cw * ch * 2, off = 0;
+		while(off < tot){ uint32_t n = tot - off; if(n > sizeof z) n = sizeof z; kf_psram_write(scr + off, z, n); off += n; }
 	}
+	if(!wc_run(path, s, sx0, sy0, cw, ch, scr)){ kf_psram_free_to(mark); return 0; }
 
-	if(!wc_run(path, s, sx0, sy0, cs, cs, scratch)){ kf_psram_free_to(mark); return 0; }
-
-	/* pass 2: streaming box-average cs x cs -> out_px x out_px. Each source row is added
-	   once into the accumulator of its target output row (vertical avg); a precomputed
-	   column map buckets source columns (horizontal avg). One PSRAM write per output row. */
-	int *colmap = malloc((size_t)cs * sizeof(int));
-	uint32_t *aR = calloc(out_px, 4), *aG = calloc(out_px, 4), *aB = calloc(out_px, 4), *cn = calloc(out_px, 4);
-	uint16_t *srow = malloc((size_t)cs * 2), *orow = malloc((size_t)out_px * 2);
-	int ok = (colmap && aR && aG && aB && cn && srow && orow);
-	if(ok) for(int sx = 0; sx < cs; sx++) colmap[sx] = (int)((long)sx * out_px / cs);
-	int cur = 0;
-	for(int sy = 0; ok && sy < cs; sy++){
-		int oy = (int)((long)sy * out_px / cs);
-		if(oy != cur){                          /* finalize the completed output row */
-			for(int ox = 0; ox < out_px; ox++){ uint32_t c = cn[ox] ? cn[ox] : 1;
-				orow[ox] = (uint16_t)(((aR[ox]/c) << 11) | ((aG[ox]/c) << 5) | (aB[ox]/c)); }
-			kf_psram_write(dst + (size_t)cur * out_px * 2, orow, (uint32_t)out_px * 2);
-			memset(aR, 0, out_px*4); memset(aG, 0, out_px*4); memset(aB, 0, out_px*4); memset(cn, 0, out_px*4);
-			cur = oy;
+	for(int sx = 0; sx < cw; sx++) wc_colmap[sx] = (int)((long)sx * outW / cw);
+	for(int oy = 0; oy < outH; oy++){
+		int a = (int)((long)oy * ch / outH), b = (int)((long)(oy+1) * ch / outH);
+		if(b <= a) b = a + 1; if(b > ch) b = ch;
+		for(int ox = 0; ox < outW; ox++){ wc_aR[ox] = wc_aG[ox] = wc_aB[ox] = wc_cn[ox] = 0; }
+		for(int sy = a; sy < b; sy++){
+			kf_psram_read(scr + (size_t)sy * cw * 2, wc_srow, (uint32_t)cw * 2);
+			for(int sx = 0; sx < cw; sx++){ int ox = wc_colmap[sx]; uint16_t v = wc_srow[sx];
+				wc_aR[ox] += (v >> 11) & 0x1F; wc_aG[ox] += (v >> 5) & 0x3F; wc_aB[ox] += v & 0x1F; wc_cn[ox]++; }
 		}
-		kf_psram_read(scratch + (size_t)sy * cs * 2, srow, (uint32_t)cs * 2);
-		for(int sx = 0; sx < cs; sx++){ int ox = colmap[sx]; uint16_t v = srow[sx];
-			aR[ox] += (v >> 11) & 0x1F; aG[ox] += (v >> 5) & 0x3F; aB[ox] += v & 0x1F; cn[ox]++; }
+		for(int ox = 0; ox < outW; ox++){
+			if(wc_cn[ox]) wc_orow[ox] = (uint16_t)(((wc_aR[ox]/wc_cn[ox]) << 11) | ((wc_aG[ox]/wc_cn[ox]) << 5) | (wc_aB[ox]/wc_cn[ox]));
+			else          wc_orow[ox] = ox ? wc_orow[ox-1] : 0;   /* fill rare horizontal up-scale gaps */
+		}
+		kf_psram_write(dst + (size_t)oy * outW * 2, wc_orow, (uint32_t)outW * 2);
 	}
-	if(ok){                                     /* final output row */
-		for(int ox = 0; ox < out_px; ox++){ uint32_t c = cn[ox] ? cn[ox] : 1;
-			orow[ox] = (uint16_t)(((aR[ox]/c) << 11) | ((aG[ox]/c) << 5) | (aB[ox]/c)); }
-		kf_psram_write(dst + (size_t)cur * out_px * 2, orow, (uint32_t)out_px * 2);
-	}
-	free(colmap); free(aR); free(aG); free(aB); free(cn); free(srow); free(orow);
 	kf_psram_free_to(mark);
-	return ok;
+	return 1;
 }

@@ -74,22 +74,22 @@ static lv_obj_t *ed_scr, *ed_imgw, *ed_box, *ed_hint, *ed_keyc;
 static int   ed_confirm;
 static char  ed_path[256], ed_name[128];
 static int   ed_W, ed_H;                 /* native source dims                     */
-static int   ed_st, ed_tw, ed_th;        /* thumbnail decode scale (1<<st) and dims */
+static int   ed_tw, ed_th;               /* thumbnail (fit-to-panel) dims, <= 320   */
 static int   ed_cx, ed_cy, ed_side;      /* crop window (square) in NATIVE px       */
-static float ed_disp;                    /* displayed-px per thumbnail-px (contain) */
+static float ed_nk;                      /* native px -> screen px (for the crop box) */
 static int   ed_offx, ed_offy;           /* thumbnail top-left on screen            */
 
-#define ED_OUT    320
-#define THUMB_MAX 512            /* max thumbnail side; fits any source up to ~4096 px @ 1/8 */
+#define ED_OUT 320
 
 /* Two PSRAM regions, allocated once and reused forever (the bump allocator can't free a
    middle blob, and the global ESC-to-launcher gives us no teardown hook — so permanent
-   reservation is both simpler and leak-proof). g_thumb backs every JPEG preview/thumbnail;
-   g_out backs the baked 320x320 result. ~712 KB of the 8 MB PSRAM. */
+   reservation is both simpler and leak-proof). g_thumb holds the editor's fit-to-panel
+   thumbnail; g_out the baked 320x320 result. The big (~4 MB) decode scratch is transient,
+   allocated/freed inside wc_render. ~400 KB permanent. */
 static uint32_t g_thumb = 0xFFFFFFFFu, g_out = 0xFFFFFFFFu;
 static int g_ensure(void){
 	if(!kf_psram_size()) return 0;
-	if(g_thumb == 0xFFFFFFFFu) g_thumb = kf_psram_alloc((uint32_t)THUMB_MAX * THUMB_MAX * 2);
+	if(g_thumb == 0xFFFFFFFFu) g_thumb = kf_psram_alloc((uint32_t)ED_OUT * ED_OUT * 2);
 	if(g_out   == 0xFFFFFFFFu) g_out   = kf_psram_alloc((uint32_t)ED_OUT * ED_OUT * 2);
 	return g_thumb != 0xFFFFFFFFu && g_out != 0xFFFFFFFFu;
 }
@@ -99,20 +99,18 @@ static int is_jpg_name(const char *n){
 	return d && (!strcasecmp(d, ".jpg") || !strcasecmp(d, ".jpeg"));
 }
 
-/* Decode `posix` (a baseline JPEG) into g_thumb at the coarsest 1/2^n that keeps the
-   longest side <= THUMB_MAX; fills *ow,*oh,*os (scale exponent). Returns 1 on success,
-   0 if the file isn't a decodable baseline JPEG or won't fit. */
-static int decode_thumb(const char *posix, int *ow, int *oh, int *os){
+/* Box-average the whole JPEG `posix` into g_thumb, fit (aspect-preserving) into the panel.
+   Fills native dims *ow,*oh and thumbnail dims *otw,*oth. Returns 1 on success. */
+static int decode_thumb(const char *posix, int *ow, int *oh, int *otw, int *oth){
 	int w, h;
 	if(!g_ensure() || !wc_dims(posix, &w, &h) || w < 1 || h < 1) return 0;
-	int st = 0;
-	while(st < 3 && ((w >> st) > THUMB_MAX || (h >> st) > THUMB_MAX)) st++;
-	int tw = w >> st, th = h >> st;
+	float sc = (float)ED_OUT / (w > h ? w : h);
+	if(sc > 1.0f) sc = 1.0f;                            /* never upscale a tiny source */
+	int tw = (int)(w * sc), th = (int)(h * sc);
 	if(tw < 1) tw = 1;
 	if(th < 1) th = 1;
-	if(tw > THUMB_MAX || th > THUMB_MAX) return 0;     /* source too large even at 1/8 */
-	if(!wc_decode_region(posix, st, 0, 0, tw, th, g_thumb)) return 0;
-	*ow = w; *oh = h; *os = st;
+	if(!wc_render(posix, 0, 0, w, h, tw, th, g_thumb)) return 0;
+	*ow = w; *oh = h; *otw = tw; *oth = th;
 	return 1;
 }
 static void ed_key_cb(lv_event_t *e);
@@ -132,10 +130,9 @@ static void ed_clamp(void){
 	if(ed_cy > ed_H - ed_side) ed_cy = ed_H - ed_side;
 }
 static void ed_update_box(void){
-	float k = ed_disp / (float)(1 << ed_st);          /* native px -> screen px */
-	int bx = ed_offx + (int)(ed_cx * k + 0.5f);
-	int by = ed_offy + (int)(ed_cy * k + 0.5f);
-	int bw = (int)(ed_side * k + 0.5f);
+	int bx = ed_offx + (int)(ed_cx * ed_nk + 0.5f);
+	int by = ed_offy + (int)(ed_cy * ed_nk + 0.5f);
+	int bw = (int)(ed_side * ed_nk + 0.5f);
 	lv_obj_set_pos(ed_box, bx, by);
 	lv_obj_set_size(ed_box, bw, bw);
 }
@@ -149,10 +146,7 @@ static int ed_open(const char *posix, const char *name){
 	/* release the chooser preview's hold on the shared raw_dsc BEFORE the editor takes it,
 	   so deleting the old chooser screen can't invalidate the editor image's decode cache. */
 	if(prev_img) lv_image_set_src(prev_img, NULL);
-	if(!decode_thumb(posix, &ed_W, &ed_H, &ed_st)) return 0;   /* decodes into g_thumb */
-	ed_tw = ed_W >> ed_st; ed_th = ed_H >> ed_st;
-	if(ed_tw < 1) ed_tw = 1;
-	if(ed_th < 1) ed_th = 1;
+	if(!decode_thumb(posix, &ed_W, &ed_H, &ed_tw, &ed_th)) return 0;   /* box-averaged into g_thumb */
 	snprintf(ed_path, sizeof ed_path, "%s", posix);
 	snprintf(ed_name, sizeof ed_name, "%s", name);
 	ed_confirm = 0;
@@ -162,11 +156,12 @@ static int ed_open(const char *posix, const char *name){
 	ed_cx = (ed_W - ed_side) / 2;
 	ed_cy = (ed_H - ed_side) / 2;
 
-	/* contain transform of the thumbnail in the full panel (matches "fit") */
+	/* "fit"/contain transform of the thumbnail in the panel; ed_nk maps native px -> screen */
 	float sx = (float)LCD_W / ed_tw, sy = (float)LCD_H / ed_th;
-	ed_disp = sx < sy ? sx : sy;
-	ed_offx = (int)((LCD_W - ed_tw * ed_disp) / 2);
-	ed_offy = (int)((LCD_H - ed_th * ed_disp) / 2);
+	float disp = sx < sy ? sx : sy;
+	ed_nk = disp * (float)ed_tw / ed_W;
+	ed_offx = (int)((LCD_W - ed_tw * disp) / 2);
+	ed_offy = (int)((LCD_H - ed_th * disp) / 2);
 
 	/* build the editor screen */
 	ed_scr = lv_obj_create(NULL);
@@ -216,7 +211,7 @@ static void ed_bake(void){
 	lv_obj_add_flag(ed_box, LV_OBJ_FLAG_HIDDEN);
 	lv_label_set_text(ed_hint, "converting...");
 	lv_refr_now(NULL);                             /* paint the label before the blocking decode */
-	if(!wc_bake(ed_path, ed_cx, ed_cy, ed_side, ED_OUT, g_out)){
+	if(!wc_render(ed_path, ed_cx, ed_cy, ed_side, ed_side, ED_OUT, ED_OUT, g_out)){
 		lv_label_set_text(ed_hint, "convert failed (out of memory)  -  BKSP back");
 		lv_obj_remove_flag(ed_box, LV_OBJ_FLAG_HIDDEN);
 		return;                                    /* stays in crop mode; ENTER retries */
@@ -298,29 +293,6 @@ static void show_msg(const char *m){            /* centered note over a blanked 
 }
 static void hide_msg(void){ if(prev_msg) lv_obj_add_flag(prev_msg, LV_OBJ_FLAG_HIDDEN); }
 
-/* live preview of file `idx` behind the chooser: JPEGs decode to a thumbnail (shown
-   whole, so you can judge the crop), .bin/.png/.bmp go through the normal apply path. */
-static void preview_file(int idx){
-	if(idx < 0 || idx >= nfiles) return;
-	char posix[256]; snprintf(posix, sizeof posix, "%s/%s", WPDIR, files[idx]);
-	if(is_jpg_name(files[idx])){
-		int w, h, st;
-		if(!decode_thumb(posix, &w, &h, &st)){
-			show_msg(kf_psram_size() ? "can't decode\n(progressive or\nunsupported JPEG)" : "no PSRAM");
-			return;
-		}
-		hide_msg();
-		kf_wallpaper_show_raw(prev_img, g_thumb, w >> st, h >> st, "fit");
-	} else {
-		hide_msg();
-		char lvp[256]; snprintf(lvp, sizeof lvp, "A:%s/%s", WPDIR, files[idx]);
-		kf_wallpaper_apply(prev_img, lvp, pend_fit);
-	}
-}
-static void focus_cb(lv_event_t *e){
-	preview_file((int)(intptr_t)lv_event_get_user_data(e));
-}
-
 static void item_cb(lv_event_t *e){
 	int idx = (int)(intptr_t)lv_event_get_user_data(e);
 	if(idx == -1){                                   /* cycle fit mode */
@@ -356,7 +328,6 @@ static void item_cb(lv_event_t *e){
 static void additem(lv_group_t *g, const char *txt, int idx){
 	lv_obj_t *b = lv_list_add_button(list, NULL, txt);
 	lv_obj_add_event_cb(b, item_cb, LV_EVENT_CLICKED, (void*)(intptr_t)idx);
-	if(idx >= 0) lv_obj_add_event_cb(b, focus_cb, LV_EVENT_FOCUSED, (void*)(intptr_t)idx);  /* live preview */
 	lv_group_add_obj(g, b);
 	if(idx == -1) lbl_fit = lv_obj_get_child(b, lv_obj_get_child_cnt(b)-1);
 	if(idx == -4) lbl_dim = lv_obj_get_child(b, lv_obj_get_child_cnt(b)-1);

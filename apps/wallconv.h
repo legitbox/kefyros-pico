@@ -7,17 +7,13 @@
    Returns 1 on success, 0 if the file isn't a decodable baseline JPEG. */
 int wc_dims(const char *path, int *w, int *h);
 
-/* Decode `path` (JPEG) at 1/(1<<scale) and copy the window whose top-left in the
-   *scaled* image is (sx0,sy0) and whose size is dstW x dstH into PSRAM at byte
-   offset `dst`, as RGB565 (row-major, stride dstW*2). Pixels of the window that
-   fall outside the decoded image are left untouched. Returns 1 on success. */
-int wc_decode_region(const char *path, int scale, int sx0, int sy0,
-                     int dstW, int dstH, uint32_t dst);
-
-/* Bake: decode `path`, take the square native window (cx,cy,side) [pixels], and
-   resample it to out_px x out_px RGB565 into PSRAM at `dst`. Uses a temporary
-   PSRAM scratch region (allocated above the current brk, freed before return).
-   Returns 1 on success. */
-int wc_bake(const char *path, int cx, int cy, int side, int out_px, uint32_t dst);
+/* Box-average the native rectangle (rx0,ry0,rw,rh) of the baseline JPEG `path` down to
+   outW x outH RGB565 (row-major, stride outW*2) into PSRAM at byte offset `dst`. Decodes
+   at full resolution where it fits a bounded scratch (else a power-of-two descale), then
+   area-averages — smooth, not blocky. Uses temporary PSRAM scratch above the current brk,
+   freed before return. Returns 1 on success.
+   - whole-image thumbnail: wc_render(p, 0,0, W,H, tw,th, dst)
+   - square crop bake:      wc_render(p, cx,cy, side,side, 320,320, dst) */
+int wc_render(const char *path, int rx0, int ry0, int rw, int rh, int outW, int outH, uint32_t dst);
 
 #endif
