@@ -210,53 +210,43 @@ static double nice_step(double range, int target){
 	return s * mag;
 }
 
-/* One z-axis segment za..zb (the pole at x=0,y=0): spine + perpendicular ticks, plus the
-   arrowhead and "z" label when `top` (the segment that reaches s_zhi). The pole is split at the
-   box-centre height so the half nearer the camera can be drawn ON TOP of the surface and the far
-   half behind it — otherwise the surface overpaints the whole pole and it reads as a layer
-   *under* the model instead of passing through it. */
-static void zaxis_seg(double za, double zb, int top){
-	if(zb - za < 1e-9) return;
-	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
-	double zs = nice_step(s_zhi-s_zlo, 8);
-	if(top) arrow(0,0,za, 0,0,zb, C_AXIS); else linw(0,0,za, 0,0,zb, C_AXIS);
-	projw(0,0,za,&e0x,&e0y); projw(0,0,zb,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
-	for(double g=ceil(za/zs)*zs; g<=zb+1e-9; g+=zs){ if(fabs(g)<zs/4) continue; projw(0,0,g,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
-	if(top){ projw(0,0,s_zhi,&tx,&ty); blit_str(tx+4,ty-8,"z",C_LBL); }
-}
-
 /* Reference frame: a BIG ground grid plane + the y-axis spine (both gated by F2/show_plane),
-   plus the always-on x and z axes. Ticks are little perpendicular marks, not numbers. */
+   plus the always-on x axis. The z-axis is NOT here — it's drawn on top after the surface by
+   draw_zaxis(). Tick + grid spacing use nice_step so the count stays bounded no matter how big
+   the box gets (spherical can blow the box out to tens of units -> the old g+=1 loop drew
+   hundreds of ticks/grid-lines and tanked FPS). Cartesian's fixed -5..5 box -> step 1, unchanged. */
 static void draw_frame(void){
 	double zp = (s_zlo<=0.0 && 0.0<=s_zhi) ? 0.0 : s_zlo;
 	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
+	double xs = nice_step(X1-X0, 10), ys = nice_step(Y1-Y0, 10);
 
 	if(show_plane){
 		double Ex=2.5*v_hx, Ey=2.5*v_hy;                 /* a big floor, ~5x the data span */
 		double gx0=v_cx-Ex, gx1=v_cx+Ex, gy0=v_cy-Ey, gy1=v_cy+Ey;
-		for(double g=ceil(gx0); g<=gx1+1e-9; g+=1) linw(g,gy0,zp, g,gy1,zp, C_GRID);
-		for(double g=ceil(gy0); g<=gy1+1e-9; g+=1) linw(gx0,g,zp, gx1,g,zp, C_GRID);
+		for(double g=ceil(gx0/xs)*xs; g<=gx1+1e-9; g+=xs) linw(g,gy0,zp, g,gy1,zp, C_GRID);
+		for(double g=ceil(gy0/ys)*ys; g<=gy1+1e-9; g+=ys) linw(gx0,g,zp, gx1,g,zp, C_GRID);
 		arrow(0,Y0,zp, 0,Y1,zp, C_AXIS);                 /* y-axis spine (with the plane) */
 		projw(0,Y0,zp,&e0x,&e0y); projw(0,Y1,zp,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
-		for(double g=ceil(Y0); g<=Y1+1e-9; g+=1){ if(fabs(g)<0.5) continue; projw(0,g,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+		for(double g=ceil(Y0/ys)*ys; g<=Y1+1e-9; g+=ys){ if(fabs(g)<ys/4) continue; projw(0,g,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
 		projw(0,Y1,zp,&tx,&ty); blit_str(tx+4,ty-4,"y",C_LBL);
 	}
 	/* x-axis (always) */
 	arrow(X0,0,zp, X1,0,zp, C_AXIS);
 	projw(X0,0,zp,&e0x,&e0y); projw(X1,0,zp,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
-	for(double g=ceil(X0); g<=X1+1e-9; g+=1){ if(fabs(g)<0.5) continue; projw(g,0,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+	for(double g=ceil(X0/xs)*xs; g<=X1+1e-9; g+=xs){ if(fabs(g)<xs/4) continue; projw(g,0,zp,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
 	projw(X1,0,zp,&tx,&ty); blit_str(tx+4,ty-4,"x",C_LBL);
-	/* z-axis: only the FAR half here (behind the surface); the near half is painted on top
-	   afterwards by draw_zaxis_front(). v_sb>=0 (looking down) => the upper pole is nearer. */
-	double zc=(s_zlo+s_zhi)/2;
-	if(v_sb>=0.0) zaxis_seg(s_zlo, zc, 0);   /* upper half near -> lower (far) half drawn now */
-	else          zaxis_seg(zc, s_zhi, 1);
 }
-/* the camera-near half of the z-axis pole — drawn AFTER the surface so it overlays it */
-static void draw_zaxis_front(void){
-	double zc=(s_zlo+s_zhi)/2;
-	if(v_sb>=0.0) zaxis_seg(zc, s_zhi, 1);   /* upper half is near */
-	else          zaxis_seg(s_zlo, zc, 0);
+/* The z-axis pole at x=0,y=0: spine + perpendicular ticks + arrowhead + "z" label. Drawn AFTER
+   the surface (on top) so the filled surface can't overpaint it. Drawing it behind made it read
+   as a layer *under* the model; depth-splitting it broke concave shapes (it got cut off inside a
+   bowl). On-top is simple and consistent in both wireframe and shaded modes. */
+static void draw_zaxis(void){
+	int e0x,e0y,e1x,e1y,tx,ty; double pxx,pyy;
+	double zs = nice_step(s_zhi-s_zlo, 8);
+	arrow(0,0,s_zlo, 0,0,s_zhi, C_AXIS);
+	projw(0,0,s_zlo,&e0x,&e0y); projw(0,0,s_zhi,&e1x,&e1y); perp_of(e0x,e0y,e1x,e1y,&pxx,&pyy);
+	for(double g=ceil(s_zlo/zs)*zs; g<=s_zhi+1e-9; g+=zs){ if(fabs(g)<zs/4) continue; projw(0,0,g,&tx,&ty); tick_mark(tx,ty,pxx,pyy,C_TICK); }
+	projw(0,0,s_zhi,&tx,&ty); blit_str(tx+4,ty-8,"z",C_LBL);
 }
 
 static int qcmp(const void *a,const void *b){
@@ -332,7 +322,7 @@ static void render3(void){
 				if(j<NG-1 && s_ok[i][j+1]) line(s_sx[i][j],s_sy[i][j],s_sx[i][j+1],s_sy[i][j+1],c);
 			}
 		}
-		draw_zaxis_front();              /* near half of the z-axis pole, on top of the surface */
+		draw_zaxis();                    /* z-axis pole, on top of the surface (never cut off) */
 		blit_str(2,2, s_sph ? "F1 shade F2 plane F3 xyz  arrows R ESC"
 		                    : "F1 shade F2 plane F3 sphere  arrows R ESC", RGB(0x9a,0x8d,0x7a));
 		draw_buffer_spi(0, KF_CONTENT_Y + cur_y0, GW-1, KF_CONTENT_Y + cur_y0 + cur_h - 1,
