@@ -82,6 +82,7 @@ int main(void){
 		music_poll();          /* FLAC decode pump + player keys (no-op idle)  */
 		browser_poll();        /* Spineko keys + HTTP pump (no-op unless open) */
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
+		kapi_poll();           /* KAPI class-1 app: keys + per-frame callback (no-op idle) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
 		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }

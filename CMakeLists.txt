@@ -44,6 +44,7 @@ add_executable(kefyros
     port/html.c
     port/tls.c
     port/imgdec.c
+    port/kapi.c                    # KAPI class-1 app loader + vtable glue
     lib/miniz/miniz_tinfl.c        # streaming DEFLATE inflate for the PNG decoder
     ${APP_SRC}
     ${UI_SRC}
@@ -96,6 +97,7 @@ target_include_directories(kefyros PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/lib/bearssl/src   # inner.h, config.h (BearSSL internals)
     ${CMAKE_CURRENT_LIST_DIR}/lib/miniz         # miniz_tinfl.h (PNG inflate)
     ${CMAKE_CURRENT_LIST_DIR}/lib/nanosvg/src   # nanosvg.h, nanosvgrast.h (SVG)
+    ${CMAKE_CURRENT_LIST_DIR}/sdk               # kapi.h (the class-1 app ABI)
 )
 
 # pico-vfs filesystem support (SD-FAT only; no flash fs)

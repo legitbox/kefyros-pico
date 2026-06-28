@@ -39,6 +39,7 @@ static const desk_app_t dapps[] = {
 	{ "spineko",    "Spineko",     app_spineko_open,     9 },
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "help",       "Help",        app_help_open,        11 },
+	{ "demo",       "KAPI Demo",   app_demo_open,        12 },   /* class-1 .kx loader test */
 };
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */

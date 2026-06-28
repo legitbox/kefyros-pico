@@ -47,6 +47,10 @@
 #define LV_USE_DEMO_WIDGETS 0
 #define LV_BUILD_EXAMPLES 0
 
+/* Canvas widget: backs the KAPI windowed app surface (gfx->canvas). class-1 apps
+   draw into an RGB565 canvas buffer that LVGL composites with the topbar. */
+#define LV_USE_CANVAS 1
+
 /* Image decoders + POSIX filesystem so the wallpaper chooser can decode real
    files from /root/wallpapers on-device. Paths are drive-letter prefixed: the
    POSIX driver is mounted at 'A', so use e.g. "A:/root/wallpapers/x.jpg". */
