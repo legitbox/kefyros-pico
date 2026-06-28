@@ -38,10 +38,15 @@ static void (*s_on_key)(void*, int, int);         static void *s_on_key_ud;
 static void (*s_on_close)(void*);                 static void *s_on_close_ud;
 
 /* ===================== canvas implementation ===================== */
-struct kf_canvas_s { lv_obj_t *obj; uint16_t *buf; int w, h; };
+struct kf_canvas_s { lv_obj_t *obj; uint16_t *buf; int w, h, from_static; };
 #define MAXCANV 4
 static struct kf_canvas_s *s_canv[MAXCANV];
 static int s_ncanv;
+/* one windowed canvas backed by a STATIC buffer (up to 256x176) so it can never fail to
+   allocate / fragment the heap while the launcher screen is still resident. Bigger or
+   additional canvases fall back to malloc. */
+static uint16_t s_cbuf[256 * 176] __attribute__((aligned(4)));
+static int s_cbuf_used = 0;
 
 static inline lv_color_t c565(kf_color c){
     uint8_t r = (c >> 11) & 0x1f, g = (c >> 5) & 0x3f, b = c & 0x1f;
@@ -52,11 +57,12 @@ static kf_canvas g_canvas(int x, int y, int w, int h){
     if(s_ncanv >= MAXCANV || !s_scr) return NULL;
     struct kf_canvas_s *c = malloc(sizeof *c);
     if(!c) return NULL;
-    c->buf = malloc((size_t)w * h * 2);
-    if(!c->buf){ free(c); return NULL; }
+    if(!s_cbuf_used && (size_t)w * h <= sizeof s_cbuf / 2){ c->buf = s_cbuf; s_cbuf_used = 1; c->from_static = 1; }
+    else { c->buf = malloc((size_t)w * h * 2); if(!c->buf){ free(c); return NULL; } c->from_static = 0; }
     c->w = w; c->h = h;
     c->obj = lv_canvas_create(s_scr);
     lv_canvas_set_buffer(c->obj, c->buf, w, h, LV_COLOR_FORMAT_RGB565);
+    lv_obj_set_size(c->obj, w, h);                /* don't rely on image auto-size */
     lv_obj_set_pos(c->obj, x, y);
     s_canv[s_ncanv++] = c;
     return (kf_canvas)c;
@@ -65,7 +71,8 @@ static void g_canvas_destroy(kf_canvas h){
     struct kf_canvas_s *c = (struct kf_canvas_s*)h; if(!c) return;
     for(int i = 0; i < s_ncanv; i++) if(s_canv[i] == c){ s_canv[i] = s_canv[--s_ncanv]; break; }
     if(c->obj) lv_obj_delete(c->obj);
-    free(c->buf); free(c);
+    if(c->from_static) s_cbuf_used = 0; else free(c->buf);
+    free(c);
 }
 static void g_present(kf_canvas h){ struct kf_canvas_s *c = (void*)h; if(c) lv_obj_invalidate(c->obj); }
 
@@ -276,7 +283,7 @@ static const kapi G_KAPI = {
 static void kapi_teardown(void){
     if(s_on_close) s_on_close(s_on_close_ud);
     for(int i = 0; i < s_ncanv; i++) if(s_canv[i]){ if(s_canv[i]->obj) lv_obj_delete(s_canv[i]->obj);
-        free(s_canv[i]->buf); free(s_canv[i]); s_canv[i] = NULL; }
+        if(s_canv[i]->from_static) s_cbuf_used = 0; else free(s_canv[i]->buf); free(s_canv[i]); s_canv[i] = NULL; }
     s_ncanv = 0;
     s_on_frame = NULL; s_on_key = NULL; s_on_close = NULL;
     s_active = 0; s_exit = 0;
