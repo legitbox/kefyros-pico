@@ -242,22 +242,32 @@ void kf_wallpaper_show_raw(lv_obj_t *img, uint32_t off, int w, int h, const char
 	wp_apply_fit(img, w, h, fit);
 }
 
-/* idle screen-off: dim the LCD backlight to 0 after `screen_timeout` s of no keys,
-   restore it on the next key. Runs everywhere (not just the desktop). */
+/* idle screen-off: after `screen_timeout` s of no keys, kill BOTH backlights and drop to the
+   low-power sleep clock (150 MHz / 1.10 V); the next key restores them. Runs everywhere (not
+   just the desktop). The clock is restored (kf_clock_wake) to whatever tier was active before
+   sleeping, so idling inside a WiFi session wakes back at eco rather than normal. */
+static int s_idle_dimmed = 0;
+static void idle_wake(void){
+	if(!s_idle_dimmed) return;
+	kf_clock_wake();
+	uint8_t v=(uint8_t)deskconf_get_int("bkl",5); reg_write(REG_BKL,&v,1);
+	uint8_t k=(uint8_t)deskconf_get_int("bk2",2); reg_write(REG_BK2,&k,1);
+	s_idle_dimmed = 0;
+}
 static void idle_timer(lv_timer_t *t){
 	(void)t;
-	static int dimmed = 0;
 	int to = deskconf_get_int("screen_timeout", 60);   /* seconds; 0 = never */
-	if(to <= 0){
-		if(dimmed){ uint8_t v=(uint8_t)deskconf_get_int("bkl",5); reg_write(REG_BKL,&v,1); dimmed=0; }
-		return;
-	}
+	if(to <= 0){ idle_wake(); return; }
 	uint32_t idle = lv_tick_get() - uart_last_activity();
 	if(idle > (uint32_t)to*1000){
-		if(!dimmed){ uint8_t z=0; reg_write(REG_BKL,&z,1); dimmed=1; }
-	} else if(dimmed){
-		uint8_t v=(uint8_t)deskconf_get_int("bkl",5); reg_write(REG_BKL,&v,1); dimmed=0;
-	}
+		if(!s_idle_dimmed){
+			uint8_t z=0;
+			reg_write(REG_BKL,&z,1);          /* LCD backlight off */
+			reg_write(REG_BK2,&z,1);          /* keyboard backlight off */
+			kf_clock_sleep();                 /* 150 MHz / 1.10 V */
+			s_idle_dimmed = 1;
+		}
+	} else idle_wake();
 }
 
 /* (the status bar — mem/clock/battery — now lives in ui/topbar.c, always on top) */

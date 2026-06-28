@@ -142,16 +142,15 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
 	disp_resume_core1();
 }
 
-/* ===== Three clock tiers — the WHOLE OS uses exactly these. =====
-   A future deep low-power kf_clock_sleep() (display-off / WFI) would slot in below eco.
-
+/* ===== Clock tiers — the WHOLE OS uses these. =====
+     sleep   150 MHz @ 1.10 V /  75 MHz SPI  - idle screen-off; kf_clock_wake() restores prior
      eco     250 MHz @ 1.20 V / 100 MHz SPI  - WiFi-safe (radio won't associate >~270 MHz)
      normal  400 MHz @ 1.30 V / 100 MHz SPI  - the default the UI / apps / audio sit at
      boost   420 MHz @ 1.35 V / 105 MHz SPI  - max, one rung below the 440 MHz validated
                                                ceiling; callers drop back to normal on exit. */
 
 void kf_clock_eco(void){
-	if(s_cur_khz <= 250000u) return;
+	if(s_cur_khz == 250000u) return;   /* == not <=, so kf_clock_wake() can restore eco from 150 */
 	/* 250 MHz: under the ~270 MHz WiFi ceiling, faster than stock 150. The dynamic
 	   cyw43 bus divider (port/net.c) auto-tunes to ~31 MHz here. (Voltage 1.20 V was
 	   ruled out as the cause of the ECDSA-verify failure — it's a software issue.) */
@@ -169,6 +168,24 @@ void kf_clock_normal(void){
 void kf_clock_boost(void){
 	if(s_cur_khz == 420000u) return;
 	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);
+}
+/* Deep low-power sleep: 150 MHz @ the stock 1.10 V rail (the QMI flash divider stays valid
+   down here), panel SPI dialed to 75 MHz. The launcher's idle timer drops here (and kills
+   both backlights) after the screen-off timeout; kf_clock_wake() restores the tier we slept
+   FROM. WiFi is NOT babysat — the cyw43 bus divider isn't retuned, so the bus just slows with
+   the clock; if a live link survives that, bonus, otherwise the WiFi app reconnects on entry. */
+static uint32_t s_pre_sleep_khz = 0;
+void kf_clock_sleep(void){
+	if(s_cur_khz == 150000u) return;
+	s_pre_sleep_khz = s_cur_khz;
+	clock_apply(150000u, VREG_VOLTAGE_1_10, 75000000u, false);
+}
+void kf_clock_wake(void){
+	if(s_cur_khz != 150000u) return;             /* only meaningful when actually asleep */
+	uint32_t k = s_pre_sleep_khz ? s_pre_sleep_khz : 400000u;
+	if(k >= 420000u)      kf_clock_boost();
+	else if(k <= 250000u) kf_clock_eco();
+	else                  kf_clock_normal();
 }
 uint32_t kf_clock_khz(void){ return clock_get_hz(clk_sys) / 1000u; }
 
