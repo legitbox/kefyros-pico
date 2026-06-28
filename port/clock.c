@@ -81,8 +81,9 @@ static void qmi_set_flash_div(uint32_t sys_hz){
 }
 
 void clock_init(void){
-	/* 1) Core rail at 1.20 V — enough for the 250 MHz default. kf_clock_boost() raises it
-	 *    to 1.30 V before stepping up to 400 MHz, so we don't hold the high rail at idle. */
+	/* 1) Core rail at 1.20 V — enough for the 250 MHz cold-boot clock. kf_clock_normal()
+	 *    and kf_clock_boost() raise it (to 1.30 / 1.35 V) when stepping up, so we don't
+	 *    hold a high rail at idle. */
 	vreg_set_voltage(VREG_VOLTAGE_1_20);
 	sleep_ms(2);                         /* let the regulator settle */
 
@@ -140,31 +141,33 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
 	disp_resume_core1();
 }
 
-void kf_clock_boost(void){
-	if(s_cur_khz >= 400000u) return;
-	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, true);
-}
-/* Steady-state UI clock: 400 MHz / 100 MHz SPI (raised from 360/90 — the panel was
-   validated clean to 110 MHz on the Screen Test, and 400 is the same 1.30 V rail we
-   already run FLAC at). WARM ramp from the 250 MHz cold-boot clock avoids the cold-boot
-   400 marginality. This is the default the whole UI + Game Boy return to. */
-void kf_clock_ui(void){
-	if(s_cur_khz == 400000u) return;
-	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, 400000u > s_cur_khz);
-}
-/* Calculator-only max: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One rung below this
-   chip's validated 440 MHz ceiling (480/500 died even at 1.60 V), one voltage notch above
-   the 400/1.30 UI. Held only while the calc app is open; kf_clock_ui() restores 400/100. */
-void kf_clock_calc(void){
-	if(s_cur_khz == 420000u) return;
-	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);
-}
+/* ===== Three clock tiers — the WHOLE OS uses exactly these. =====
+   A future deep low-power kf_clock_sleep() (display-off / WFI) would slot in below eco.
+
+     eco     250 MHz @ 1.20 V / 100 MHz SPI  - WiFi-safe (radio won't associate >~270 MHz)
+     normal  400 MHz @ 1.30 V / 100 MHz SPI  - the default the UI / apps / audio sit at
+     boost   420 MHz @ 1.35 V / 105 MHz SPI  - max, one rung below the 440 MHz validated
+                                               ceiling; callers drop back to normal on exit. */
+
 void kf_clock_eco(void){
 	if(s_cur_khz <= 250000u) return;
 	/* 250 MHz: under the ~270 MHz WiFi ceiling, faster than stock 150. The dynamic
 	   cyw43 bus divider (port/net.c) auto-tunes to ~31 MHz here. (Voltage 1.20 V was
 	   ruled out as the cause of the ECDSA-verify failure — it's a software issue.) */
 	clock_apply(250000u, VREG_VOLTAGE_1_20, 100000000u, false);
+}
+/* Steady-state default the whole UI returns to. main() WARM-ramps here from the 250 MHz
+   cold-boot clock (cold-boot 400 is marginal). Panel validated clean to 110 MHz SPI. */
+void kf_clock_normal(void){
+	if(s_cur_khz == 400000u) return;
+	clock_apply(400000u, VREG_VOLTAGE_1_30, 100000000u, 400000u > s_cur_khz);
+}
+/* Max: 420 MHz @ 1.35 V -> SPI = 420/4 = 105 MHz. One rung below this chip's validated
+   440 MHz ceiling (480/500 died even at 1.60 V), one voltage notch above normal. Held
+   only while an app needs the headroom (the Calculator); the app restores normal on exit. */
+void kf_clock_boost(void){
+	if(s_cur_khz == 420000u) return;
+	clock_apply(420000u, VREG_VOLTAGE_1_35, 105000000u, 420000u > s_cur_khz);
 }
 uint32_t kf_clock_khz(void){ return clock_get_hz(clk_sys) / 1000u; }
 
