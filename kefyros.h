@@ -128,10 +128,17 @@ uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
 void kf_audio_init(void);                 /* set up PWM slice 5 + DMA (call once at boot) */
 void kf_audio_start(int hz);              /* begin playback at sample rate hz (<=48000) */
 void kf_audio_stop(void);                 /* stop + silence */
+void kf_audio_clock_change_begin(void);   /* tristate speaker pins across a clk_sys change (anti-pop) */
+void kf_audio_clock_change_end(void);     /* restore speaker pins after the clock settles */
 void kf_audio_flush(void);                /* drop buffered audio + reset shaper (after a seek) */
 int  kf_audio_running(void);
 int  kf_audio_space(void);                /* free stereo frames in the ring */
 int  kf_audio_buffered(void);             /* frames queued but not yet played (latency gauge) */
+
+/* OS sound effects: play /kefyros/sfx/<name>.wav on a UI event (ui/sfx.c). Silent if the
+   file is missing, effects are disabled (deskconf "sfx"), or music owns the speaker. */
+void kf_sfx_play(const char *name);
+void sfx_poll(void);                       /* pump an in-flight effect; call every main loop */
 int  kf_audio_write_s32(const int32_t *stereo, int frames); /* full-scale L,R; frames accepted */
 int  kf_audio_write(const int16_t *stereo, int frames);     /* legacy 16-bit L,R; frames accepted */
 

@@ -57,6 +57,8 @@ int main(void){
 	   boot lottery that booting high caused. WiFi apps drop back to 250 as needed. */
 	kf_clock_normal();
 
+	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
+
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */
 		calc_poll();           /* raw-key app pumps (no-op unless grabbed)     */
@@ -67,6 +69,7 @@ int main(void){
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
 		cakespark_poll();      /* CakeSpark REPL keys (no-op unless open) */
 		morse_poll();          /* Morse keys + TX keyer/audio state machine (no-op idle) */
+		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);

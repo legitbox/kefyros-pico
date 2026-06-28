@@ -47,6 +47,8 @@
 extern void kf_psram_reclock(void);
 extern void disp_pause_core1(void);
 extern void disp_resume_core1(void);
+extern void kf_audio_clock_change_begin(void);   /* tristate speaker pins across the switch (anti-pop) */
+extern void kf_audio_clock_change_end(void);
 
 /* Keep the XIP/QSPI read clock at or below this. 90 MHz (clk_sys/4 @ 360 MHz)
  * is safe for the W25Q-class parts these boards ship with. */
@@ -130,6 +132,7 @@ static void reclock_peripherals(void){
 
 static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool up){
 	disp_pause_core1();                          /* no SPI blit in flight during the switch */
+	kf_audio_clock_change_begin();               /* mute the speaker across the PLL relock (anti-pop) */
 	if(v > VREG_VOLTAGE_1_30) vreg_disable_voltage_limit();   /* allow 1.35+ V (RP2350) */
 	if(up){ vreg_set_voltage(v); sleep_ms(2); }  /* rail up before clock up */
 	if(set_sys_clock_khz(khz, false)){
@@ -139,6 +142,7 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
 		if(!up) vreg_set_voltage(v);             /* rail down only after a good downclock */
 	}
 	/* if the clock change failed we keep the (higher/safe) voltage — never undervolt */
+	kf_audio_clock_change_end();
 	disp_resume_core1();
 }
 

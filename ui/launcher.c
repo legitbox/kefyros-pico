@@ -387,7 +387,7 @@ static void cell_click_cb(lv_event_t *e){          /* short ENTER: launch or dro
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
 	if(carrying >= 0){ drop_at(i); return; }
 	int a = slot_app[gslot(i)];
-	if(a >= 0 && dapps[a].open) dapps[a].open();
+	if(a >= 0 && dapps[a].open){ kf_sfx_play("open"); dapps[a].open(); }
 }
 static void cell_long_cb(lv_event_t *e){           /* long ENTER: pick up */
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -530,7 +530,7 @@ void launcher_init(void){
    group pointer for the rest of this dispatch. */
 static void del_group_cb(void *g){ lv_group_delete((lv_group_t*)g); }
 
-void kf_back_to_launcher(void){ launcher_show(); }
+void kf_back_to_launcher(void){ kf_sfx_play("back"); launcher_show(); }
 
 void launcher_show(void){
 	/* whatever app screen is active is about to be abandoned — capture it so we

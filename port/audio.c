@@ -144,6 +144,20 @@ static void pick_resolution(void){
 	pwm_set_wrap(AUDIO_SLICE, pwm_top);
 }
 
+/* Park the speaker pins (high-Z) across a clk_sys change, then restore them. During a PLL
+   relock, set_sys_clock_khz() briefly runs clk_sys off the ~12 MHz reference, which drops
+   the PWM carrier from ~98 kHz into the audible band for a few ms — an audible "pop"/chirp
+   through the amp. Tristating the pins for that window keeps the burst off the speaker; the
+   RC reconstruction filter holds its ~mid-rail charge meanwhile. Called by clock_apply(). */
+void kf_audio_clock_change_begin(void){
+	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_R_PIN, GPIO_IN);
+	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_L_PIN, GPIO_IN);
+}
+void kf_audio_clock_change_end(void){
+	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_PWM);   /* slice keeps running; pin resumes at 50% */
+	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
+}
+
 void kf_audio_start(int hz){
 	if(hz < 8000) hz = 8000; else if(hz > 48000) hz = 48000;
 	if(running){ dma_channel_abort(dch); running = 0; }
