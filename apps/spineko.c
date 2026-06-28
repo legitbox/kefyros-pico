@@ -329,8 +329,9 @@ static const char START_HTML[] =
 	"<li><a href=\"http://textfiles.com/\">textfiles.com</a></li>"
 	"</ul>"
 	"<hr>"
-	"<p>HTTP and HTTPS both work (TLS 1.2 via BearSSL, no cert check). Pages render as "
-	"amber hypertext with inline JPEG/PNG/SVG images (downscaled); scripts/styling ignored.</p>";
+	"<p>HTTP and HTTPS both work (TLS 1.2 via BearSSL, no cert check). Pages render as a "
+	"plain web page (white background, black text, blue links) with inline JPEG/PNG/SVG "
+	"images (downscaled); scripts/styling ignored.</p>";
 
 static void render_start_page(void){
 	if(s_arena==0xFFFFFFFFu) return;
