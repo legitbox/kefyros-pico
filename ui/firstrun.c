@@ -11,9 +11,10 @@
 //   EMPTY       - card mounts but none of our assets exist -> "unzip the service pack onto it"
 //   INCOMPLETE  - some assets present, some missing       -> "re-service the card"
 //
-// The gate is no longer a dead end: it offers a 3-way menu (Up/Down to move, Enter to pick) so the
+// The gate is no longer a dead end: it offers a menu (Up/Down to move, Enter to pick) so the
 // user is never stuck if they don't have a serviced card handy —
 //   CONTINUE  - boot into an SD-less environment anyway (icons/SFX/Help just won't load)
+//   RESTART   - hard-reboot the device (watchdog reset)
 //   SHUTDOWN  - power the device off (STM32 southbridge cuts the rail)
 //   BOOTSEL   - drop into the UF2 bootloader to re-flash firmware
 // Keys here are handled manually (drained straight from the UART queue) rather than via the LVGL
@@ -63,10 +64,11 @@ static int sd_health(int *miss, const char **first){
 	return SD_INCOMPLETE;
 }
 
-/* The three escape hatches, in menu order. */
-enum { OPT_CONTINUE = 0, OPT_SHUTDOWN, OPT_BOOTSEL, NOPT };
+/* The escape hatches, in menu order. */
+enum { OPT_CONTINUE = 0, OPT_RESTART, OPT_SHUTDOWN, OPT_BOOTSEL, NOPT };
 static const char *OPT_LABEL[NOPT] = {
 	"Continue without SD card",
+	"Restart",
 	"Shut down",
 	"BOOTSEL (re-flash firmware)",
 };
@@ -110,8 +112,11 @@ void kf_sd_gate(void){
 	}
 
 	lv_obj_t *ver = lv_label_create(scr);
+	lv_label_set_long_mode(ver, LV_LABEL_LONG_WRAP);
+	lv_obj_set_width(ver, LCD_W - 36);
+	lv_obj_set_style_text_align(ver, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_set_style_text_color(ver, KF_TEXT_DIM, 0);
-	lv_label_set_text(ver, "Up/Down to choose - Enter to select   |   Kefyros " KF_VERSION);
+	lv_label_set_text(ver, "Up/Down to choose - Enter to select\nKefyros " KF_VERSION);
 
 	lv_screen_load(scr);
 
@@ -129,6 +134,7 @@ void kf_sd_gate(void){
 			else if(key == DK_ENTER){
 				switch(sel){
 				case OPT_CONTINUE: lv_obj_delete(scr); return;  /* boot SD-less */
+				case OPT_RESTART:  kf_reboot();    break;       /* no return */
 				case OPT_SHUTDOWN: kf_poweroff();  break;       /* no return */
 				case OPT_BOOTSEL:  kf_bootsel();   break;       /* no return */
 				}
