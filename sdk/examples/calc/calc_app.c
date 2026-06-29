@@ -20,7 +20,8 @@ static kf_font   F;
 static int eval_num(const char *expr, double *out){
     cnode *n = calc_parse(expr);
     if(!n) return 0;
-    int ok = 0; double v = calc_eval(n, &ok);
+    int ok = 1;                      /* calc_eval only CLEARS ok on error; seed it to 1 */
+    double v = calc_eval(n, &ok);
     cn_free(n);
     if(ok) *out = v;
     return ok;
