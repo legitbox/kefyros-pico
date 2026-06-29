@@ -10,6 +10,15 @@
 //   NO_CARD     - no card, wrong format, or unreadable  -> "insert a FAT32 SD card"
 //   EMPTY       - card mounts but none of our assets exist -> "unzip the service pack onto it"
 //   INCOMPLETE  - some assets present, some missing       -> "re-service the card"
+//
+// The gate is no longer a dead end: it offers a 3-way menu (Up/Down to move, Enter to pick) so the
+// user is never stuck if they don't have a serviced card handy —
+//   CONTINUE  - boot into an SD-less environment anyway (icons/SFX/Help just won't load)
+//   SHUTDOWN  - power the device off (STM32 southbridge cuts the rail)
+//   BOOTSEL   - drop into the UF2 bootloader to re-flash firmware
+// Keys here are handled manually (drained straight from the UART queue) rather than via the LVGL
+// group/indev, because the indev's ESC->launcher and POWER->power-menu shortcuts target screens
+// that don't exist yet this early in boot. Inserting a healthy card still auto-continues.
 #include "../kefyros.h"
 #include "theme.h"
 #include "pico/stdlib.h"
@@ -54,6 +63,14 @@ static int sd_health(int *miss, const char **first){
 	return SD_INCOMPLETE;
 }
 
+/* The three escape hatches, in menu order. */
+enum { OPT_CONTINUE = 0, OPT_SHUTDOWN, OPT_BOOTSEL, NOPT };
+static const char *OPT_LABEL[NOPT] = {
+	"Continue without SD card",
+	"Shut down",
+	"BOOTSEL (re-flash firmware)",
+};
+
 void kf_sd_gate(void){
 	int miss; const char *first;
 	kfs_mount();                                  /* (idempotent) ensure we've tried to mount */
@@ -84,17 +101,47 @@ void kf_sd_gate(void){
 	lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_set_style_text_color(hint, KF_TEXT_MUTED, 0);
 
+	/* The 3-way escape menu. Each row is a label; the selected row is bright amber with a "> "
+	   marker, the rest dim. Navigated manually below (no LVGL group this early in boot). */
+	lv_obj_t *opt[NOPT];
+	for(int i = 0; i < NOPT; i++){
+		opt[i] = lv_label_create(scr);
+		lv_obj_set_style_text_font(opt[i], KF_FONT, 0);
+	}
+
 	lv_obj_t *ver = lv_label_create(scr);
 	lv_obj_set_style_text_color(ver, KF_TEXT_DIM, 0);
-	lv_label_set_text(ver, "Kefyros " KF_VERSION);
+	lv_label_set_text(ver, "Up/Down to choose - Enter to select   |   Kefyros " KF_VERSION);
 
 	lv_screen_load(scr);
 
+	int sel = OPT_CONTINUE;
+	int drawn = -1;                               /* force first paint of the selection */
 	uint64_t last = 0;
 	int shown = -1;
 	for(;;){
 		uart_poll();
-		uint8_t st, key; while(uart_pop_key(&st, &key)) { (void)st; (void)key; }  /* drain */
+		uint8_t st, key;
+		while(uart_pop_key(&st, &key)){
+			if(st == KS_RELEASE) continue;        /* act on press/repeat only */
+			if(key == DK_UP)         sel = (sel + NOPT - 1) % NOPT;
+			else if(key == DK_DOWN)  sel = (sel + 1) % NOPT;
+			else if(key == DK_ENTER){
+				switch(sel){
+				case OPT_CONTINUE: lv_obj_delete(scr); return;  /* boot SD-less */
+				case OPT_SHUTDOWN: kf_poweroff();  break;       /* no return */
+				case OPT_BOOTSEL:  kf_bootsel();   break;       /* no return */
+				}
+			}
+		}
+
+		if(sel != drawn){                         /* repaint selection highlight */
+			drawn = sel;
+			for(int i = 0; i < NOPT; i++){
+				lv_label_set_text_fmt(opt[i], "%s%s", i == sel ? "> " : "  ", OPT_LABEL[i]);
+				lv_obj_set_style_text_color(opt[i], i == sel ? KF_AMBER_BR : KF_TEXT_DIM, 0);
+			}
+		}
 
 		uint64_t now = time_us_64();
 		if(now - last > 500000ull){               /* re-check ~2x/sec */
@@ -106,8 +153,8 @@ void kf_sd_gate(void){
 				shown = s;
 				if(s == SD_NO_CARD){
 					lv_label_set_text(msg, "No SD card found.");
-					lv_label_set_text(hint, "Insert a FAT32-formatted SD card to start Kefyros.\n"
-					                        "(Already inserted? It may be the wrong format or unreadable.)");
+					lv_label_set_text(hint, "Insert a FAT32-formatted SD card to start Kefyros,\n"
+					                        "or choose an option below.");
 				} else if(s == SD_EMPTY){
 					lv_label_set_text(msg, "SD card is not set up.");
 					lv_label_set_text(hint, "Unzip kefyros_sd.zip (the SD service pack) onto the\n"
