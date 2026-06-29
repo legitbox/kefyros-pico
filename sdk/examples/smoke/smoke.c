@@ -20,31 +20,29 @@ int app_main(const kapi *k){
     kapi_rt_init(k);                       /* arm the stdlib before any malloc/printf/math */
 
     int w, h; k->gfx->screen_size(&w, &h);
-    C = k->gfx->canvas(0, 0, w, h);
+    /* Small canvas (must fit the 64 KB arena's free space — a full-screen 320x320 = 200 KB
+       can't be carved and the heap fallback fails while the launcher is resident). */
+    int cw = w, ch = 96;                          /* 320x96x2 = 60 KB, fits the arena */
+    C = k->gfx->canvas(0, 28, cw, ch);            /* just below the topbar */
     k->gfx->clear(C, 0x0000);
     F = k->txt->open("mono", 13);
 
     char line[80];
 
-    snprintf(line, sizeof line, "sin(1)=%.5f  pow(2,10)=%.0f", sin(1.0), pow(2.0, 10.0));
-    k->txt->draw(C, F, 8, 20, line, 0xFFFF);
+    snprintf(line, sizeof line, "sin1=%.5f pow=%.0f sqrt2=%.4f", sin(1.0), pow(2.0, 10.0), sqrt(2.0));
+    k->txt->draw(C, F, 6, 6, line, 0xFFFF);
 
-    snprintf(line, sizeof line, "sqrt(2)=%g  M_PI=%g", sqrt(2.0), M_PI);
-    k->txt->draw(C, F, 8, 40, line, 0xFFFF);
+    snprintf(line, sizeof line, "PI=%.5f e=%.5f ln(e)=%.3f", M_PI, exp(1.0), log(M_E));
+    k->txt->draw(C, F, 6, 26, line, 0xFFFF);
 
-    snprintf(line, sizeof line, "exp(1)=%.6g  log(M_E)=%.3f", exp(1.0), log(M_E));
-    k->txt->draw(C, F, 8, 60, line, 0xFFFF);
-
-    char *buf = malloc(48);
-    strcpy(buf, "malloc + strcpy + free: ok");
-    k->txt->draw(C, F, 8, 84, buf, 0xF420);
-    free(buf);
-
+    char *buf = malloc(32);
+    int mok = 0;
+    if(buf){ strcpy(buf, "malloc ok"); mok = (strcmp(buf, "malloc ok") == 0); free(buf); }
     double d = strtod("3.14159", 0);
-    snprintf(line, sizeof line, "strtod=%.5f  int=%d  hex=%x", d, 42, 0xBEEF);
-    k->txt->draw(C, F, 8, 104, line, 0xFFFF);
+    snprintf(line, sizeof line, "%s strtod=%.4f d=%d x=%x", mok ? "malloc ok" : "MALLOC FAIL", d, 42, 0xBEEF);
+    k->txt->draw(C, F, 6, 46, line, mok ? 0xF420 : 0xF800);
 
-    k->txt->draw(C, F, 8, 140, "smoke.kx OK  -  ESC to quit", 0xCE59);
+    k->txt->draw(C, F, 6, 70, "smoke.kx OK  -  ESC to quit", 0xCE59);
     k->gfx->present(C);
 
     k->sys->on_key(on_key, 0);
