@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define KAPI_ABI    1
-#define KAPI_MINOR  0
+#define KAPI_MINOR  1     /* minor 1: appended k_math (kernel libm) to the root table */
 
 /* ===== scalar types ===== */
 typedef uint16_t kf_color;      /* RGB565, panel-native                              */
@@ -194,6 +194,29 @@ struct k_time {
   uint32_t (*now_unix)(void);                      /* SNTP-synced wall clock               */
 };
 
+/* k_math — the C math library, forwarded to the kernel's already-linked libm. Lets an app
+ * #include <math.h> (via the SDK shim) and call sin()/pow()/etc. without bundling libm into
+ * its image. Trivial ops (fabs/fmin/fmax/copysign/isnan/isfinite) stay app-side in the shim;
+ * only the polynomial-approximation transcendentals + float<->text live here. (minor 1) */
+struct k_math {
+  double (*sin)(double);   double (*cos)(double);   double (*tan)(double);
+  double (*asin)(double);  double (*acos)(double);  double (*atan)(double);
+  double (*atan2)(double, double);
+  double (*sinh)(double);  double (*cosh)(double);  double (*tanh)(double);
+  double (*asinh)(double); double (*acosh)(double); double (*atanh)(double);
+  double (*exp)(double);   double (*expm1)(double);
+  double (*log)(double);   double (*log1p)(double); double (*log10)(double); double (*log2)(double);
+  double (*pow)(double, double);
+  double (*sqrt)(double);  double (*cbrt)(double);  double (*hypot)(double, double);
+  double (*fmod)(double, double);
+  double (*floor)(double); double (*ceil)(double);  double (*round)(double); double (*trunc)(double);
+  double (*lgamma)(double); double (*tgamma)(double);
+  double (*erf)(double);   double (*erfc)(double);
+  /* float <-> text — the heavy libc bits (newlib's float printf/strtod), kept kernel-side */
+  int    (*fmt_double)(char* out, int n, double v, int prec, char fmt);  /* fmt = 'f'|'g'|'e' */
+  double (*parse_double)(const char* s, char** end);                     /* strtod            */
+};
+
 /* ===================================================================== */
 /* Layer 1 — productivity sugar (may be NULL)                            */
 /* ===================================================================== */
@@ -241,6 +264,8 @@ typedef struct kapi {
   const struct k_ui   *ui;
   const struct k_http *http;
   const struct k_doc  *doc;
+  /* ---- appended at minor 1 (after doc, so minor-0 offsets are unchanged) ---- */
+  const struct k_math *math;   /* C math library (kernel libm) — never NULL on minor>=1 */
 } kapi;
 
 /* The app's entry point. Return value is the exit code. */

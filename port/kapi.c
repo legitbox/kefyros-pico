@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -258,6 +259,17 @@ static void   im_to_canvas(kf_img i, kf_canvas c, int x, int y){ (void)i;(void)c
 static void   im_free(kf_img i){ (void)i; }
 static kf_err im_encode_file(const char *p, const kf_color *px, int w, int h){ (void)p;(void)px;(void)w;(void)h; return KF_EUNSUPP; }
 
+/* ===================== math (forward to kernel libm) ===================== */
+/* Transcendentals are referenced directly (signature double(double[,double])). Only the
+   float<->text helpers need a wrapper, since they shape a printf format / call strtod. */
+static int mm_fmt_double(char *out, int n, double v, int prec, char fmt){
+    if(fmt != 'f' && fmt != 'e' && fmt != 'g') fmt = 'g';
+    if(prec < 0) prec = 6;
+    char spec[8]; snprintf(spec, sizeof spec, "%%.%d%c", prec, fmt);
+    return snprintf(out, n, spec, v);
+}
+static double mm_parse_double(const char *s, char **end){ return strtod(s, end); }
+
 /* ===================== the vtable ===================== */
 static const struct k_sys  K_SYS  = { y_exit, y_on_frame, y_on_key, y_on_close, y_pump, y_perf, y_clock_hz,
     y_idle_policy, y_battery_pct, y_charging, y_get_brightness, y_get_volume, y_caps, y_rng, y_kernel_version,
@@ -276,11 +288,20 @@ static const struct k_fs   K_FS   = { f_open, f_read, f_write, f_seek, f_tell, f
 static const struct k_net  K_NET  = { n_connect, n_send, n_recv, n_status, n_close, n_resolve, n_online, n_rssi, n_ip };
 static const struct k_tls  K_TLS  = { tl_wrap, tl_handshake, tl_send, tl_recv, tl_close };
 static const struct k_time K_TIME = { t_millis, t_micros, t_sleep_ms, t_now_unix };
+static const struct k_math K_MATH = {
+    sin, cos, tan, asin, acos, atan, atan2,
+    sinh, cosh, tanh, asinh, acosh, atanh,
+    exp, expm1, log, log1p, log10, log2, pow,
+    sqrt, cbrt, hypot, fmod, floor, ceil, round, trunc,
+    lgamma, tgamma, erf, erfc,
+    mm_fmt_double, mm_parse_double
+};
 
 static const kapi G_KAPI = {
     KAPI_ABI, KAPI_MINOR,
     &K_SYS, &K_MEM, &K_GFX, &K_TXT, &K_IMG, &K_IN, &K_AUD, &K_FS, &K_NET, &K_TLS, &K_TIME,
-    NULL, NULL, NULL   /* Layer 1 (ui/http/doc) not provided in v1 */
+    NULL, NULL, NULL,  /* Layer 1 (ui/http/doc) not provided in v1 */
+    &K_MATH            /* appended at minor 1 */
 };
 
 /* ===================== teardown / poll ===================== */
