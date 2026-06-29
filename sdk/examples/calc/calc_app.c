@@ -45,7 +45,8 @@ int app_main(const kapi *k){
         {"2+2", 4}, {"3*7+1", 22}, {"2^10", 1024}, {"5!", 120},
         {"1/3+1/6", 0.5}, {"sin(0)", 0}, {"cos(0)", 1},
         {"sqrt(2)", 1.4142135623730951}, {"exp(1)", 2.718281828459045},
-        {"log(exp(1))", 1}, {"atan(1)*4", 3.141592653589793},
+        {"ln(exp(1))", 1}, {"log(1000)", 3},     /* ln = natural, log = log10 */
+        {"atan(1)*4", 3.141592653589793},
     };
     int N = (int)(sizeof T / sizeof T[0]), pass = 0;
     for(int i = 0; i < N; i++){ double v; if(eval_num(T[i].e, &v) && fabs(v - T[i].want) < 1e-9) pass++; }
@@ -60,8 +61,9 @@ int app_main(const kapi *k){
     snprintf(line, sizeof line, "sqrt(2)=%s   1/3+1/6=%g", nb, (eval_num("1/3+1/6", &v), v));
     k->txt->draw(C, F, 4, 16, line, 0xFFFF);
 
-    snprintf(line, sizeof line, "2^10=%g  5!=%g  log(e)=%g",
-             (eval_num("2^10", &v), v), (eval_num("5!", &v), v), (eval_num("log(exp(1))", &v), v));
+    snprintf(line, sizeof line, "2^10=%g  5!=%g  ln(e)=%g  log(1k)=%g",
+             (eval_num("2^10", &v), v), (eval_num("5!", &v), v),
+             (eval_num("ln(exp(1))", &v), v), (eval_num("log(1000)", &v), v));
     k->txt->draw(C, F, 4, 30, line, 0xFFFF);
 
     k->gfx->present(C);
