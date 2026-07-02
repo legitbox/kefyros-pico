@@ -197,12 +197,22 @@ static int padc(int base, const kf_html_op *op){
 	int p = base + op->indent;
 	return p > DOC_W-60 ? DOC_W-60 : p;
 }
+/* container (BOX/END) nesting: labels/widgets parent to the innermost open box */
+#define BOX_DEPTH 8
+static lv_obj_t *bstk[BOX_DEPTH];   /* bstk[0] = doc */
+static uint8_t   brow[BOX_DEPTH];   /* parent is a flex ROW (chips: content-sized labels) */
+static int       bdepth, bskip;
+
 static lv_obj_t *mk_label(const char *txt, const lv_font_t *font, lv_color_t color, int pad_left){
-	lv_obj_t *l = lv_label_create(doc);
+	lv_obj_t *l = lv_label_create(bstk[bdepth]);
 	lv_obj_set_style_text_font(l, font, 0);
 	lv_obj_set_style_text_color(l, color, 0);
 	lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
-	lv_obj_set_width(l, DOC_W - pad_left);
+	if(brow[bdepth]){                       /* chip in a row: content-sized, capped */
+		lv_obj_set_width(l, LV_SIZE_CONTENT);
+		lv_obj_set_style_max_width(l, DOC_W-12, 0);
+	} else
+		lv_obj_set_width(l, lv_pct(100));
 	lv_obj_set_style_pad_left(l, pad_left, 0);
 	lv_obj_set_style_pad_ver(l, 1, 0);
 	lv_label_set_text(l, txt);
@@ -244,7 +254,7 @@ static void place_image(int i){
 	img_t *im = &imgs[i];
 	if(!im->w){ im->state = 1; return; }
 	int idx = lv_obj_get_index(im->w);
-	lv_obj_t *img = lv_image_create(doc);
+	lv_obj_t *img = lv_image_create(lv_obj_get_parent(im->w));  /* may be nested in a box */
 	lv_image_set_src(img, &im->dsc);
 	lv_obj_move_to_index(img, idx);     /* keep document order */
 	lv_obj_del(im->w);
@@ -300,6 +310,7 @@ static void render_ops(void){
 	/* body { background } tints the whole page area */
 	kf_css_style bs; kf_html_body_style(&bs);
 	lv_obj_set_style_bg_color(scr, (bs.flags & KF_CSS_F_BG) ? c565(bs.bg) : WEB_BG, 0);
+	bstk[0] = doc; brow[0] = 0; bdepth = 0; bskip = 0;
 	uint32_t n = kf_html_op_count();
 	int widgets=0, last_field=-1;
 	/* static: keep these big buffers OFF the stack — render runs inside LVGL's deep
@@ -358,10 +369,49 @@ static void render_ops(void){
 			widgets++; break;
 		}
 		case KF_OP_HR: {
-			lv_obj_t *h=lv_obj_create(doc); lv_obj_remove_style_all(h);
-			lv_obj_set_size(h, DOC_W-4, 2); lv_obj_set_style_bg_color(h, WEB_RULE, 0);
+			lv_obj_t *h=lv_obj_create(bstk[bdepth]); lv_obj_remove_style_all(h);
+			lv_obj_set_size(h, lv_pct(96), 2); lv_obj_set_style_bg_color(h, WEB_RULE, 0);
 			lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0); widgets++; break;
 		}
+		case KF_OP_BOX: {
+			if(bdepth >= BOX_DEPTH-1){ bskip++; break; }
+			int kind = op.index;
+			lv_obj_t *bx = lv_obj_create(bstk[bdepth]);
+			lv_obj_remove_style_all(bx);
+			lv_obj_clear_flag(bx, LV_OBJ_FLAG_SCROLLABLE);  /* only doc scrolls */
+			lv_obj_set_height(bx, LV_SIZE_CONTENT);
+			if(brow[bdepth] || kind==KF_BOX_TD){       /* cell / box inside a row */
+				lv_obj_set_width(bx, LV_SIZE_CONTENT);
+				lv_obj_set_flex_grow(bx, 1);
+			} else
+				lv_obj_set_width(bx, lv_pct(100));
+			lv_obj_set_flex_flow(bx, (kind==KF_BOX_ROW || kind==KF_BOX_TR)
+			                         ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_COLUMN);
+			lv_obj_set_style_pad_all(bx, kind==KF_BOX_CARD ? 4 : 2, 0);
+			lv_obj_set_style_pad_row(bx, 2, 0);
+			lv_obj_set_style_pad_column(bx, 5, 0);
+			if(op.sflags & KF_ST_BG){
+				lv_obj_set_style_bg_color(bx, c565(op.bg), 0);
+				lv_obj_set_style_bg_opa(bx, LV_OPA_COVER, 0);
+			}
+			if(op.border_w){
+				lv_obj_set_style_border_width(bx, op.border_w, 0);
+				lv_obj_set_style_border_color(bx, c565(op.border_c), 0);
+			} else if(kind==KF_BOX_TD){                /* legible tables by default */
+				lv_obj_set_style_border_width(bx, 1, 0);
+				lv_obj_set_style_border_color(bx, WEB_RULE, 0);
+			}
+			if(op.radius) lv_obj_set_style_radius(bx, op.radius, 0);
+			bdepth++;
+			bstk[bdepth] = bx;
+			brow[bdepth] = (kind==KF_BOX_ROW || kind==KF_BOX_TR) ? 1 : 0;
+			widgets++;
+			break;
+		}
+		case KF_OP_END:
+			if(bskip) bskip--;
+			else if(bdepth > 0) bdepth--;
+			break;
 		case KF_OP_LINK: {
 			lv_obj_t *l=mk_label(buf[0]?buf:"(link)", fnt,
 			    (op.sflags & KF_ST_FG) ? ctx : WEB_LINK, padc(2,&op));
@@ -494,6 +544,10 @@ static const char START_HTML[] =
 	"<li><a href=\"http://bettermotherfuckingwebsite.com/\">bettermotherfuckingwebsite (css test)</a></li>"
 	"<li><a href=\"http://textfiles.com/\">textfiles.com</a></li>"
 	"</ul>"
+	"<h2>Layout test</h2>"
+	"<table><tr><th>chip</th><th>sram</th><th>mhz</th></tr>"
+	"<tr><td>RP2350</td><td>520K</td><td>150</td></tr>"
+	"<tr><td>RP2040</td><td>264K</td><td>133</td></tr></table>"
 	"<hr>"
 	"<p class=\"warn\"><b>Security:</b> HTTPS uses TLS 1.2 (BearSSL) with <b>no certificate check</b>, so the "
 	"connection is encrypted but not verified - don't enter passwords or anything sensitive.</p>"

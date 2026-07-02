@@ -243,7 +243,8 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 			if(cr==1){ d->prop=CP_BG; d->v8=1; d->v16=col; }
 			else if(cr==2){ d->prop=CP_BG; d->v8=0; }
 		} else if(!strcmp(prop,"display")){
-			d->prop=CP_DISPLAY; d->v8 = !strcmp(val,"none");
+			d->prop=CP_DISPLAY;
+			d->v8 = !strcmp(val,"none") ? 1 : (strstr(val,"flex") ? 2 : 0);
 		} else if(!strcmp(prop,"visibility")){
 			d->prop=CP_DISPLAY; d->v8 = !strcmp(val,"hidden");
 		} else if(!strcmp(prop,"text-align")){
@@ -547,7 +548,9 @@ static void apply_decl(kf_css_style *st, const c_decl *d){
 		else st->flags &= (uint16_t)~KF_CSS_F_BG;
 		break;
 	case CP_DISPLAY:
-		if(d->v8) st->flags|=KF_CSS_F_HIDE; else st->flags&=(uint16_t)~KF_CSS_F_HIDE;
+		st->flags &= (uint16_t)~(KF_CSS_F_HIDE|KF_CSS_F_FLEX);
+		if(d->v8==1) st->flags|=KF_CSS_F_HIDE;
+		else if(d->v8==2) st->flags|=KF_CSS_F_FLEX;
 		break;
 	case CP_ALIGN:
 		st->flags &= (uint16_t)~(KF_CSS_F_CENTER|KF_CSS_F_RIGHT);

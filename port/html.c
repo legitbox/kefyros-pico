@@ -55,6 +55,7 @@ static int next_byte(void){
 #define ESTK 24
 static kf_css_elem  estk[ESTK];
 static kf_css_style sstk[ESTK];
+static uint8_t      eboxed[ESTK];   /* this element emitted a KF_OP_BOX */
 static int          es_n;
 static kf_css_style blk_style;
 static kf_css_style s_body_style;
@@ -274,13 +275,42 @@ static void style_feed(void){
 }
 
 /* ===== element stack (CSS) ===== */
+static void flush_block(void);
+static void emit(uint8_t kind, uint8_t depth, uint16_t index,
+                 const char *text, int tlen, const char *href, int hlen);
+
+/* pop the stack down to depth `to`, emitting KF_OP_END for every boxed element */
+static void pop_elems(int to){
+	while(es_n > to){
+		int i = --es_n;                      /* pop first: emit() then styles from the parent */
+		if(eboxed[i]){
+			flush_block();                   /* text inside the box flushes before it closes */
+			emit(KF_OP_END, 0, 0, NULL, 0, NULL, 0);
+		}
+	}
+}
+/* container tags worth a visual box (gated so bare divs don't explode widgets) */
+static int want_box(const char *name, const kf_css_style *st, const kf_css_style *par){
+	if(st->flags & KF_CSS_F_HIDE) return 0;
+	if(!strcmp(name,"table")) return KF_BOX_TABLE;
+	if(!strcmp(name,"tr"))    return KF_BOX_TR;
+	if(!strcmp(name,"td")||!strcmp(name,"th")) return KF_BOX_TD;
+	if(strcmp(name,"div")&&strcmp(name,"section")&&strcmp(name,"article")&&
+	   strcmp(name,"aside")&&strcmp(name,"nav")&&strcmp(name,"header")&&
+	   strcmp(name,"footer")&&strcmp(name,"main")&&strcmp(name,"figure")) return 0;
+	if(st->flags & KF_CSS_F_FLEX) return KF_BOX_ROW;
+	if(st->border_w) return KF_BOX_CARD;
+	if((st->flags & KF_CSS_F_BG) &&
+	   (!par || !(par->flags & KF_CSS_F_BG) || par->bg != st->bg)) return KF_BOX_CARD;
+	return 0;
+}
 static void elem_open(const char *name, const char *tag){
 	uint16_t th = kf_css_tag_hash(name);
-	/* lenient implicit closes: <p><p>, <li><li> */
+	/* lenient implicit closes: <p><p>, <li><li>, <td>a<td>b */
 	if(es_n>0 && estk[es_n-1].tag==th &&
 	   (!strcmp(name,"p") || !strcmp(name,"li") || !strcmp(name,"td") ||
 	    !strcmp(name,"th") || !strcmp(name,"tr")))
-		es_n--;
+		pop_elems(es_n-1);
 	if(es_n >= ESTK) return;                 /* too deep: styles freeze, pops still match */
 	/* static: keep attr scratch off the 4 KB core0 stack (parser is not reentrant) */
 	static char idb[48], clsb[128], styb[192];
@@ -301,13 +331,20 @@ static void elem_open(const char *name, const char *tag){
 	kf_css_apply(estk, es_n+1, has_sty?styb:NULL,
 	             es_n>0 ? &sstk[es_n-1] : NULL, &sstk[es_n]);
 	if(!strcmp(name,"center")) sstk[es_n].flags |= KF_CSS_F_CENTER;   /* legacy */
+	eboxed[es_n] = 0;
+	int bk = want_box(name, &sstk[es_n], es_n>0 ? &sstk[es_n-1] : NULL);
+	if(bk){
+		flush_block();                       /* preceding text stays outside the box */
+		emit_styled(KF_OP_BOX, 0, (uint16_t)bk, NULL, 0, NULL, 0, &sstk[es_n]);
+		eboxed[es_n] = 1;
+	}
 	es_n++;
 	if(!strcmp(name,"body")) s_body_style = sstk[es_n-1];
 }
 static void elem_close(const char *name){
 	uint16_t th = kf_css_tag_hash(name);
 	for(int i=es_n-1; i>=0; i--)
-		if(estk[i].tag==th){ es_n=i; break; }
+		if(estk[i].tag==th){ pop_elems(i); break; }
 }
 static int is_void_tag(const char *n){
 	return !strcmp(n,"br")||!strcmp(n,"hr")||!strcmp(n,"img")||!strcmp(n,"input")||
@@ -513,6 +550,7 @@ static uint32_t do_parse(uint32_t body_base, uint32_t len){
 		else push_char(c);
 	}
 	if(in_link) close_link();
+	pop_elems(0);                /* close any still-open boxes */
 	flush_block();
 	return op_count;
 }

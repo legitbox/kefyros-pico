@@ -25,8 +25,9 @@
 #define KF_CSS_F_STRIKE   0x0010
 #define KF_CSS_F_CENTER   0x0020
 #define KF_CSS_F_RIGHT    0x0040
-#define KF_CSS_F_BIG      0x0080   /* font-size >= ~17px -> the 20px font */
+#define KF_CSS_F_BIG      0x0080   /* font-size >= ~20px -> the 20px font */
 #define KF_CSS_F_NOBULLET 0x0100   /* list-style: none */
+#define KF_CSS_F_FLEX     0x0200   /* display: flex -> horizontal wrap row */
 
 typedef struct {
 	uint16_t flags;                /* KF_CSS_F_* */

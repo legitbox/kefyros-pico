@@ -18,8 +18,14 @@ enum {
 	KF_OP_LINK,    /* text=anchor text, href=absolute-or-relative URL */
 	KF_OP_IMG,     /* text=alt text */
 	KF_OP_FIELD,   /* text=current value, href=input name (single-line text input) */
-	KF_OP_SUBMIT   /* text=button label, href=form action URL */
+	KF_OP_SUBMIT,  /* text=button label, href=form action URL */
+	KF_OP_BOX,     /* open a container; op.index = KF_BOX_*; style = the container's */
+	KF_OP_END      /* close the innermost container */
 };
+/* KF_OP_BOX kinds (in op.index) */
+enum { KF_BOX_CARD=1,  /* bordered / own-background block -> padded card */
+       KF_BOX_ROW,     /* display:flex -> horizontal wrap row (nav chips) */
+       KF_BOX_TABLE, KF_BOX_TR, KF_BOX_TD };
 
 /* per-op CSS style bits (op.sflags) */
 #define KF_ST_FG       0x01   /* op.fg valid */
