@@ -15,6 +15,8 @@
 #include "lcdspi/lcdspi.h"
 #include "pico/stdlib.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* baked 6x12 font (ui/font_term6x12.c), indexed by internal glyph value */
 extern const uint8_t kf_font6x12[0x91][12];
