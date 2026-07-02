@@ -22,11 +22,13 @@
 #include "../ui/theme.h"
 #include "../port/http.h"
 #include "../port/html.h"
+#include "../port/css.h"
 #include "../port/imgdec.h"          /* JPEG/PNG/SVG -> downscaled RGB565, bounded RAM */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <malloc.h>
+#include <sys/stat.h>                /* mkdir for the SD stylesheet cache */
 
 /* heap headroom: stop building widgets before we exhaust it (the SDK's malloc PANICS
    on OOM — a huge page like Wikipedia would otherwise crash the whole OS mid-render). */
@@ -39,10 +41,17 @@ static uint32_t heap_free(void){
 }
 #define HEAP_FLOOR (48u*1024u)      /* keep this much free during render */
 
-/* PSRAM arena: [BODY | OPS | TEXT]. Allocated once, reused across page loads. */
-#define ARENA_SZ   (4u*1024*1024)
-#define BODY_MAX   (1536u*1024)
-#define OPS_MAX    (256u*1024)
+/* PSRAM arena: [BODY | OPS | TEXT | CSSRULES | CSSRAW]. Allocated once, reused
+   across page loads. CSSRULES = the parsed rule table; CSSRAW = scratch that
+   external stylesheets download into (the BODY region must stay intact for the
+   post-CSS re-parse). */
+#define ARENA_SZ    (4u*1024*1024)
+#define BODY_MAX    (1536u*1024)
+#define OPS_MAX     (256u*1024)
+#define TEXT_MAX    (1536u*1024)
+#define CSSRULE_MAX (64u*1024)
+#define CSSRAW_OFF  (BODY_MAX+OPS_MAX+TEXT_MAX+CSSRULE_MAX)
+#define CSSRAW_MAX  (ARENA_SZ-CSSRAW_OFF)
 static uint32_t s_arena = 0xFFFFFFFFu;
 
 #define DOC_W       (LCD_W - 16)
@@ -106,11 +115,18 @@ static char    hist[16][512];
 static int     hist_sp;
 
 static int     s_loading;
+static int     s_page_status;      /* HTTP status of the PAGE (css fetches clobber kf_http_status) */
 static int     edit_mode;          /* 0 none, 1 url bar, 2 field */
 static int     edit_field;
 static char    edit_buf[512];
 
+/* external-stylesheet fetch chain (runs between page load and render) */
+static int     css_active;         /* a stylesheet HTTP fetch is in flight */
+static int     css_i, css_n;
+static char    css_cachef[80];     /* SD cache path of the sheet being fetched */
+
 static void load_url(const char *url, int push);
+static void css_next(void);
 
 /* ---------- small helpers ---------- */
 static int is_focus_kind(int k){ return k==KF_OP_LINK || k==KF_OP_FIELD || k==KF_OP_SUBMIT; }
@@ -141,6 +157,28 @@ static void set_focus(int i){
 }
 
 /* ---------- rendering ---------- */
+static lv_color_t c565(uint16_t v){
+	uint8_t r=(uint8_t)((v>>11)<<3); r|=r>>5;
+	uint8_t g=(uint8_t)(((v>>5)&0x3f)<<2); g|=g>>6;
+	uint8_t b=(uint8_t)((v&0x1f)<<3); b|=b>>5;
+	return lv_color_make(r,g,b);
+}
+/* CSS extras that go on top of mk_label: background, alignment, decoration */
+static void post_style(lv_obj_t *l, const kf_html_op *op){
+	if(op->sflags & KF_ST_BG){
+		lv_obj_set_style_bg_color(l, c565(op->bg), 0);
+		lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+	}
+	if(op->sflags & KF_ST_CENTER)     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+	else if(op->sflags & KF_ST_RIGHT) lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_RIGHT, 0);
+	int dec = ((op->sflags&KF_ST_UNDER) ? LV_TEXT_DECOR_UNDERLINE : 0)
+	        | ((op->sflags&KF_ST_STRIKE) ? LV_TEXT_DECOR_STRIKETHROUGH : 0);
+	if(dec) lv_obj_set_style_text_decor(l, dec, 0);
+}
+static int padc(int base, const kf_html_op *op){
+	int p = base + op->indent;
+	return p > DOC_W-60 ? DOC_W-60 : p;
+}
 static lv_obj_t *mk_label(const char *txt, const lv_font_t *font, lv_color_t color, int pad_left){
 	lv_obj_t *l = lv_label_create(doc);
 	lv_obj_set_style_text_font(l, font, 0);
@@ -203,7 +241,7 @@ static void free_images(void){
 }
 /* advance the one-at-a-time background image fetch. called from browser_poll(). */
 static void images_pump(void){
-	if(s_loading) return;                         /* never compete with a page load */
+	if(s_loading || css_active) return;           /* never compete with a page/css load */
 	if(kf_net_state()!=KF_NET_ONLINE) return;
 	if(img_fetching){
 		int st = kf_http_state();
@@ -241,6 +279,9 @@ static void render_ops(void){
 	lv_obj_clean(doc);
 	free_images();              /* drop the previous page's decoded bitmaps */
 	foci_n=0; cur_focus=0; fld_n=0;
+	/* body { background } tints the whole page area */
+	kf_css_style bs; kf_html_body_style(&bs);
+	lv_obj_set_style_bg_color(scr, (bs.flags & KF_CSS_F_BG) ? c565(bs.bg) : WEB_BG, 0);
 	uint32_t n = kf_html_op_count();
 	int widgets=0, last_field=-1;
 	/* static: keep these big buffers OFF the stack — render runs inside LVGL's deep
@@ -253,22 +294,40 @@ static void render_ops(void){
 		if(heap_free() < HEAP_FLOOR){ low_mem=1; break; }   /* stop before OOM-panic */
 		kf_html_op op; kf_html_get_op(i, &op);
 		kf_html_read_text(op.text_off, op.text_len, buf, sizeof buf);
+		/* CSS overrides: color + font-size, on top of the per-kind defaults */
+		const lv_font_t *fnt = (op.sflags & KF_ST_BIG) ? KF_FONT_BIG : KF_FONT;
+		lv_color_t      ctx  = (op.sflags & KF_ST_FG) ? c565(op.fg) : WEB_TEXT;
 		switch(op.kind){
-		case KF_OP_H1: case KF_OP_H2:
-			mk_label(buf, KF_FONT_BIG, WEB_TEXT, 0); widgets++; break;
-		case KF_OP_H3: case KF_OP_H4: case KF_OP_H5: case KF_OP_H6:
-			mk_label(buf, KF_FONT, WEB_TEXT, 0); widgets++; break;
-		case KF_OP_P:
-			mk_label(buf, KF_FONT, WEB_TEXT, 0); widgets++; break;
-		case KF_OP_QUOTE:
-			mk_label(buf, KF_FONT, WEB_DIM, 8 + op.depth*8); widgets++; break;
-		case KF_OP_LI: {
-			if(op.index) snprintf(line,sizeof line,"%u. %s", op.index, buf);
-			else         snprintf(line,sizeof line,"- %s", buf);
-			mk_label(line, KF_FONT, WEB_TEXT, 6 + op.depth*10); widgets++; break;
+		case KF_OP_H1: case KF_OP_H2: {
+			lv_obj_t *l = mk_label(buf, KF_FONT_BIG, ctx, padc(0,&op));
+			post_style(l,&op); widgets++; break;
 		}
-		case KF_OP_PRE:
-			mk_label(buf, KF_FONT, WEB_PRE, 4); widgets++; break;
+		case KF_OP_H3: case KF_OP_H4: case KF_OP_H5: case KF_OP_H6:
+		case KF_OP_P: {
+			lv_obj_t *l = mk_label(buf, fnt, ctx, padc(0,&op));
+			post_style(l,&op); widgets++; break;
+		}
+		case KF_OP_QUOTE: {
+			lv_obj_t *l = mk_label(buf, fnt,
+			    (op.sflags & KF_ST_FG) ? ctx : WEB_DIM, padc(8 + op.depth*8,&op));
+			post_style(l,&op); widgets++; break;
+		}
+		case KF_OP_LI: {
+			const char *txt;
+			if(op.sflags & KF_ST_NOBULLET) txt = buf;         /* list-style: none */
+			else {
+				if(op.index) snprintf(line,sizeof line,"%u. %s", op.index, buf);
+				else         snprintf(line,sizeof line,"- %s", buf);
+				txt = line;
+			}
+			lv_obj_t *l = mk_label(txt, fnt, ctx, padc(6 + op.depth*10,&op));
+			post_style(l,&op); widgets++; break;
+		}
+		case KF_OP_PRE: {
+			lv_obj_t *l = mk_label(buf, KF_FONT,
+			    (op.sflags & KF_ST_FG) ? ctx : WEB_PRE, padc(4,&op));
+			post_style(l,&op); widgets++; break;
+		}
 		case KF_OP_IMG: {
 			snprintf(line,sizeof line,"[img: %s]", buf);
 			lv_obj_t *l = mk_label(line, KF_FONT, WEB_MUTED, 2);
@@ -285,7 +344,8 @@ static void render_ops(void){
 			lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0); widgets++; break;
 		}
 		case KF_OP_LINK: {
-			lv_obj_t *l=mk_label(buf[0]?buf:"(link)", KF_FONT, WEB_LINK, 2);
+			lv_obj_t *l=mk_label(buf[0]?buf:"(link)", fnt,
+			    (op.sflags & KF_ST_FG) ? ctx : WEB_LINK, padc(2,&op));
 			lv_obj_set_style_text_decor(l, LV_TEXT_DECOR_UNDERLINE, 0);
 			add_focus(l, KF_OP_LINK, &op, -1); widgets++; break;
 		}
@@ -313,9 +373,95 @@ static void render_ops(void){
 	if(foci_n>0){ cur_focus=0; style_focus(0,1); }
 }
 
+/* ---------- external stylesheets ----------
+   After the page HTML parses (pass A: <style> rules + <link> URLs collected),
+   each linked sheet is satisfied from the SD cache (/kefyros/spineko/css/, keyed
+   by URL hash) or fetched into the CSSRAW scratch region and cached. Then the
+   still-intact BODY re-parses (pass B) with the full rule set and renders. */
+#define CSS_CACHE_DIR "/kefyros/spineko/css"
+
+static void css_cache_path(const char *url, char *out, int cap){
+	uint32_t h = 2166136261u;
+	for(const char *p=url; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+	snprintf(out, cap, CSS_CACHE_DIR "/%08lx.css", (unsigned long)h);
+}
+static int css_feed_file(const char *path){
+	FILE *f = fopen(path, "rb");
+	if(!f) return 0;
+	static uint8_t b[512]; size_t n;
+	kf_css_sheet_begin();
+	while((n = fread(b,1,sizeof b,f)) > 0)
+		for(size_t i=0;i<n;i++) kf_css_sheet_feed(b[i]);
+	fclose(f);
+	kf_css_sheet_end();
+	return 1;
+}
+static void css_feed_psram(uint32_t base, uint32_t len){
+	static uint8_t b[512];
+	kf_css_sheet_begin();
+	for(uint32_t o=0; o<len; o+=sizeof b){
+		uint32_t w = len-o; if(w > sizeof b) w = sizeof b;
+		kf_psram_read(base+o, b, w);
+		for(uint32_t i=0;i<w;i++) kf_css_sheet_feed(b[i]);
+	}
+	kf_css_sheet_end();
+}
+static void css_save_cache(const char *path, uint32_t base, uint32_t len){
+	if(!len || len > 512u*1024) return;
+	FILE *f = fopen(path, "wb");
+	if(!f) return;
+	static uint8_t b[512];
+	for(uint32_t o=0; o<len; o+=sizeof b){
+		uint32_t w = len-o; if(w > sizeof b) w = sizeof b;
+		kf_psram_read(base+o, b, w);
+		if(fwrite(b,1,w,f) != w) break;
+	}
+	fclose(f);
+}
+static void render_page(void){
+	render_ops();
+	const char *title = kf_html_title();
+	char st[160];
+	snprintf(st, sizeof st, "%d  %s%s", s_page_status, title[0]?title:cur_url,
+	         kf_css_rule_count() ? "" : "  (no css)");
+	set_status(st);
+}
+static void css_done(void){
+	kf_http_set_arena(s_arena, BODY_MAX);        /* back to page fetches */
+	if(css_n > 0) kf_html_reparse();             /* body still in PSRAM: pass B */
+	render_page();
+}
+static void css_next(void){
+	while(css_i < css_n){
+		/* static: off the 4 KB core0 stack */
+		static char href[300], abs[600];
+		snprintf(href, sizeof href, "%s", kf_html_css_link(css_i));
+		css_i++;
+		if(!kf_url_resolve(cur_url, href, abs, sizeof abs)) continue;
+		css_cache_path(abs, css_cachef, sizeof css_cachef);
+		if(css_feed_file(css_cachef)) continue;                 /* SD cache hit */
+		if(kf_net_state()==KF_NET_ONLINE){
+			kf_http_set_arena(s_arena+CSSRAW_OFF, CSSRAW_MAX);
+			if(kf_http_get(abs)==0){
+				css_active = 1;
+				char b[48]; snprintf(b,sizeof b,"style %d/%d...",css_i,css_n);
+				set_status(b);
+				return;                                         /* resume in browser_poll */
+			}
+			kf_http_set_arena(s_arena, BODY_MAX);
+		}
+	}
+	css_done();
+}
+
 /* ---------- the built-in start page ---------- */
 static const char START_HTML[] =
 	"<title>Spineko</title>"
+	/* dogfood the CSS engine: if the start page renders colored, CSS works */
+	"<style>"
+	"h1{color:#c2185b} h2{color:#00695c}"
+	".warn{color:#a00000} .dim{color:#777}"
+	"</style>"
 	"<h1>Spineko</h1>"
 	"<p>Web browser. F1 = address bar, Up/Down = scroll, Left/Right = pick a link, "
 	"ENTER = follow, Backspace = back, ESC = quit.</p>"
@@ -329,10 +475,11 @@ static const char START_HTML[] =
 	"<li><a href=\"http://textfiles.com/\">textfiles.com</a></li>"
 	"</ul>"
 	"<hr>"
-	"<p><b>Security:</b> HTTPS uses TLS 1.2 (BearSSL) with <b>no certificate check</b>, so the "
+	"<p class=\"warn\"><b>Security:</b> HTTPS uses TLS 1.2 (BearSSL) with <b>no certificate check</b>, so the "
 	"connection is encrypted but not verified - don't enter passwords or anything sensitive.</p>"
-	"<p>Pages render as a plain web page (white background, black text, blue links) with inline "
-	"JPEG/PNG/SVG images (downscaled); scripts/styling ignored.</p>";
+	"<p class=\"dim\">Pages render with basic CSS (colors, backgrounds, alignment, display:none; "
+	"from style tags, linked sheets + SD cache, and style attributes) and inline "
+	"JPEG/PNG/SVG images (downscaled); scripts ignored.</p>";
 
 static void render_start_page(void){
 	if(s_arena==0xFFFFFFFFu) return;
@@ -367,6 +514,8 @@ static void load_url(const char *url, int push){
 	snprintf(cur_url, sizeof cur_url, "%s", full);
 	show_url();
 	lv_obj_clean(doc); foci_n=0; free_images();   /* cancel any in-flight image fetches */
+	css_active = 0; css_n = 0;                    /* cancel a pending stylesheet chain */
+	if(s_arena != 0xFFFFFFFFu) kf_http_set_arena(s_arena, BODY_MAX);
 	set_status("Loading...");
 	if(kf_net_state()!=KF_NET_ONLINE){ set_status("offline - open WiFi first"); s_loading=0; return; }
 	int rc = kf_http_get(full);
@@ -436,12 +585,11 @@ static void on_loaded(void){
 		set_status(st);
 		return;
 	}
-	kf_html_parse(base, len);
-	render_ops();
-	const char *title = kf_html_title();
-	char st[160];
-	snprintf(st, sizeof st, "%d  %s", kf_http_status(), title[0]?title:cur_url);
-	set_status(st);
+	s_page_status = kf_http_status();
+	kf_html_parse(base, len);                    /* pass A: <style> rules + <link> URLs */
+	css_i = 0; css_n = kf_html_css_link_count();
+	if(css_n > 0) css_next();                    /* may finish synchronously off the SD cache */
+	else render_page();
 }
 
 /* ---------- key handling (raw, grabbed) ---------- */
@@ -483,6 +631,19 @@ void browser_poll(void){
 		else { char b[48]; snprintf(b,sizeof b,"Loading... %lu KB",(unsigned long)(kf_http_body_len()/1024u)); set_status(b); }
 	}
 
+	if(css_active){             /* a linked stylesheet is downloading */
+		int st = kf_http_state();
+		if(st==KF_HTTP_DONE){
+			css_active = 0;
+			css_feed_psram(kf_http_body_base(), kf_http_body_len());
+			css_save_cache(css_cachef, kf_http_body_base(), kf_http_body_len());
+			css_next();
+		} else if(st==KF_HTTP_ERROR){
+			css_active = 0;
+			css_next();         /* skip this sheet, keep going */
+		}
+	}
+
 	images_pump();              /* background: fetch + decode inline images one at a time */
 
 	uint8_t stt, key;
@@ -521,6 +682,8 @@ static void on_del(lv_event_t *e){ (void)e;
 	free_images();             /* free decoded bitmaps before the screen tears down */
 	scr=NULL; doc=NULL; lbl_url=NULL; lbl_status=NULL;
 	kf_http_abort();
+	css_active=0; css_n=0;
+	kf_css_shutdown();         /* give the 4 KB rule index back to the heap */
 	kf_grab_input(0);
 	kf_clock_normal();         /* back to the normal 400 MHz clock off the network */
 }
@@ -560,9 +723,13 @@ void app_spineko_open(void){
 		if(s_arena!=0xFFFFFFFFu){
 			kf_http_set_arena(s_arena, BODY_MAX);
 			kf_html_set_arena(s_arena+BODY_MAX, OPS_MAX,
-			                  s_arena+BODY_MAX+OPS_MAX, ARENA_SZ-BODY_MAX-OPS_MAX);
+			                  s_arena+BODY_MAX+OPS_MAX, TEXT_MAX);
+			kf_css_set_arena(s_arena+BODY_MAX+OPS_MAX+TEXT_MAX, CSSRULE_MAX);
 		}
 	}
+	mkdir("/kefyros/spineko", 0777);              /* SD stylesheet cache (EEXIST is fine) */
+	mkdir(CSS_CACHE_DIR, 0777);
+	css_active = 0; css_n = 0;
 
 	scr = lv_obj_create(NULL);
 	lv_obj_set_style_pad_all(scr, 0, 0);

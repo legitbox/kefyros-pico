@@ -45,6 +45,26 @@ static int next_byte(void){
 	return r_buf[r_bufpos++];
 }
 
+/* ===== CSS integration =====
+   A stack of open elements (tag/class/id hashes) + their computed styles. Pushed
+   for every non-void open tag so selector matching and inheritance work; closes
+   are lenient (pop down to the matching tag, ignore stray closes). `blk_style`
+   is the style stamped onto the op when the current text block flushes: it is
+   re-snapshotted from the stack top after every tag, so it reflects the element
+   the accumulated text actually sits in. */
+#define ESTK 24
+static kf_css_elem  estk[ESTK];
+static kf_css_style sstk[ESTK];
+static int          es_n;
+static kf_css_style blk_style;
+static kf_css_style s_body_style;
+static int          collect_css;            /* pass A: feed <style>, collect <link>s */
+static char         csslinks[3][256];
+static int          ncsslinks;
+static uint32_t     last_base, last_len;    /* for kf_html_reparse() */
+
+static int hidden_now(void){ return es_n>0 && (sstk[es_n-1].flags & KF_CSS_F_HIDE); }
+
 /* ===== parser state ===== */
 static char     tb[4096];   static int tbn;        /* current block text */
 static char     linkbuf[1024]; static int linkn;   /* current <a> text */
@@ -61,10 +81,23 @@ static char     form_action[512];
 static int      in_form;
 
 /* ===== op emission ===== */
-static void emit(uint8_t kind, uint8_t depth, uint16_t index,
-                 const char *text, int tlen, const char *href, int hlen){
+static void emit_styled(uint8_t kind, uint8_t depth, uint16_t index,
+                 const char *text, int tlen, const char *href, int hlen,
+                 const kf_css_style *st){
 	kf_html_op op; memset(&op, 0, sizeof op);
 	op.kind = kind; op.depth = depth; op.index = index;
+	if(st){
+		if(st->flags & KF_CSS_F_HIDE) return;
+		if(st->flags & KF_CSS_F_FG){ op.fg=st->fg; op.sflags|=KF_ST_FG; }
+		if(st->flags & KF_CSS_F_BG){ op.bg=st->bg; op.sflags|=KF_ST_BG; }
+		if(st->flags & KF_CSS_F_UNDER)    op.sflags|=KF_ST_UNDER;
+		if(st->flags & KF_CSS_F_STRIKE)   op.sflags|=KF_ST_STRIKE;
+		if(st->flags & KF_CSS_F_CENTER)   op.sflags|=KF_ST_CENTER;
+		if(st->flags & KF_CSS_F_RIGHT)    op.sflags|=KF_ST_RIGHT;
+		if(st->flags & KF_CSS_F_BIG)      op.sflags|=KF_ST_BIG;
+		if(st->flags & KF_CSS_F_NOBULLET) op.sflags|=KF_ST_NOBULLET;
+		op.indent = st->indent;
+	}
 	if(text){
 		if(tlen < 0) tlen = (int)strlen(text);
 		if(tlen > 0 && text_brk + (uint32_t)tlen <= text_cap){
@@ -84,6 +117,12 @@ static void emit(uint8_t kind, uint8_t depth, uint16_t index,
 		op_count++;
 	}
 }
+/* direct emits (img/hr/input/link) style with the current stack top */
+static void emit(uint8_t kind, uint8_t depth, uint16_t index,
+                 const char *text, int tlen, const char *href, int hlen){
+	emit_styled(kind, depth, index, text, tlen, href, hlen,
+	            es_n>0 ? &sstk[es_n-1] : NULL);
+}
 
 static void flush_block(void){
 	pending_space = 0;
@@ -92,7 +131,7 @@ static void flush_block(void){
 		uint16_t idx = (cur_kind==KF_OP_LI) ? li_index : 0;
 		uint8_t  dep = (cur_kind==KF_OP_LI) ? li_depth
 		             : (cur_kind==KF_OP_QUOTE ? (uint8_t)quote_depth : 0);
-		emit((uint8_t)cur_kind, dep, idx, tb, tbn, NULL, 0);
+		emit_styled((uint8_t)cur_kind, dep, idx, tb, tbn, NULL, 0, &blk_style);
 	}
 	tbn = 0;
 }
@@ -102,6 +141,7 @@ static void push_char(int c){
 	char *buf; int *n; int cap;
 	if(in_title){ buf=s_title; n=&title_n; cap=(int)sizeof s_title; }
 	else if(in_head) return;                 /* drop non-title <head> text */
+	else if(hidden_now()) return;            /* CSS display:none subtree */
 	else if(in_link){ buf=linkbuf; n=&linkn; cap=(int)sizeof linkbuf; }
 	else { buf=tb; n=&tbn; cap=(int)sizeof tb; }
 	if(!in_pre){
@@ -201,6 +241,71 @@ static void skip_until_close(const char *name){
 	}
 }
 
+/* ===== <style> body -> CSS engine (streaming, watching for "</style") ===== */
+static void style_feed(void){
+	static const char CLOSE[] = "</style";
+	char pend[8]; int m=0, c;
+	kf_css_sheet_begin();
+	for(;;){
+		c = next_byte();
+		if(c < 0) break;
+		int ch = (c>='A'&&c<='Z') ? c+32 : c;
+		if(ch == CLOSE[m]){
+			pend[m++] = (char)c;
+			if(m == 7){ while((c=next_byte())>=0 && c!='>'); break; }
+		} else {
+			for(int i=0;i<m;i++) kf_css_sheet_feed((unsigned char)pend[i]);
+			m = 0;
+			if(ch == CLOSE[0]) pend[m++] = (char)c;
+			else kf_css_sheet_feed(c);
+		}
+	}
+	kf_css_sheet_end();
+}
+
+/* ===== element stack (CSS) ===== */
+static void elem_open(const char *name, const char *tag){
+	uint16_t th = kf_css_tag_hash(name);
+	/* lenient implicit closes: <p><p>, <li><li> */
+	if(es_n>0 && estk[es_n-1].tag==th &&
+	   (!strcmp(name,"p") || !strcmp(name,"li") || !strcmp(name,"td") ||
+	    !strcmp(name,"th") || !strcmp(name,"tr")))
+		es_n--;
+	if(es_n >= ESTK) return;                 /* too deep: styles freeze, pops still match */
+	/* static: keep attr scratch off the 4 KB core0 stack (parser is not reentrant) */
+	static char idb[48], clsb[128], styb[192];
+	kf_css_elem *e = &estk[es_n];
+	memset(e, 0, sizeof *e);
+	e->tag = th;
+	if(get_attr(tag,"id",idb,sizeof idb) && idb[0]) e->id_hash = kf_css_hash(idb,-1);
+	if(get_attr(tag,"class",clsb,sizeof clsb)){
+		char *p = clsb;
+		while(*p && e->ncls < 4){
+			while(*p==' '||*p=='\t') p++;
+			char *st = p;
+			while(*p && *p!=' ' && *p!='\t') p++;
+			if(p>st) e->cls[e->ncls++] = kf_css_hash(st,(int)(p-st));
+		}
+	}
+	int has_sty = get_attr(tag,"style",styb,sizeof styb);
+	kf_css_apply(estk, es_n+1, has_sty?styb:NULL,
+	             es_n>0 ? &sstk[es_n-1] : NULL, &sstk[es_n]);
+	if(!strcmp(name,"center")) sstk[es_n].flags |= KF_CSS_F_CENTER;   /* legacy */
+	es_n++;
+	if(!strcmp(name,"body")) s_body_style = sstk[es_n-1];
+}
+static void elem_close(const char *name){
+	uint16_t th = kf_css_tag_hash(name);
+	for(int i=es_n-1; i>=0; i--)
+		if(estk[i].tag==th){ es_n=i; break; }
+}
+static int is_void_tag(const char *n){
+	return !strcmp(n,"br")||!strcmp(n,"hr")||!strcmp(n,"img")||!strcmp(n,"input")||
+	       !strcmp(n,"meta")||!strcmp(n,"link")||!strcmp(n,"area")||!strcmp(n,"base")||
+	       !strcmp(n,"col")||!strcmp(n,"embed")||!strcmp(n,"source")||
+	       !strcmp(n,"track")||!strcmp(n,"wbr")||!strcmp(n,"param");
+}
+
 /* ===== link helpers ===== */
 static void close_link(void){
 	while(linkn>0 && linkbuf[linkn-1]==' ') linkn--;
@@ -210,6 +315,7 @@ static void close_link(void){
 
 /* ===== tag dispatch ===== */
 #define NM(s) (!strcmp(name,(s)))
+static void handle_tag_dispatch(const char *name, const char *tag, int closing);
 static void handle_tag(const char *tag){
 	int closing = tag[0]=='/';
 	const char *np = closing ? tag+1 : tag;
@@ -220,10 +326,36 @@ static void handle_tag(const char *tag){
 	name[n]=0;
 	if(!name[0]) return;
 
-	if(NM("script")||NM("style")){ if(!closing) skip_until_close(name); return; }
+	if(NM("script")){ if(!closing) skip_until_close(name); return; }
+	if(NM("style")){
+		if(!closing){ if(collect_css) style_feed(); else skip_until_close("style"); }
+		return;
+	}
+	if(NM("link")){
+		if(collect_css && !closing && ncsslinks < (int)(sizeof csslinks/sizeof csslinks[0])){
+			char rel[32];
+			get_attr(tag,"rel",rel,sizeof rel);
+			for(char *q=rel;*q;q++) if(*q>='A'&&*q<='Z') *q+=32;
+			if(strstr(rel,"stylesheet") &&
+			   get_attr(tag,"href",csslinks[ncsslinks],sizeof csslinks[0]) &&
+			   csslinks[ncsslinks][0])
+				ncsslinks++;
+		}
+		return;
+	}
 	if(NM("head")){ in_head = !closing; return; }
-	if(NM("body")){ in_head = 0; return; }
 	if(NM("title")){ if(!closing){ in_title=1; title_n=0; pending_space=0; } else { in_title=0; while(title_n>0&&s_title[title_n-1]==' ')title_n--; s_title[title_n]=0; } return; }
+
+	/* CSS element stack around the block dispatch; the accumulated text always
+	   flushes with the OLD blk_style snapshot, then we re-snapshot from the top. */
+	if(closing) elem_close(name);
+	else if(!is_void_tag(name)) elem_open(name, tag);
+	handle_tag_dispatch(name, tag, closing);
+	if(es_n>0) blk_style = sstk[es_n-1];
+	else memset(&blk_style, 0, sizeof blk_style);
+}
+static void handle_tag_dispatch(const char *name, const char *tag, int closing){
+	if(NM("body")){ in_head = 0; return; }
 
 	if(name[0]=='h' && name[1]>='1'&&name[1]<='6'&&name[2]==0){
 		flush_block();
@@ -335,7 +467,7 @@ static void read_tag(void){
 	handle_tag(t);
 }
 
-uint32_t kf_html_parse(uint32_t body_base, uint32_t len){
+static uint32_t do_parse(uint32_t body_base, uint32_t len){
 	/* reset everything */
 	r_base=body_base; r_len=len; r_pos=0; r_bufpos=0; r_buflen=0;
 	op_count=0; text_brk=0;
@@ -343,6 +475,9 @@ uint32_t kf_html_parse(uint32_t body_base, uint32_t len){
 	in_title=in_head=in_pre=in_link=pending_space=0;
 	cur_kind=KF_OP_P; quote_depth=0; li_index=0; li_depth=0; l_sp=0;
 	in_form=0; form_action[0]=0;
+	es_n=0;
+	memset(&blk_style, 0, sizeof blk_style);
+	memset(&s_body_style, 0, sizeof s_body_style);
 
 	int c;
 	while((c = next_byte()) >= 0){
@@ -354,5 +489,23 @@ uint32_t kf_html_parse(uint32_t body_base, uint32_t len){
 	flush_block();
 	return op_count;
 }
+
+uint32_t kf_html_parse(uint32_t body_base, uint32_t len){
+	collect_css = 1;
+	ncsslinks = 0;
+	kf_css_reset();
+	last_base = body_base; last_len = len;
+	return do_parse(body_base, len);
+}
+uint32_t kf_html_reparse(void){
+	collect_css = 0;                 /* keep the loaded rules, skip <style> re-feeding */
+	return do_parse(last_base, last_len);
+}
+
+int  kf_html_css_link_count(void){ return ncsslinks; }
+const char *kf_html_css_link(int i){
+	return (i>=0 && i<ncsslinks) ? csslinks[i] : "";
+}
+void kf_html_body_style(kf_css_style *out){ *out = s_body_style; }
 
 const char *kf_html_title(void){ return s_title; }

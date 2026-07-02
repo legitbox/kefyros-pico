@@ -42,6 +42,7 @@ add_executable(kefyros
     port/net.c
     port/http.c
     port/html.c
+    port/css.c                     # Spineko CSS engine (rules in PSRAM)
     port/tls.c
     port/imgdec.c
     port/kapi.c                    # KAPI class-1 app loader + vtable glue
