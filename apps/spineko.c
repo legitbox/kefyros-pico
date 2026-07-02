@@ -203,6 +203,13 @@ static lv_obj_t *bstk[BOX_DEPTH];   /* bstk[0] = doc */
 static uint8_t   brow[BOX_DEPTH];   /* parent is a flex ROW (chips: content-sized labels) */
 static int       bdepth, bskip;
 
+/* virtualization: the widget tree is a WINDOW over the op list (which lives whole in
+   PSRAM). [win_first, win_next) is materialized; scrolling near an edge re-renders
+   the window anchored at the op that is currently at the top of the view. Top-level
+   children carry their op index (+1) in user_data so the anchor can be found. */
+static uint32_t win_first, win_next;
+static int      win_more;           /* ops remain beyond win_next */
+
 static lv_obj_t *mk_label(const char *txt, const lv_font_t *font, lv_color_t color, int pad_left){
 	lv_obj_t *l = lv_label_create(bstk[bdepth]);
 	lv_obj_set_style_text_font(l, font, 0);
@@ -303,7 +310,41 @@ static void images_pump(void){
 	}
 }
 
-static void render_ops(void){
+/* create one container box and push it as the current parent */
+static void make_box(const kf_html_op *op){
+	int kind = op->index;
+	lv_obj_t *bx = lv_obj_create(bstk[bdepth]);
+	lv_obj_remove_style_all(bx);
+	lv_obj_clear_flag(bx, LV_OBJ_FLAG_SCROLLABLE);  /* only doc scrolls */
+	lv_obj_set_height(bx, LV_SIZE_CONTENT);
+	if(brow[bdepth] || kind==KF_BOX_TD){            /* cell / box inside a row */
+		lv_obj_set_width(bx, LV_SIZE_CONTENT);
+		lv_obj_set_flex_grow(bx, 1);
+	} else
+		lv_obj_set_width(bx, lv_pct(100));
+	lv_obj_set_flex_flow(bx, (kind==KF_BOX_ROW || kind==KF_BOX_TR)
+	                         ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_COLUMN);
+	lv_obj_set_style_pad_all(bx, kind==KF_BOX_CARD ? 4 : 2, 0);
+	lv_obj_set_style_pad_row(bx, 2, 0);
+	lv_obj_set_style_pad_column(bx, 5, 0);
+	if(op->sflags & KF_ST_BG){
+		lv_obj_set_style_bg_color(bx, c565(op->bg), 0);
+		lv_obj_set_style_bg_opa(bx, LV_OPA_COVER, 0);
+	}
+	if(op->border_w){
+		lv_obj_set_style_border_width(bx, op->border_w, 0);
+		lv_obj_set_style_border_color(bx, c565(op->border_c), 0);
+	} else if(kind==KF_BOX_TD){                     /* legible tables by default */
+		lv_obj_set_style_border_width(bx, 1, 0);
+		lv_obj_set_style_border_color(bx, WEB_RULE, 0);
+	}
+	if(op->radius) lv_obj_set_style_radius(bx, op->radius, 0);
+	bdepth++;
+	bstk[bdepth] = bx;
+	brow[bdepth] = (kind==KF_BOX_ROW || kind==KF_BOX_TR) ? 1 : 0;
+}
+
+static void render_window(uint32_t start){
 	lv_obj_clean(doc);
 	free_images();              /* drop the previous page's decoded bitmaps */
 	foci_n=0; cur_focus=0; fld_n=0;
@@ -312,6 +353,21 @@ static void render_ops(void){
 	lv_obj_set_style_bg_color(scr, (bs.flags & KF_CSS_F_BG) ? c565(bs.bg) : WEB_BG, 0);
 	bstk[0] = doc; brow[0] = 0; bdepth = 0; bskip = 0;
 	uint32_t n = kf_html_op_count();
+	if(start > n) start = n;
+	/* reconstruct containers still open at `start` (window may begin mid-box) */
+	if(start){
+		uint32_t open[BOX_DEPTH]; int nopen = 0;
+		for(uint32_t i=0; i<start; i++){
+			kf_html_op op; kf_html_get_op(i, &op);
+			if(op.kind==KF_OP_BOX){ if(nopen < BOX_DEPTH) open[nopen] = i; nopen++; }
+			else if(op.kind==KF_OP_END){ if(nopen > 0) nopen--; }
+		}
+		if(nopen > BOX_DEPTH) nopen = BOX_DEPTH;
+		for(int k=0; k<nopen && bdepth < BOX_DEPTH-1; k++){
+			kf_html_op op; kf_html_get_op(open[k], &op);
+			make_box(&op);
+		}
+	}
 	int widgets=0, last_field=-1;
 	/* static: keep these big buffers OFF the stack — render runs inside LVGL's deep
 	   layout/render call chain and the core0 stack is only 4 KB (overflow -> corruption
@@ -319,8 +375,10 @@ static void render_ops(void){
 	static char buf[1024];
 	static char line[1100];
 	int low_mem=0;
-	for(uint32_t i=0; i<n && widgets<MAX_WIDGETS; i++){
+	uint32_t i;
+	for(i=start; i<n && widgets<MAX_WIDGETS; i++){
 		if(heap_free() < HEAP_FLOOR){ low_mem=1; break; }   /* stop before OOM-panic */
+		uint32_t tl_before = lv_obj_get_child_count(doc);   /* for op-index tagging */
 		kf_html_op op; kf_html_get_op(i, &op);
 		kf_html_read_text(op.text_off, op.text_len, buf, sizeof buf);
 		xform_buf(buf, op.xform);
@@ -373,41 +431,11 @@ static void render_ops(void){
 			lv_obj_set_size(h, lv_pct(96), 2); lv_obj_set_style_bg_color(h, WEB_RULE, 0);
 			lv_obj_set_style_bg_opa(h, LV_OPA_COVER, 0); widgets++; break;
 		}
-		case KF_OP_BOX: {
+		case KF_OP_BOX:
 			if(bdepth >= BOX_DEPTH-1){ bskip++; break; }
-			int kind = op.index;
-			lv_obj_t *bx = lv_obj_create(bstk[bdepth]);
-			lv_obj_remove_style_all(bx);
-			lv_obj_clear_flag(bx, LV_OBJ_FLAG_SCROLLABLE);  /* only doc scrolls */
-			lv_obj_set_height(bx, LV_SIZE_CONTENT);
-			if(brow[bdepth] || kind==KF_BOX_TD){       /* cell / box inside a row */
-				lv_obj_set_width(bx, LV_SIZE_CONTENT);
-				lv_obj_set_flex_grow(bx, 1);
-			} else
-				lv_obj_set_width(bx, lv_pct(100));
-			lv_obj_set_flex_flow(bx, (kind==KF_BOX_ROW || kind==KF_BOX_TR)
-			                         ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_COLUMN);
-			lv_obj_set_style_pad_all(bx, kind==KF_BOX_CARD ? 4 : 2, 0);
-			lv_obj_set_style_pad_row(bx, 2, 0);
-			lv_obj_set_style_pad_column(bx, 5, 0);
-			if(op.sflags & KF_ST_BG){
-				lv_obj_set_style_bg_color(bx, c565(op.bg), 0);
-				lv_obj_set_style_bg_opa(bx, LV_OPA_COVER, 0);
-			}
-			if(op.border_w){
-				lv_obj_set_style_border_width(bx, op.border_w, 0);
-				lv_obj_set_style_border_color(bx, c565(op.border_c), 0);
-			} else if(kind==KF_BOX_TD){                /* legible tables by default */
-				lv_obj_set_style_border_width(bx, 1, 0);
-				lv_obj_set_style_border_color(bx, WEB_RULE, 0);
-			}
-			if(op.radius) lv_obj_set_style_radius(bx, op.radius, 0);
-			bdepth++;
-			bstk[bdepth] = bx;
-			brow[bdepth] = (kind==KF_BOX_ROW || kind==KF_BOX_TR) ? 1 : 0;
+			make_box(&op);
 			widgets++;
 			break;
-		}
 		case KF_OP_END:
 			if(bskip) bskip--;
 			else if(bdepth > 0) bdepth--;
@@ -433,14 +461,17 @@ static void render_ops(void){
 		}
 		default: break;
 		}
+		if(lv_obj_get_child_count(doc) > tl_before)        /* new top-level widget: */
+			lv_obj_set_user_data(lv_obj_get_child(doc, tl_before),
+			                     (void*)(uintptr_t)(i+1)); /* tag with its op (+1) */
 	}
-	if(low_mem)
-		mk_label("[truncated - low memory]", KF_FONT, WEB_MUTED, 2);
-	else if(kf_html_op_count() > (uint32_t)widgets)
-		mk_label("[page truncated]", KF_FONT, WEB_MUTED, 2);
+	win_first = start; win_next = i; win_more = (i < n);
+	if(win_more || low_mem)
+		mk_label("...", KF_FONT, WEB_MUTED, 2);
 	lv_obj_scroll_to_y(doc, 0, LV_ANIM_OFF);
 	if(foci_n>0){ cur_focus=0; style_focus(0,1); }
 }
+static void render_ops(void){ render_window(0); }
 
 /* ---------- external stylesheets ----------
    After the page HTML parses (pass A: <style> rules + <link> URLs collected),
@@ -690,7 +721,50 @@ static void edit_key(uint8_t key){
 		lv_label_set_text_fmt(foci[cur_focus].w, "[ %s_ ]", edit_buf);
 }
 
-static void doc_scroll(int dy){ if(doc) lv_obj_scroll_by(doc, 0, dy, LV_ANIM_OFF); }
+/* Virtualization: when scrolling near a window edge, re-render the window anchored
+   at the op of the top-visible widget so long pages scroll without a widget cap.
+   lv_obj_get_y() is view-relative in LVGL 9 (children shift as the parent scrolls). */
+static void virt_check(void){
+	if(!doc || (!win_more && win_first==0)) return;
+	lv_obj_update_layout(doc);
+	int vh = lv_obj_get_height(doc);
+	if(win_more && lv_obj_get_scroll_bottom(doc) < vh){        /* <1 screen left below */
+		uint32_t cnt = lv_obj_get_child_count(doc);
+		uint32_t target = win_first; int off = 0;
+		for(uint32_t k=0; k<cnt; k++){
+			lv_obj_t *w = lv_obj_get_child(doc, k);
+			if(lv_obj_get_y(w) + lv_obj_get_height(w) > 0){    /* first visible */
+				uintptr_t ud = (uintptr_t)lv_obj_get_user_data(w);
+				if(ud){ target = (uint32_t)ud - 1; off = -lv_obj_get_y(w); }
+				break;
+			}
+		}
+		if(target > win_first){                                /* window can advance */
+			render_window(target);
+			lv_obj_update_layout(doc);
+			lv_obj_scroll_to_y(doc, off > 0 ? off : 0, LV_ANIM_OFF);
+		}
+	} else if(win_first > 0 && lv_obj_get_scroll_y(doc) <= 8){ /* back at the top */
+		uint32_t old = win_first;
+		render_window(old > 150 ? old - 150 : 0);
+		lv_obj_update_layout(doc);
+		uint32_t cnt = lv_obj_get_child_count(doc);
+		for(uint32_t k=0; k<cnt; k++){
+			lv_obj_t *w = lv_obj_get_child(doc, k);
+			uintptr_t ud = (uintptr_t)lv_obj_get_user_data(w);
+			if(ud && (uint32_t)ud - 1 >= old){                 /* the old window top */
+				int y = lv_obj_get_y(w) - 24;
+				lv_obj_scroll_to_y(doc, y > 0 ? y : 0, LV_ANIM_OFF);
+				break;
+			}
+		}
+	}
+}
+static void doc_scroll(int dy){
+	if(!doc) return;
+	lv_obj_scroll_by(doc, 0, dy, LV_ANIM_OFF);
+	virt_check();
+}
 
 void browser_poll(void){
 	if(!scr || lv_screen_active()!=scr) return;
