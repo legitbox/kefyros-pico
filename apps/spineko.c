@@ -128,17 +128,6 @@ static char    css_cachef[80];     /* SD cache path of the sheet being fetched *
 static void load_url(const char *url, int push);
 static void css_next(void);
 
-/* Clock policy: 250 MHz eco ONLY while bytes are moving (the radio needs it);
-   back to the 400 MHz clock the moment nothing is in flight, so reading and
-   scrolling run at full speed. Association happens once at app-open (at eco);
-   an associated-but-idle radio at 400 MHz is the normal launcher condition. */
-static int s_eco;
-static void net_clock(int want_eco){
-	if(want_eco == s_eco) return;
-	s_eco = want_eco;
-	if(want_eco) kf_clock_eco(); else kf_clock_normal();
-}
-
 /* ---------- small helpers ---------- */
 static int is_focus_kind(int k){ return k==KF_OP_LINK || k==KF_OP_FIELD || k==KF_OP_SUBMIT; }
 
@@ -314,7 +303,6 @@ static void images_pump(void){
 			static char src[512], abs[600];        /* off the 4 KB stack */
 			kf_html_read_text(imgs[i].href_off, imgs[i].href_len, src, sizeof src);
 			if(!kf_url_resolve(cur_url, src, abs, sizeof abs)){ imgs[i].state=2; return; }
-			net_clock(1);
 			if(kf_http_get(abs)==0){ img_cur=i; img_fetching=1; }
 			else imgs[i].state=2;
 			return;
@@ -554,7 +542,6 @@ static void css_next(void){
 		if(css_feed_file(css_cachef)) continue;                 /* SD cache hit */
 		if(kf_net_state()==KF_NET_ONLINE){
 			kf_http_set_arena(s_arena+CSSRAW_OFF, CSSRAW_MAX);
-			net_clock(1);
 			if(kf_http_get(abs)==0){
 				css_active = 1;
 				char b[48]; snprintf(b,sizeof b,"style %d/%d...",css_i,css_n);
@@ -636,7 +623,6 @@ static void load_url(const char *url, int push){
 	if(s_arena != 0xFFFFFFFFu) kf_http_set_arena(s_arena, BODY_MAX);
 	set_status("Loading...");
 	if(kf_net_state()!=KF_NET_ONLINE){ set_status("offline - open WiFi first"); s_loading=0; return; }
-	net_clock(1);                                 /* transfer -> 250 MHz for the radio */
 	int rc = kf_http_get(full);
 	if(rc<0){ set_status(kf_http_err()); s_loading=0; }
 	else s_loading=1;
@@ -808,15 +794,6 @@ void browser_poll(void){
 
 	images_pump();              /* background: fetch + decode inline images one at a time */
 
-	/* nothing in flight and nothing fetchable pending -> full 400 MHz for reading */
-	if(!s_loading && !css_active && !img_fetching){
-		int pending = 0;
-		if(kf_net_state()==KF_NET_ONLINE && img_ram_used < IMG_RAM_BUDGET &&
-		   heap_free() >= HEAP_FLOOR + 8192u)
-			for(int i2=0; i2<imgs_n; i2++) if(imgs[i2].state==0){ pending=1; break; }
-		if(!pending) net_clock(0);
-	}
-
 	uint8_t stt, key;
 	int doc_h = KF_CONTENT_H - URLBAR_H - STATUS_H;
 	while(uart_pop_key(&stt, &key)){
@@ -944,7 +921,6 @@ void app_spineko_open(void){
 	lv_obj_align(lbl_status, LV_ALIGN_BOTTOM_LEFT, 4, 0);
 
 	cur_url[0]=0; hist_sp=0; s_loading=0; edit_mode=0; foci_n=0; cur_focus=0;
-	s_eco = 1;                 /* opened at kf_clock_eco (association needs it) */
 	kf_grab_input(1);          /* we drive all keys ourselves via browser_poll */
 
 	if(s_arena==0xFFFFFFFFu){
