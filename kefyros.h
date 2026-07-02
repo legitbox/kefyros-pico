@@ -214,6 +214,7 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 void app_demo_open(void);    /* KAPI: load + run the class-1 demo from /apps/demo/demo.kx */
+void app_term_open(void);    /* Term: SSH-2 terminal client (full-screen VT100) */
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
 void editor_poll(void);
@@ -223,5 +224,6 @@ void music_poll(void);       /* key handling + FLAC decode pump */
 void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void kapi_poll(void);        /* KAPI: drive the loaded class-1 app (no-op unless one runs) */
+void term_poll(void);        /* Term: SSH session pump (no-op; modal loop owns the session) */
 
 #endif

@@ -43,6 +43,8 @@ add_executable(kefyros
     port/http.c
     port/html.c
     port/css.c                     # Spineko CSS engine (rules in PSRAM)
+    port/vt100.c                   # Term: VT100/xterm terminal emulator core
+    port/sha256.c                  # Term: SHA-256 (SSH exchange hash + KDF)
     port/tls.c
     port/imgdec.c
     port/kapi.c                    # KAPI class-1 app loader + vtable glue

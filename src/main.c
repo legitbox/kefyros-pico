@@ -83,6 +83,7 @@ int main(void){
 		browser_poll();        /* Spineko keys + HTTP pump (no-op unless open) */
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
 		kapi_poll();           /* KAPI class-1 app: keys + per-frame callback (no-op idle) */
+		term_poll();           /* Term SSH session pump (no-op; modal loop owns the session) */
 		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
 		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }

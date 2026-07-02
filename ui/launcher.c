@@ -40,6 +40,7 @@ static const desk_app_t dapps[] = {
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "help",       "Help",        app_help_open,        11 },
 	{ "demo",       "KAPI Demo",   app_demo_open,        12 },   /* class-1 .kx loader test */
+	{ "term",       "Terminal",    app_term_open,        13 },   /* SSH-2 terminal client */
 };
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */
