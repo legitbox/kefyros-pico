@@ -21,6 +21,7 @@
 #include "../kefyros.h"
 #include "http.h"
 #include "tls.h"
+#include "miniz_tinfl.h"           /* streaming DEFLATE (transparent gzip bodies) */
 
 #define HTTP_MAX_REDIRECTS 6
 #define HTTP_TIMEOUT_MS    25000u
@@ -87,7 +88,9 @@ uint32_t    kf_http_body_len(void){ return s_body_len; }
 const char *kf_http_final_url(void){ return s_final_url; }
 const char *kf_http_err(void){ return s_err; }
 
+static void gz_free(void);
 static void fail(const char *why){
+	gz_free();
 	snprintf(s_err, sizeof s_err, "%s", why);
 	s_state = KF_HTTP_ERROR;
 	s_phase = PH_DONE;
@@ -159,6 +162,103 @@ static void body_put(uint8_t b){
 	if(s_stage_n == sizeof s_stage) body_flush();
 }
 
+/* ===== transparent gzip decode =====
+   Some servers send Content-Encoding: gzip even unsolicited (S3 static sites store
+   pre-compressed objects), and we now ask for it (smaller transfers at the eco
+   clock). De-chunked body bytes route through a gzip-header skipper + the miniz
+   streaming inflater (same tinfl core the PNG decoder uses); plain output lands in
+   the normal PSRAM staging. The ~43 KB inflater state (32 KB dict + decompressor)
+   is malloc'd only while a gzip response is in flight. */
+static int      s_gzip;                 /* this response is gzip-encoded */
+static int      gz_phase;
+static uint8_t  gz_flg;
+static uint32_t gz_skip;                /* remaining FEXTRA bytes */
+static uint8_t  gz_seen[4]; static int gz_seen_n;   /* magic bytes, for plain replay */
+static tinfl_decompressor *gz_dec;
+static uint8_t *gz_dict;                /* TINFL_LZ_DICT_SIZE ring */
+static size_t   gz_dict_ofs;
+static uint8_t  gz_in[512];
+static size_t   gz_in_n;
+static int      gz_done, gz_err;
+
+enum { GZ_M0, GZ_M1, GZ_CM, GZ_FLG, GZ_MT0, GZ_MT1, GZ_MT2, GZ_MT3, GZ_XFL, GZ_OS,
+       GZ_XL0, GZ_XL1, GZ_XDATA, GZ_NAME, GZ_CMT, GZ_HCRC0, GZ_HCRC1, GZ_DATA, GZ_TAIL };
+
+static void gz_free(void){
+	free(gz_dec); gz_dec = NULL;
+	free(gz_dict); gz_dict = NULL;
+}
+static int gz_after(int stage){          /* next header phase after EXTRA/NAME/CMT */
+	if(stage < 1 && (gz_flg & 8))  return GZ_NAME;
+	if(stage < 2 && (gz_flg & 16)) return GZ_CMT;
+	if(gz_flg & 2) return GZ_HCRC0;
+	return GZ_DATA;
+}
+static void gz_inflate_run(int more_coming){
+	size_t in_pos = 0;
+	while(!gz_done && !gz_err && gz_dec){
+		size_t in_bytes  = gz_in_n - in_pos;
+		size_t out_bytes = TINFL_LZ_DICT_SIZE - gz_dict_ofs;
+		tinfl_status st = tinfl_decompress(gz_dec, gz_in + in_pos, &in_bytes,
+			gz_dict, gz_dict + gz_dict_ofs, &out_bytes,
+			more_coming ? TINFL_FLAG_HAS_MORE_INPUT : 0);      /* raw DEFLATE, no zlib hdr */
+		in_pos += in_bytes;
+		for(size_t k = 0; k < out_bytes; k++) body_put(gz_dict[gz_dict_ofs + k]);
+		gz_dict_ofs = (gz_dict_ofs + out_bytes) & (TINFL_LZ_DICT_SIZE - 1);
+		if(st == TINFL_STATUS_DONE){ gz_done = 1; break; }
+		if(st < TINFL_STATUS_DONE){ gz_err = 1; break; }       /* corrupt: keep partial */
+		if(in_pos >= gz_in_n && st == TINFL_STATUS_NEEDS_MORE_INPUT) break;
+		if(in_bytes == 0 && out_bytes == 0) break;             /* no progress guard */
+	}
+	gz_in_n = 0;
+}
+static void gz_put(uint8_t b){
+	switch(gz_phase){
+	case GZ_M0: if(b==0x1f){ gz_seen[gz_seen_n++]=b; gz_phase=GZ_M1; return; } break;
+	case GZ_M1: if(b==0x8b){ gz_seen[gz_seen_n++]=b; gz_phase=GZ_CM; return; } break;
+	case GZ_CM: if(b==8)   { gz_seen[gz_seen_n++]=b; gz_phase=GZ_FLG; return; } break;
+	case GZ_FLG: gz_flg=b; gz_phase=GZ_MT0; return;
+	case GZ_MT0: gz_phase=GZ_MT1; return;
+	case GZ_MT1: gz_phase=GZ_MT2; return;
+	case GZ_MT2: gz_phase=GZ_MT3; return;
+	case GZ_MT3: gz_phase=GZ_XFL; return;
+	case GZ_XFL: gz_phase=GZ_OS; return;
+	case GZ_OS:  gz_phase = (gz_flg & 4) ? GZ_XL0 : gz_after(0); goto maybe_data;
+	case GZ_XL0: gz_skip = b; gz_phase=GZ_XL1; return;
+	case GZ_XL1: gz_skip |= (uint32_t)b<<8; gz_phase = gz_skip ? GZ_XDATA : gz_after(0); goto maybe_data;
+	case GZ_XDATA: if(--gz_skip==0){ gz_phase=gz_after(0); goto maybe_data; } return;
+	case GZ_NAME: if(b==0){ gz_phase=gz_after(1); goto maybe_data; } return;
+	case GZ_CMT:  if(b==0){ gz_phase=gz_after(2); goto maybe_data; } return;
+	case GZ_HCRC0: gz_phase=GZ_HCRC1; return;
+	case GZ_HCRC1: gz_phase=GZ_DATA; goto maybe_data;
+	case GZ_DATA:
+		if(gz_err || !gz_dec) return;                          /* decode dead: drop */
+		gz_in[gz_in_n++] = b;
+		if(gz_in_n == sizeof gz_in) gz_inflate_run(1);
+		if(gz_done) gz_phase = GZ_TAIL;
+		return;
+	case GZ_TAIL: return;                                      /* crc32+isize: ignore */
+	}
+	/* magic mismatch: server lied about gzip — replay as plain and pass through */
+	s_gzip = 0;
+	for(int i=0;i<gz_seen_n;i++) body_put(gz_seen[i]);
+	body_put(b);
+maybe_data:
+	if(gz_phase == GZ_DATA && !gz_dec){                        /* deflate starts: alloc */
+		gz_dec  = (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
+		gz_dict = (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
+		if(!gz_dec || !gz_dict){ gz_free(); gz_err = 1; return; }
+		tinfl_init(gz_dec);
+		gz_dict_ofs = 0; gz_in_n = 0; gz_done = 0;
+	}
+}
+static void sink_put(uint8_t b){ if(s_gzip) gz_put(b); else body_put(b); }
+static void body_finish(void){
+	if(s_gzip && gz_in_n && !gz_done && !gz_err) gz_inflate_run(0);
+	body_flush();
+	gz_free();
+}
+
 /* ===== header / chunk parser ===== */
 static int ci_prefix(const char *s, const char *pfx){
 	while(*pfx){ char a=*s, b=*pfx; if(a>='A'&&a<='Z')a+=32; if(b>='A'&&b<='Z')b+=32;
@@ -196,6 +296,10 @@ static void head_line(void){
 			const char *v = hdr_val(s_line);
 			if(strstr(v,"chunked")||strstr(v,"Chunked")) s_chunked = 1;
 		}
+		else if(ci_prefix(s_line, "content-encoding:")){
+			const char *v = hdr_val(s_line);
+			if(strstr(v,"gzip")||strstr(v,"Gzip")||strstr(v,"GZIP")) s_gzip = 1;
+		}
 	}
 	s_line_n = 0;
 }
@@ -206,7 +310,7 @@ static void feed(uint8_t b){
 		else if(s_line_n < (int)sizeof s_line - 1) s_line[s_line_n++] = (char)b;
 		break;
 	case PH_BODY_RAW:
-		body_put(b);
+		sink_put(b);
 		break;
 	case PH_CSIZE:
 		if(b=='\n'){
@@ -218,14 +322,14 @@ static void feed(uint8_t b){
 		} else if(b!='\r' && s_line_n < (int)sizeof s_line - 1) s_line[s_line_n++]=(char)b;
 		break;
 	case PH_CDATA:
-		body_put(b);
+		sink_put(b);
 		if(--s_chunk_rem == 0) s_phase = PH_CAFTER;
 		break;
 	case PH_CAFTER:
 		if(b=='\n') s_phase = PH_CSIZE;
 		break;
 	case PH_TRAILER:
-		if(b=='\n'){ if(s_line_n==0 || (s_line_n==1&&s_line[0]=='\r')){ body_flush(); s_phase=PH_DONE; }
+		if(b=='\n'){ if(s_line_n==0 || (s_line_n==1&&s_line[0]=='\r')){ body_finish(); s_phase=PH_DONE; }
 		             s_line_n=0; }
 		else if(s_line_n < (int)sizeof s_line - 1) s_line[s_line_n++]=(char)b;
 		break;
@@ -242,7 +346,8 @@ static int build_req(void){
 	}
 	return snprintf(s_req, sizeof s_req,
 		"GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: Spineko/1.0 (Kefyros)\r\n"
-		"Accept: text/html,*/*\r\nConnection: close\r\n\r\n", s_path, s_host);
+		"Accept: text/html,*/*\r\nAccept-Encoding: gzip\r\n"
+		"Connection: close\r\n\r\n", s_path, s_host);
 }
 
 /* ---- combined send stream (header block + optional POST body) ---- */
@@ -325,7 +430,7 @@ static void http_close(void){
 	}
 }
 static void finish_ok(void){
-	body_flush();
+	body_finish();             /* flush the inflater tail, then the PSRAM stage */
 	if(s_state == KF_HTTP_RECEIVING) s_state = KF_HTTP_DONE;
 	http_close();
 }
@@ -430,6 +535,8 @@ static int start_request(const char *url){
 	s_do_redirect = 0; s_phase = PH_HEADLINE; s_line_n = 0; s_chunk_rem = 0;
 	s_req_off = 0; s_req_sent = 0;
 	s_body_base = s_arena_base; s_body_len = 0; s_stage_n = 0;
+	gz_free(); s_gzip = 0; gz_phase = GZ_M0; gz_seen_n = 0; gz_flg = 0;
+	gz_in_n = 0; gz_done = 0; gz_err = 0; gz_skip = 0;
 	s_err[0] = 0; s_t0 = s_tlast = now_ms();
 
 	ip_addr_t ip;
@@ -455,6 +562,7 @@ int kf_http_post(const char *url, const char *headers, const char *body, uint32_
 
 void kf_http_abort(void){
 	http_close();
+	gz_free();
 	s_state = KF_HTTP_IDLE; s_phase = PH_DONE; s_do_redirect = 0;
 }
 
