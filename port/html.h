@@ -40,6 +40,13 @@ typedef struct {
 	uint16_t fg, bg;       /* RGB565 (see sflags) */
 	uint8_t  sflags;       /* KF_ST_* */
 	uint8_t  indent;       /* extra CSS left indent, px */
+	uint16_t border_c;     /* border color RGB565 (border_w > 0) */
+	uint8_t  border_w;     /* border width px, 0 = none */
+	uint8_t  radius;       /* border-radius px */
+	uint8_t  pad_v;        /* extra vertical padding px */
+	uint8_t  xform;        /* text-transform: 0 none, 1 upper, 2 lower */
+	int8_t   line_sp;      /* extra line spacing px */
+	int8_t   let_sp;       /* letter-spacing px */
 } kf_html_op;
 
 /* Configure the two PSRAM regions the parser writes into. */

@@ -8,12 +8,15 @@
 // that exists only between kf_css_reset() and kf_css_shutdown().
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "../kefyros.h"
 #include "css.h"
 
 #define MAX_RULES 512
-#define MAX_DECLS 6
+#define MAX_DECLS 8
 #define MAX_SELS  3
+#define MAX_VARS  96          /* CSS custom properties (--x), global last-wins */
+#define SCREEN_W  320         /* @media evaluation viewport */
 
 typedef struct { uint32_t id_hash, cls_hash; uint16_t tag, pad; } c_sel;   /* 12 B */
 typedef struct { uint8_t prop, v8; uint16_t v16; } c_decl;                 /*  4 B */
@@ -24,7 +27,10 @@ typedef struct {
 	c_decl   d[MAX_DECLS];
 } c_rule;                          /* 64 B */
 
-enum { CP_COLOR=1, CP_BG, CP_DISPLAY, CP_ALIGN, CP_DECOR, CP_FSIZE, CP_INDENT, CP_LIST };
+enum { CP_COLOR=1, CP_BG, CP_DISPLAY, CP_ALIGN, CP_DECOR, CP_FSIZE, CP_INDENT, CP_LIST,
+       CP_BORDER,   /* v8 = width px, v16 = color */
+       CP_RADIUS, CP_MARGV, CP_LINEH /* v16 = signed extra line space */,
+       CP_LETSP /* v16 = signed px */, CP_XFORM };
 
 static uint32_t s_base, s_cap;     /* PSRAM rule store */
 static uint32_t s_nrules;
@@ -34,6 +40,11 @@ static uint32_t s_nrules;
 typedef struct { uint32_t key; uint16_t idx; uint8_t kind; uint8_t pad; } c_idx;
 enum { K_TAG=0, K_CLASS, K_ID };   /* K_TAG with key==0 = universal '*' */
 static c_idx  *s_idx;              /* malloc'd MAX_RULES entries; NULL = css disabled */
+
+/* CSS custom properties: global, last-wins (no scoping — :root wins by coming first) */
+typedef struct { uint32_t h; char v[44]; } c_var;
+static c_var *s_vars;              /* malloc'd MAX_VARS alongside s_idx */
+static int    s_nvars;
 
 /* ===== hashing ===== */
 uint32_t kf_css_hash(const char *s, int n){
@@ -55,10 +66,14 @@ uint16_t kf_css_tag_hash(const char *name){
 void kf_css_set_arena(uint32_t base, uint32_t cap){ s_base=base; s_cap=cap; s_nrules=0; }
 uint32_t kf_css_rule_count(void){ return s_nrules; }
 void kf_css_reset(void){
-	s_nrules = 0;
-	if(!s_idx) s_idx = malloc(sizeof(c_idx)*MAX_RULES);   /* NULL -> css quietly off */
+	s_nrules = 0; s_nvars = 0;
+	if(!s_idx)  s_idx  = malloc(sizeof(c_idx)*MAX_RULES);   /* NULL -> css quietly off */
+	if(!s_vars) s_vars = malloc(sizeof(c_var)*MAX_VARS);    /* NULL -> vars quietly off */
 }
-void kf_css_shutdown(void){ free(s_idx); s_idx=NULL; s_nrules=0; }
+void kf_css_shutdown(void){
+	free(s_idx);  s_idx=NULL;  s_nrules=0;
+	free(s_vars); s_vars=NULL; s_nvars=0;
+}
 
 /* ===== value parsing ===== */
 static int lc(int c){ return (c>='A'&&c<='Z') ? c+32 : c; }
@@ -142,6 +157,53 @@ static int parse_px(const char *v){
 	return (int)x;
 }
 
+/* ===== CSS custom properties ===== */
+static void var_set(const char *name, const char *val){
+	if(!s_vars) return;
+	uint32_t h = kf_css_hash(name, -1);
+	for(int i=0;i<s_nvars;i++)
+		if(s_vars[i].h==h){ snprintf(s_vars[i].v, sizeof s_vars[i].v, "%s", val); return; }
+	if(s_nvars < MAX_VARS){
+		s_vars[s_nvars].h = h;
+		snprintf(s_vars[s_nvars].v, sizeof s_vars[s_nvars].v, "%s", val);
+		s_nvars++;
+	}
+}
+static const char *var_get(const char *name, int len){
+	if(!s_vars) return NULL;
+	uint32_t h = kf_css_hash(name, len);
+	for(int i=0;i<s_nvars;i++) if(s_vars[i].h==h) return s_vars[i].v;
+	return NULL;
+}
+/* expand var(--x[, fallback]) references in `in` -> `out` (one level per pass) */
+static int var_expand(const char *in, char *out, int cap){
+	int o=0, changed=0;
+	while(*in && o<cap-1){
+		if(!strncmp(in,"var(",4)){
+			const char *p = in+4;
+			while(*p==' ') p++;
+			const char *nm = p;
+			while(*p && *p!=','&&*p!=')') p++;
+			int nl=(int)(p-nm);
+			while(nl>0 && nm[nl-1]==' ') nl--;
+			const char *fb=NULL; int fbl=0;
+			if(*p==','){
+				p++; while(*p==' ') p++;
+				fb=p; int depth=0;
+				while(*p && (depth||*p!=')')){ if(*p=='(')depth++; if(*p==')')depth--; p++; }
+				fbl=(int)(p-fb);
+			}
+			if(*p==')') p++;
+			const char *v = var_get(nm, nl);
+			if(v){ while(*v && o<cap-1) out[o++]=*v++; }
+			else if(fb){ for(int i=0;i<fbl&&o<cap-1;i++) out[o++]=fb[i]; }
+			in = p; changed=1;
+		} else out[o++]=*in++;
+	}
+	out[o]=0;
+	return changed;
+}
+
 /* ===== declaration parsing (shared by rule bodies and style="" attributes) ===== */
 static int parse_decls(const char *s, c_decl *out, int cap){
 	int n = 0;
@@ -161,6 +223,15 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 		val[vl]=0;
 		char *im = strstr(val,"!important");
 		if(im){ *im=0; vl=(int)strlen(val); while(vl>0&&val[vl-1]==' ') val[--vl]=0; }
+
+		if(prop[0]=='-' && prop[1]=='-'){ var_set(prop, val); continue; }
+		if(strstr(val,"var(")){                       /* expand custom properties (2 levels) */
+			char ex[160];
+			if(var_expand(val, ex, sizeof ex)){
+				if(strstr(ex,"var(")) var_expand(ex, val, sizeof val);
+				else snprintf(val, sizeof val, "%s", ex);
+			}
+		}
 
 		uint16_t col; int cr;
 		c_decl *d = &out[n];
@@ -196,6 +267,41 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 			if(px>=0){ d->prop=CP_INDENT; d->v16=(uint16_t)(px>200?200:px); }
 		} else if(!strcmp(prop,"list-style")||!strcmp(prop,"list-style-type")){
 			d->prop=CP_LIST; d->v8 = strstr(val,"none")!=NULL;
+		} else if(!strcmp(prop,"border")||!strcmp(prop,"border-top")||!strcmp(prop,"border-bottom")||
+		          !strcmp(prop,"border-left")||!strcmp(prop,"border-right")){
+			if(strstr(val,"none")||!strcmp(val,"0")){ d->prop=CP_BORDER; d->v8=0; }
+			else {
+				int w = parse_px(val); if(w<1) w=1; if(w>6) w=6;
+				uint16_t bc; int has = (color_in_value(val,&bc)==1);
+				d->prop=CP_BORDER; d->v8=(uint8_t)w; d->v16 = has ? bc : 0x8410;  /* gray */
+			}
+		} else if(!strcmp(prop,"border-radius")){
+			int r = parse_px(val); if(r<0) r=0; if(r>24) r=24;
+			d->prop=CP_RADIUS; d->v16=(uint16_t)r;
+		} else if(!strcmp(prop,"margin-top")||!strcmp(prop,"margin-bottom")||
+		          !strcmp(prop,"padding-top")||!strcmp(prop,"padding-bottom")||
+		          !strcmp(prop,"margin")||!strcmp(prop,"padding")){
+			int m = parse_px(val);                    /* shorthand: first value = vertical */
+			if(m>=0){ d->prop=CP_MARGV; d->v16=(uint16_t)(m>24?24:m); }
+		} else if(!strcmp(prop,"line-height")){
+			char *e; double x = strtod(val,&e);
+			if(e!=val){
+				int px;
+				if(*e=='p')      px=(int)x;           /* px */
+				else if(*e=='%') px=(int)(x*13.0/100.0);
+				else             px=(int)(x*13.0);    /* em/rem/unitless multiplier */
+				int extra = px-13; if(extra<-3)extra=-3; if(extra>14)extra=14;
+				d->prop=CP_LINEH; d->v16=(uint16_t)(int16_t)extra;
+			}
+		} else if(!strcmp(prop,"letter-spacing")){
+			char *e; double x = strtod(val,&e);       /* may be negative */
+			if(e!=val){
+				int v=(int)x; if(v<-2)v=-2; if(v>6)v=6;
+				d->prop=CP_LETSP; d->v16=(uint16_t)(int16_t)v;
+			}
+		} else if(!strcmp(prop,"text-transform")){
+			d->prop=CP_XFORM;
+			d->v8 = strstr(val,"upper") ? 1 : (strstr(val,"lower") ? 2 : 0);
 		}
 		if(d->prop) n++;
 	}
@@ -273,15 +379,77 @@ static void emit_rule(const c_sel *sels, int nsel, uint16_t spec, const c_decl *
 	s_nrules++;
 }
 
+/* ===== @media evaluation (viewport = 320x320, light scheme, no pointer) ===== */
+static int media_feature_true(const char *f, int len){
+	char b[64]; int n=0;
+	for(int i=0;i<len && n<63;i++) b[n++]=(char)lc(f[i]);
+	b[n]=0;
+	char *cl = strchr(b, ':');
+	if(!cl) return 0;                        /* boolean feature test: not us */
+	*cl=0;
+	const char *v = cl+1; while(*v==' ') v++;
+	char *name=b; while(*name==' ') name++;
+	{ int e=(int)strlen(name); while(e>0&&name[e-1]==' ') name[--e]=0; }
+	if(strstr(name,"width")||strstr(name,"height")){
+		char *end; double x = strtod(v,&end);
+		if(end==v) return 0;
+		int px = (int)((!strncmp(end,"em",2)||!strncmp(end,"rem",3)) ? x*16.0 : x);
+		if(!strncmp(name,"min",3)) return SCREEN_W >= px;
+		if(!strncmp(name,"max",3)) return SCREEN_W <= px;
+		return SCREEN_W == px;
+	}
+	if(strstr(name,"prefers-color-scheme")) return strstr(v,"light")!=NULL;
+	if(strstr(name,"prefers-reduced"))      return 1;      /* reduced motion/data: yes */
+	if(!strcmp(name,"orientation"))         return 1;      /* square screen: either */
+	if(strstr(name,"hover"))                return strstr(v,"none")!=NULL;
+	if(strstr(name,"pointer"))              return strstr(v,"coarse")!=NULL;
+	return 0;                                /* unknown feature: clause fails */
+}
+static int media_clause_true(const char *q, int len){
+	int i=0;
+	while(i<len){
+		while(i<len && (q[i]==' '||q[i]=='\t'||q[i]=='\n'||q[i]=='\r')) i++;
+		if(i>=len) break;
+		if(q[i]=='('){
+			int st=++i, depth=1;
+			while(i<len && depth){ if(q[i]=='(')depth++; else if(q[i]==')')depth--; i++; }
+			if(!media_feature_true(q+st, i-st-1)) return 0;
+		} else {
+			int st=i;
+			while(i<len && q[i]!=' '&&q[i]!='\t'&&q[i]!='(') i++;
+			int wl=i-st;
+			if(wl==3 && !strncmp(q+st,"not",3)) return 0;   /* conservative */
+			if((wl==5 && !strncmp(q+st,"print",5)) ||
+			   (wl==6 && !strncmp(q+st,"speech",6))) return 0;
+			/* "and", "only", "screen", "all": accept / ignore */
+		}
+	}
+	return 1;
+}
+static int media_true(const char *q){                     /* q = text after '@' */
+	while(*q==' ') q++;
+	if(strncmp(q,"media",5)) return 0;                     /* other @-blocks: skip */
+	q += 5;
+	for(;;){                                               /* comma list = OR */
+		const char *end = strchr(q, ',');
+		int ql = end ? (int)(end-q) : (int)strlen(q);
+		if(media_clause_true(q, ql)) return 1;
+		if(!end) return 0;
+		q = end+1;
+	}
+}
+
 /* ===== stylesheet tokenizer (streaming) ===== */
 enum { TS_SEL, TS_DECL, TS_ATHEAD, TS_ATBLK };
 static int  ts_state, ts_atdepth, ts_cmt, ts_star, ts_slash, ts_selovf;
+static int  ts_mdepth;             /* inside N accepted @media blocks */
 static char selb[256]; static int seln;
 static char dclb[512]; static int dcln;
+static char atb[160];  static int atbn;
 
 void kf_css_sheet_begin(void){
 	ts_state=TS_SEL; ts_atdepth=0; ts_cmt=0; ts_star=0; ts_slash=0; ts_selovf=0;
-	seln=0; dcln=0;
+	ts_mdepth=0; seln=0; dcln=0; atbn=0;
 }
 static int sel_blank(void){
 	for(int i=0;i<seln;i++)
@@ -309,13 +477,18 @@ static void feed2(int c){
 	switch(ts_state){
 	case TS_SEL:
 		if(c=='{'){ ts_state=TS_DECL; dcln=0; }
-		else if(c=='@' && sel_blank()){ ts_state=TS_ATHEAD; }
-		else if(c=='}'){ seln=0; ts_selovf=0; }
+		else if(c=='@' && sel_blank()){ ts_state=TS_ATHEAD; atbn=0; }
+		else if(c=='}'){ if(ts_mdepth>0) ts_mdepth--; seln=0; ts_selovf=0; }
 		else { if(seln<(int)sizeof selb-1) selb[seln++]=(char)c; else ts_selovf=1; }
 		break;
 	case TS_ATHEAD:
 		if(c==';'){ ts_state=TS_SEL; seln=0; ts_selovf=0; }
-		else if(c=='{'){ ts_atdepth=1; ts_state=TS_ATBLK; }
+		else if(c=='{'){
+			atb[atbn]=0;
+			if(media_true(atb)){ ts_mdepth++; ts_state=TS_SEL; seln=0; }  /* parse inside */
+			else { ts_atdepth=1; ts_state=TS_ATBLK; }                     /* skip block */
+		}
+		else { if(atbn<(int)sizeof atb-1) atb[atbn++]=(char)lc(c); }
 		break;
 	case TS_ATBLK:
 		if(c=='{') ts_atdepth++;
@@ -397,6 +570,12 @@ static void apply_decl(kf_css_style *st, const c_decl *d){
 	case CP_LIST:
 		if(d->v8) st->flags|=KF_CSS_F_NOBULLET; else st->flags&=(uint16_t)~KF_CSS_F_NOBULLET;
 		break;
+	case CP_BORDER: st->border_w=d->v8; st->border_c=d->v16; break;
+	case CP_RADIUS: st->radius=(uint8_t)d->v16; break;
+	case CP_MARGV:  if((uint8_t)d->v16 > st->pad_v) st->pad_v=(uint8_t)d->v16; break;
+	case CP_LINEH:  st->line_sp=(int8_t)(int16_t)d->v16; break;
+	case CP_LETSP:  st->let_sp=(int8_t)(int16_t)d->v16; break;
+	case CP_XFORM:  st->xform=d->v8; break;
 	}
 }
 
@@ -410,9 +589,12 @@ void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
                   const kf_css_style *parent, kf_css_style *out){
 	memset(out, 0, sizeof *out);
 	if(parent){
-		out->flags = parent->flags & INHERIT_MASK;
-		out->fg    = parent->fg;
-		out->bg    = parent->bg;
+		out->flags   = parent->flags & INHERIT_MASK;
+		out->fg      = parent->fg;
+		out->bg      = parent->bg;
+		out->line_sp = parent->line_sp;    /* typography inherits (per CSS) */
+		out->let_sp  = parent->let_sp;
+		out->xform   = parent->xform;
 	}
 	if(depth<=0) return;
 	const kf_css_elem *E = &stk[depth-1];

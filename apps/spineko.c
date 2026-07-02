@@ -163,7 +163,8 @@ static lv_color_t c565(uint16_t v){
 	uint8_t b=(uint8_t)((v&0x1f)<<3); b|=b>>5;
 	return lv_color_make(r,g,b);
 }
-/* CSS extras that go on top of mk_label: background, alignment, decoration */
+/* CSS extras that go on top of mk_label: background, alignment, decoration,
+   borders, spacing */
 static void post_style(lv_obj_t *l, const kf_html_op *op){
 	if(op->sflags & KF_ST_BG){
 		lv_obj_set_style_bg_color(l, c565(op->bg), 0);
@@ -174,6 +175,23 @@ static void post_style(lv_obj_t *l, const kf_html_op *op){
 	int dec = ((op->sflags&KF_ST_UNDER) ? LV_TEXT_DECOR_UNDERLINE : 0)
 	        | ((op->sflags&KF_ST_STRIKE) ? LV_TEXT_DECOR_STRIKETHROUGH : 0);
 	if(dec) lv_obj_set_style_text_decor(l, dec, 0);
+	if(op->border_w){
+		lv_obj_set_style_border_width(l, op->border_w, 0);
+		lv_obj_set_style_border_color(l, c565(op->border_c), 0);
+		lv_obj_set_style_pad_hor(l, 3, 0);
+	}
+	if(op->radius)  lv_obj_set_style_radius(l, op->radius, 0);
+	if(op->pad_v)   lv_obj_set_style_pad_ver(l, 1 + op->pad_v/2, 0);  /* halved: rhythm, not chasm */
+	if(op->line_sp) lv_obj_set_style_text_line_space(l, op->line_sp, 0);
+	if(op->let_sp)  lv_obj_set_style_text_letter_space(l, op->let_sp, 0);
+}
+/* text-transform, in place */
+static void xform_buf(char *s, uint8_t mode){
+	if(!mode) return;
+	for(; *s; s++){
+		if(mode==1){ if(*s>='a'&&*s<='z') *s -= 32; }
+		else       { if(*s>='A'&&*s<='Z') *s += 32; }
+	}
 }
 static int padc(int base, const kf_html_op *op){
 	int p = base + op->indent;
@@ -294,6 +312,7 @@ static void render_ops(void){
 		if(heap_free() < HEAP_FLOOR){ low_mem=1; break; }   /* stop before OOM-panic */
 		kf_html_op op; kf_html_get_op(i, &op);
 		kf_html_read_text(op.text_off, op.text_len, buf, sizeof buf);
+		xform_buf(buf, op.xform);
 		/* CSS overrides: color + font-size, on top of the per-kind defaults */
 		const lv_font_t *fnt = (op.sflags & KF_ST_BIG) ? KF_FONT_BIG : KF_FONT;
 		lv_color_t      ctx  = (op.sflags & KF_ST_FG) ? c565(op.fg) : WEB_TEXT;

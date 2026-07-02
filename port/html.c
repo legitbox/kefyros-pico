@@ -96,7 +96,11 @@ static void emit_styled(uint8_t kind, uint8_t depth, uint16_t index,
 		if(st->flags & KF_CSS_F_RIGHT)    op.sflags|=KF_ST_RIGHT;
 		if(st->flags & KF_CSS_F_BIG)      op.sflags|=KF_ST_BIG;
 		if(st->flags & KF_CSS_F_NOBULLET) op.sflags|=KF_ST_NOBULLET;
-		op.indent = st->indent;
+		op.indent   = st->indent;
+		op.border_c = st->border_c; op.border_w = st->border_w;
+		op.radius   = st->radius;   op.pad_v    = st->pad_v;
+		op.xform    = st->xform;
+		op.line_sp  = st->line_sp;  op.let_sp   = st->let_sp;
 	}
 	if(text){
 		if(tlen < 0) tlen = (int)strlen(text);

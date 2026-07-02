@@ -32,6 +32,13 @@ typedef struct {
 	uint16_t flags;                /* KF_CSS_F_* */
 	uint16_t fg, bg;               /* RGB565 */
 	uint8_t  indent;               /* extra left indent, px (margin/padding-left) */
+	uint8_t  border_w;             /* border width px (0 = none) */
+	uint16_t border_c;             /* border color RGB565 */
+	uint8_t  radius;               /* border-radius px */
+	uint8_t  pad_v;                /* extra vertical padding px (margin/padding-top/bottom) */
+	int8_t   line_sp;              /* extra line spacing px (line-height - 1em) */
+	int8_t   let_sp;               /* letter-spacing px */
+	uint8_t  xform;                /* text-transform: 0 none, 1 upper, 2 lower */
 } kf_css_style;
 
 /* one open element, as seen by selector matching */
