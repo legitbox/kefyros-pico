@@ -387,7 +387,9 @@ static void apply_decl(kf_css_style *st, const c_decl *d){
 		if(d->v8 & 2) st->flags|=KF_CSS_F_STRIKE;
 		break;
 	case CP_FSIZE:
-		if(d->v16>=17) st->flags|=KF_CSS_F_BIG; else st->flags&=(uint16_t)~KF_CSS_F_BIG;
+		/* >=20px: modern sites set 17-19px BODY text; only genuinely-large text
+		   (headings) should get the 20px font */
+		if(d->v16>=20) st->flags|=KF_CSS_F_BIG; else st->flags&=(uint16_t)~KF_CSS_F_BIG;
 		break;
 	case CP_INDENT:
 		if(d->v16 > st->indent) st->indent = (uint8_t)(d->v16>200?200:d->v16);
@@ -398,8 +400,11 @@ static void apply_decl(kf_css_style *st, const c_decl *d){
 	}
 }
 
-#define INHERIT_MASK (KF_CSS_F_FG|KF_CSS_F_CENTER|KF_CSS_F_RIGHT|KF_CSS_F_BIG| \
-                      KF_CSS_F_NOBULLET|KF_CSS_F_HIDE)
+/* bg inherits too (unlike real CSS): styling is per-BLOCK, and pages hang their
+   backgrounds on <div>/<body> containers whose text lives in child <p>s — without
+   propagation a container background would never be visible at all. */
+#define INHERIT_MASK (KF_CSS_F_FG|KF_CSS_F_BG|KF_CSS_F_CENTER|KF_CSS_F_RIGHT| \
+                      KF_CSS_F_BIG|KF_CSS_F_NOBULLET|KF_CSS_F_HIDE)
 
 void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
                   const kf_css_style *parent, kf_css_style *out){
@@ -407,6 +412,7 @@ void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
 	if(parent){
 		out->flags = parent->flags & INHERIT_MASK;
 		out->fg    = parent->fg;
+		out->bg    = parent->bg;
 	}
 	if(depth<=0) return;
 	const kf_css_elem *E = &stk[depth-1];

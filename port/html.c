@@ -171,13 +171,19 @@ static void decode_named(const char *e){
 	else if(!strcmp(e,"middot")||!strcmp(e,"bull")) push_char('*');
 	else push_char('?');
 }
+/* Latin-1 0xC0..0xFF -> nearest ASCII (accents stripped) */
+static const char L1MAP[64] =
+	"AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPsaaaaaaaceeeeiiiidnooooo/ouuuuypy";
 static void decode_codepoint(long v){
 	if(v=='\t'||v=='\n'||v==0xa0) push_char(' ');
 	else if(v>=32 && v<127) push_char((int)v);
+	else if(v>=0xc0 && v<=0xff) push_char(L1MAP[v-0xc0]);
 	else if(v==0x2018||v==0x2019) push_char('\'');
 	else if(v==0x201c||v==0x201d) push_char('"');
 	else if(v==0x2013||v==0x2014) push_char('-');
 	else if(v==0x2026) push_str("...");
+	else if(v==0xb7||v==0x2022) push_char('*');       /* middot / bullet */
+	else if(v==0xb0) push_str("deg");
 	else push_char('?');
 }
 static void decode_entity(void){               /* '&' already consumed */
@@ -483,6 +489,23 @@ static uint32_t do_parse(uint32_t body_base, uint32_t len){
 	while((c = next_byte()) >= 0){
 		if(c=='<') read_tag();
 		else if(c=='&') decode_entity();
+		else if(c>=0xC0){                    /* UTF-8 lead byte -> codepoint */
+			int need = (c>=0xF0) ? 3 : (c>=0xE0) ? 2 : 1;
+			long v = c & (0x3F >> need);
+			for(int i=0;i<need;i++){
+				int cc = next_byte();
+				if(cc<0x80 || cc>0xBF){      /* truncated/invalid: resync */
+					v = -1;
+					if(cc=='<') read_tag();
+					else if(cc=='&') decode_entity();
+					else if(cc>=0 && cc<0x80) push_char(cc);
+					break;
+				}
+				v = (v<<6) | (cc & 0x3F);
+			}
+			if(v>=0) decode_codepoint(v);
+		}
+		else if(c>=0x80) ;                   /* stray continuation byte: drop */
 		else push_char(c);
 	}
 	if(in_link) close_link();

@@ -472,6 +472,7 @@ static const char START_HTML[] =
 	"<li><a href=\"http://info.cern.ch/\">CERN - the first web page</a></li>"
 	"<li><a href=\"http://example.com/\">example.com</a></li>"
 	"<li><a href=\"http://motherfuckingwebsite.com/\">motherfuckingwebsite</a></li>"
+	"<li><a href=\"http://bettermotherfuckingwebsite.com/\">bettermotherfuckingwebsite (css test)</a></li>"
 	"<li><a href=\"http://textfiles.com/\">textfiles.com</a></li>"
 	"</ul>"
 	"<hr>"
