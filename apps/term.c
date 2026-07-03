@@ -1,16 +1,16 @@
 // apps/term.c — "Term": SSH-2 terminal client for the PicoCalc.
 //
-// Flow: a small LVGL quick-connect screen (user@host[:port] + password) hands
-// off to a modal full-screen session loop (core 1 parked, LVGL frozen) that
-// pumps Wi-Fi/lwIP, drives the SSH core (port/ssh.c via port/ssh_tcp.c), feeds
-// decrypted shell output into the VT100 emulator (port/vt100.c) and paints dirty
-// rows through the direct-blit renderer. The Break key exits.
+// The whole app is a single modal, full-screen, grab-mode session (core 1 parked,
+// LVGL frozen) drawn with a direct-blit 6x12 renderer:
+//   connect screen (custom text UI)  ->  live SSH session  ->  back to connect.
+// Break exits the session (back to the connect screen); Break on the connect
+// screen returns to the launcher. Decrypted shell output feeds the VT100 core
+// (port/vt100.c); the SSH transport is port/ssh.c over port/ssh_tcp.c.
 //
-// M4 scope: password auth + quick-connect + accept-all host keys (fingerprint is
-// shown). Saved hosts, TOFU known_hosts, SD key auth, scrollback and keygen are
-// M5/M6. The whole app runs at eco 250 MHz (radio ceiling).
+// M4 scope: password auth + quick-connect + accept-all host keys (fingerprint
+// shown). Saved hosts, TOFU, SD key auth, scrollback, keygen are M5/M6. The whole
+// session runs at eco 250 MHz (radio ceiling).
 #include "kefyros.h"
-#include "theme.h"
 #include "port/disp.h"
 #include "vt100.h"
 #include "ssh.h"
@@ -30,6 +30,15 @@ extern const uint8_t kf_font6x12[0x91][12];
 #define GRID_Y 4
 #define STRIP_W (VT_COLS * CELL_W)
 
+/* RGB565 palette for the chrome */
+#define C_FG    0xBDF7   /* light gray */
+#define C_BG    0x0000
+#define C_WHITE 0xFFFF
+#define C_CYAN  0x07FF
+#define C_GRAY  0x8410
+#define C_RED   0xF800
+#define C_GREEN 0x07E0
+
 static uint16_t s_rowbuf[STRIP_W * CELL_H];
 static vt_t   *g_vt;
 static ssh_t  *g_ssh;
@@ -39,7 +48,28 @@ static int     s_need_render;
 static char s_user[64], s_host[128], s_pass[128];
 static int  s_port;
 
-/* ---- renderer (shared with the M1 path) ---- */
+/* ---- low-level text row blit ---- */
+static void put_line(int r, const char *s, uint16_t fg, uint16_t bg, int cursor_col){
+	int sl = (int)strlen(s);
+	for(int py = 0; py < CELL_H; py++){
+		uint16_t *out = &s_rowbuf[py * STRIP_W];
+		for(int cx = 0; cx < VT_COLS; cx++){
+			uint8_t ch = (cx < sl) ? (uint8_t)s[cx] : ' ';
+			if(ch >= 0x91) ch = '?';
+			uint16_t f = fg, b = bg;
+			if(cx == cursor_col){ f = bg; b = fg; }
+			const uint8_t *bits = kf_font6x12[ch];
+			uint16_t *px = &out[cx * CELL_W];
+			uint8_t rb = bits[py];
+			for(int k = 0; k < CELL_W; k++) px[k] = ((rb >> (7 - k)) & 1) ? f : b;
+		}
+	}
+	draw_buffer_spi(GRID_X, GRID_Y + r * CELL_H,
+	                GRID_X + STRIP_W - 1, GRID_Y + r * CELL_H + CELL_H - 1,
+	                (unsigned char *)s_rowbuf);
+}
+
+/* ---- VT grid renderer (session) ---- */
 static void render_row(int r){
 	const vt_cell_t *row = vt_row(g_vt, r);
 	int scr_rev = vt_reverse_screen(g_vt);
@@ -72,10 +102,7 @@ static void render_dirty(void){
 	uint32_t d = vt_dirty_and_clear(g_vt);
 	for(int r = 0; r < VT_ROWS; r++) if(d & (1u << r)) render_row(r);
 }
-static void render_all(void){
-	(void)vt_dirty_and_clear(g_vt);
-	for(int r = 0; r < VT_ROWS; r++) render_row(r);
-}
+static void render_all(void){ (void)vt_dirty_and_clear(g_vt); for(int r = 0; r < VT_ROWS; r++) render_row(r); }
 static void vstatus(const char *msg){
 	char line[96]; snprintf(line, sizeof line, "\r\n* %s\r\n", msg);
 	vt_feed(g_vt, (const uint8_t *)line, (int)strlen(line));
@@ -88,17 +115,13 @@ static void ev_rng(uint8_t *b, int n, void *ud){ (void)ud;
 }
 static uint32_t ev_now(void *ud){ (void)ud; return (uint32_t)(time_us_64() / 1000); }
 static int ev_hostkey(const uint8_t pub[32], const char *fp, void *ud){ (void)pub;(void)ud;
-	/* M4: accept-all (TOFU persistence lands in M5). Show the fingerprint. */
-	vstatus(fp);
-	return 1;
+	vstatus(fp); return 1;   /* M4: accept-all; TOFU persistence in M5 */
 }
 static void ev_data(const uint8_t *b, int n, void *ud){ (void)ud;
-	vt_feed(g_vt, b, n);
-	ssh_consumed(g_ssh, n);
-	s_need_render = 1;
+	vt_feed(g_vt, b, n); ssh_consumed(g_ssh, n); s_need_render = 1;
 }
 static void ev_state(ssh_state_t st, const char *d, void *ud){ (void)ud;
-	if(st == SSH_ST_RUNNING) return;   /* let the shell own the screen */
+	if(st == SSH_ST_RUNNING) return;
 	if(d) vstatus(d);
 }
 
@@ -143,20 +166,86 @@ static int keymap(uint8_t key, int mods, int appcursor, uint8_t *out){
 	return 0;
 }
 
-/* ---- modal session ---- */
-static void run_session(void){
-	kf_grab_input(1);
-	kf_clock_eco();                 /* radio-safe clock for the whole session */
-	kf_net_init();
-	if(kf_net_state() != KF_NET_ONLINE && !kf_net_ssid()[0]) kf_net_autoconnect();
+/* ---- connect screen (custom, grab-mode) ---- */
+static int parse_target(const char *in){
+	const char *at = strchr(in, '@');
+	if(!at || at == in) return -1;
+	int ul = (int)(at - in); if(ul >= (int)sizeof s_user) ul = sizeof s_user - 1;
+	memcpy(s_user, in, ul); s_user[ul] = 0;
+	const char *hp = at + 1;
+	const char *colon = strchr(hp, ':');
+	s_port = 22;
+	if(colon){
+		int hl = (int)(colon - hp); if(hl >= (int)sizeof s_host) hl = sizeof s_host - 1;
+		memcpy(s_host, hp, hl); s_host[hl] = 0;
+		s_port = atoi(colon + 1); if(s_port <= 0 || s_port > 65535) s_port = 22;
+	} else { strncpy(s_host, hp, sizeof s_host - 1); s_host[sizeof s_host - 1] = 0; }
+	return s_host[0] ? 0 : -1;
+}
 
+/* returns 1 to connect (s_user/s_host/s_port/s_pass filled), 0 to go to launcher */
+static int connect_screen(void){
+	char host[96] = {0}, pass[96] = {0};
+	int hlen = 0, plen = 0, field = 0;
+	const char *err = "";
+
+	draw_rect_spi(0, 0, LCD_W - 1, LCD_H - 1, 0x000000);
+	put_line(1,  " Terminal - SSH client", C_CYAN, C_BG, -1);
+	put_line(3,  " host  (user@host[:port]):", C_FG, C_BG, -1);
+	put_line(6,  " password:", C_FG, C_BG, -1);
+	put_line(9,  " [Enter] connect   [Tab] next field", C_GRAY, C_BG, -1);
+	put_line(10, " [Break] back to launcher", C_GRAY, C_BG, -1);
+
+	for(;;){
+		/* dynamic field rows */
+		char hb[64], pb[64];
+		snprintf(hb, sizeof hb, "  %s", host);
+		snprintf(pb, sizeof pb, "  ");
+		for(int i = 0; i < plen && (2 + i) < (int)sizeof pb - 1; i++) pb[2 + i] = '*';
+		pb[2 + (plen < 60 ? plen : 60)] = 0;
+		put_line(4,  hb, field == 0 ? C_WHITE : C_FG, C_BG, field == 0 ? 2 + hlen : -1);
+		put_line(7,  pb, field == 1 ? C_WHITE : C_FG, C_BG, field == 1 ? 2 + plen : -1);
+		put_line(12, err[0] ? err : " ", C_RED, C_BG, -1);
+
+		uart_poll();
+		uint8_t st, key; int changed = 0;
+		while(uart_pop_key(&st, &key)){
+			if(st == KS_RELEASE) continue;
+			if(key == DK_BREAK || key == DK_ESC) return 0;
+			if(key == DK_TAB || key == DK_UP || key == DK_DOWN){ field = 1 - field; changed = 1; continue; }
+			if(key == DK_ENTER){
+				if(parse_target(host) == 0){
+					strncpy(s_pass, pass, sizeof s_pass - 1); s_pass[sizeof s_pass - 1] = 0;
+					return 1;
+				}
+				err = " enter user@host[:port]"; changed = 1; continue;
+			}
+			if(key == DK_BACKSPACE){
+				if(field == 0 && hlen > 0){ host[--hlen] = 0; }
+				else if(field == 1 && plen > 0){ pass[--plen] = 0; }
+				changed = 1; continue;
+			}
+			if(key >= 0x20 && key < 0x7f){
+				if(field == 0 && hlen < (int)sizeof host - 1){ host[hlen++] = (char)key; host[hlen] = 0; }
+				else if(field == 1 && plen < (int)sizeof pass - 1){ pass[plen++] = (char)key; pass[plen] = 0; }
+				changed = 1;
+			}
+		}
+		(void)changed;
+		sleep_ms(8);
+	}
+}
+
+/* ---- live session (panel already ours, input grabbed, clock eco) ---- */
+static void run_ssh_session(void){
 	ssh_cb_t cb = { ssh_tcp_tx, ev_rng, ev_now, ev_hostkey, ev_data, ev_state, NULL };
 	g_vt  = vt_create(malloc, NULL, NULL, NULL);
 	g_ssh = ssh_create(&cb, malloc, free);
-	if(!g_vt || !g_ssh){ if(g_vt) vt_destroy(g_vt, free); if(g_ssh) ssh_destroy(g_ssh); return; }
+	if(!g_vt || !g_ssh){ if(g_vt){ vt_destroy(g_vt, free); g_vt = NULL; } if(g_ssh){ ssh_destroy(g_ssh); g_ssh = NULL; } return; }
 	ssh_tcp_init(g_ssh);
 
-	disp_pause_core1();
+	if(kf_net_state() != KF_NET_ONLINE && !kf_net_ssid()[0]) kf_net_autoconnect();
+
 	draw_rect_spi(0, 0, LCD_W - 1, LCD_H - 1, 0x000000);
 	render_all();
 	vstatus("connecting to Wi-Fi...");
@@ -171,8 +260,8 @@ static void run_session(void){
 		while(uart_pop_key(&st, &key)){
 			if(st == KS_RELEASE) continue;
 			if(key == DK_BREAK){ running = 0; break; }
-			if(done){ running = 0; break; }   /* any key dismisses an error screen */
-			if(g_ssh && ssh_state(g_ssh) == SSH_ST_RUNNING){
+			if(done){ running = 0; break; }
+			if(ssh_state(g_ssh) == SSH_ST_RUNNING){
 				uint8_t ob[8]; int ol = keymap(key, uart_mods(), vt_mode_appcursor(g_vt), ob);
 				if(ol > 0) ssh_send_channel(g_ssh, ob, ol);
 			}
@@ -189,7 +278,7 @@ static void run_session(void){
 					ssh_tcp_connect(s_host, s_port);
 					tcp_started = 1;
 				} else if(ev_now(NULL) > net_deadline){
-					vstatus("Wi-Fi not connected — Break to exit"); done = 1;
+					vstatus("Wi-Fi not connected - Break to exit"); done = 1;
 				}
 			} else {
 				ssh_tcp_poll();
@@ -199,108 +288,44 @@ static void run_session(void){
 					if(ssh_wants_password(g_ssh)) ssh_auth_password(g_ssh, s_pass);
 				}
 				ssh_state_t sst = ssh_state(g_ssh);
-				if(sst == SSH_ST_ERROR){ char m[160]; snprintf(m, sizeof m, "%s — Break to exit", ssh_error(g_ssh)); vstatus(m); done = 1; }
-				else if(sst == SSH_ST_CLOSED){ vstatus("connection closed — Break to exit"); done = 1; }
-				else if(ssh_tcp_is_dead() && sst != SSH_ST_RUNNING){ vstatus("disconnected — Break to exit"); done = 1; }
+				if(sst == SSH_ST_ERROR){ char m[160]; snprintf(m, sizeof m, "%s - Break to exit", ssh_error(g_ssh)); vstatus(m); done = 1; }
+				else if(sst == SSH_ST_CLOSED){ vstatus("connection closed - Break to exit"); done = 1; }
+				else if(ssh_tcp_is_dead() && sst != SSH_ST_RUNNING){ vstatus("disconnected - Break to exit"); done = 1; }
 			}
 		}
 
 		if(s_need_render){ render_dirty(); s_need_render = 0; }
-
 		if(time_us_64() - t_blink >= 500000ull){
-			t_blink = time_us_64();
-			s_cursor_on ^= 1;
-			int cr, cc, cv; vt_cursor(g_vt, &cr, &cc, &cv);
-			render_row(cr);
+			t_blink = time_us_64(); s_cursor_on ^= 1;
+			int cr, cc, cv; vt_cursor(g_vt, &cr, &cc, &cv); render_row(cr);
 		}
 		sleep_ms(4);
 	}
 
-	if(g_ssh && ssh_state(g_ssh) == SSH_ST_RUNNING) ssh_disconnect(g_ssh, "bye");
-	disp_resume_core1();
+	if(ssh_state(g_ssh) == SSH_ST_RUNNING) ssh_disconnect(g_ssh, "bye");
 	ssh_tcp_close();
 	ssh_destroy(g_ssh); g_ssh = NULL;
 	vt_destroy(g_vt, free); g_vt = NULL;
 	memset(s_pass, 0, sizeof s_pass);
+}
+
+/* ---- app entry ---- */
+void app_term_open(void){
+	lv_obj_t *blank = lv_obj_create(NULL);
+	lv_obj_set_style_bg_color(blank, lv_color_black(), 0);
+	lv_screen_load(blank);
+
+	kf_grab_input(1);
+	kf_clock_eco();          /* radio-safe; do its own core1 pause/resume BEFORE ours */
+	kf_net_init();
+	disp_pause_core1();
+
+	while(connect_screen()) run_ssh_session();
+
+	disp_resume_core1();
 	kf_grab_input(0);
 	kf_clock_normal();
-}
-
-/* ---- connect screen (LVGL) ---- */
-static lv_obj_t *scr, *ta_host, *ta_pass, *lbl_err;
-
-static int parse_target(const char *in){
-	/* user@host[:port] */
-	const char *at = strchr(in, '@');
-	if(!at || at == in) return -1;
-	int ul = (int)(at - in); if(ul >= (int)sizeof s_user) ul = sizeof s_user - 1;
-	memcpy(s_user, in, ul); s_user[ul] = 0;
-	const char *hp = at + 1;
-	const char *colon = strchr(hp, ':');
-	s_port = 22;
-	if(colon){
-		int hl = (int)(colon - hp); if(hl >= (int)sizeof s_host) hl = sizeof s_host - 1;
-		memcpy(s_host, hp, hl); s_host[hl] = 0;
-		s_port = atoi(colon + 1); if(s_port <= 0 || s_port > 65535) s_port = 22;
-	} else {
-		strncpy(s_host, hp, sizeof s_host - 1); s_host[sizeof s_host - 1] = 0;
-	}
-	return s_host[0] ? 0 : -1;
-}
-
-static void do_connect(lv_event_t *e){ (void)e;
-	const char *host_in = lv_textarea_get_text(ta_host);
-	const char *pass_in = lv_textarea_get_text(ta_pass);
-	if(parse_target(host_in) != 0){
-		lv_label_set_text(lbl_err, "enter user@host[:port]");
-		return;
-	}
-	strncpy(s_pass, pass_in, sizeof s_pass - 1); s_pass[sizeof s_pass - 1] = 0;
-
-	run_session();       /* modal; returns when the session ends */
 	kf_back_to_launcher();
 }
 
-void app_term_open(void){
-	scr = lv_obj_create(NULL);
-	kf_inset_top(scr);
-	lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-	lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-	lv_obj_set_style_pad_row(scr, 8, 0);
-	lv_obj_set_style_pad_all(scr, 12, 0);
-
-	lv_obj_t *title = lv_label_create(scr);
-	lv_label_set_text(title, "Terminal — SSH");
-	lv_obj_set_style_text_font(title, KF_FONT_BIG, 0);
-
-	lv_group_t *g = kf_use_group();
-
-	ta_host = lv_textarea_create(scr);
-	lv_textarea_set_one_line(ta_host, true);
-	lv_textarea_set_placeholder_text(ta_host, "user@host[:port]");
-	lv_obj_set_width(ta_host, lv_pct(100));
-	lv_group_add_obj(g, ta_host);
-
-	ta_pass = lv_textarea_create(scr);
-	lv_textarea_set_one_line(ta_pass, true);
-	lv_textarea_set_password_mode(ta_pass, true);
-	lv_textarea_set_placeholder_text(ta_pass, "password");
-	lv_obj_set_width(ta_pass, lv_pct(100));
-	lv_group_add_obj(g, ta_pass);
-
-	lv_obj_t *btn = lv_button_create(scr);
-	lv_obj_t *bl = lv_label_create(btn);
-	lv_label_set_text(bl, "Connect");
-	lv_obj_add_event_cb(btn, do_connect, LV_EVENT_CLICKED, NULL);
-	lv_group_add_obj(g, btn);
-
-	lbl_err = lv_label_create(scr);
-	lv_label_set_text(lbl_err, "Tab to move • Enter connects • Break exits session");
-	lv_obj_set_style_text_font(lbl_err, KF_FONT, 0);
-
-	lv_group_focus_obj(ta_host);
-	lv_screen_load(scr);
-}
-
-/* modal loop owns the session; nothing to pump from the superloop. */
 void term_poll(void){}
