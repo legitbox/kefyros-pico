@@ -117,6 +117,13 @@ static uint32_t ev_now(void *ud){ (void)ud; return (uint32_t)(time_us_64() / 100
 static int ev_hostkey(const uint8_t pub[32], const char *fp, void *ud){ (void)pub;(void)ud;
 	vstatus(fp); return 1;   /* M4: accept-all; TOFU persistence in M5 */
 }
+/* terminal-query answerback (DSR cursor-position, Device Attributes): the emulator
+   generates the reply bytes; we must send them back to the remote. Interactive TUIs
+   (terminal.shop / bubbletea) send ESC[6n and WAIT for the CPR before drawing, so
+   without this the screen stays blank. */
+static void ev_answer(const uint8_t *b, int n, void *ud){ (void)ud;
+	if(g_ssh && ssh_state(g_ssh) == SSH_ST_RUNNING) ssh_send_channel(g_ssh, b, n);
+}
 static void ev_data(const uint8_t *b, int n, void *ud){ (void)ud;
 	vt_feed(g_vt, b, n); ssh_consumed(g_ssh, n); s_need_render = 1;
 }
@@ -169,10 +176,17 @@ static int keymap(uint8_t key, int mods, int appcursor, uint8_t *out){
 /* ---- connect screen (custom, grab-mode) ---- */
 static int parse_target(const char *in){
 	const char *at = strchr(in, '@');
-	if(!at || at == in) return -1;
-	int ul = (int)(at - in); if(ul >= (int)sizeof s_user) ul = sizeof s_user - 1;
-	memcpy(s_user, in, ul); s_user[ul] = 0;
-	const char *hp = at + 1;
+	const char *hp;
+	if(at && at != in){
+		int ul = (int)(at - in); if(ul >= (int)sizeof s_user) ul = sizeof s_user - 1;
+		memcpy(s_user, in, ul); s_user[ul] = 0;
+		hp = at + 1;
+	} else {
+		/* no "user@" -> default username. terminal.shop and other any-key servers
+		   ignore it; ordinary servers can still be reached with an explicit user@. */
+		strcpy(s_user, "anon");
+		hp = in;
+	}
 	const char *colon = strchr(hp, ':');
 	s_port = 22;
 	if(colon){
@@ -239,7 +253,7 @@ static int connect_screen(void){
 /* ---- live session (panel already ours, input grabbed, clock eco) ---- */
 static void run_ssh_session(void){
 	ssh_cb_t cb = { ssh_tcp_tx, ev_rng, ev_now, ev_hostkey, ev_data, ev_state, NULL };
-	g_vt  = vt_create(malloc, NULL, NULL, NULL);
+	g_vt  = vt_create(malloc, ev_answer, NULL, NULL);
 	g_ssh = ssh_create(&cb, malloc, free);
 	if(!g_vt || !g_ssh){ if(g_vt){ vt_destroy(g_vt, free); g_vt = NULL; } if(g_ssh){ ssh_destroy(g_ssh); g_ssh = NULL; } return; }
 	ssh_tcp_init(g_ssh);
@@ -282,7 +296,17 @@ static void run_ssh_session(void){
 				}
 			} else {
 				ssh_tcp_poll();
-				if(ssh_tcp_is_up() && !ssh_started){ ssh_start(g_ssh, s_user); ssh_started = 1; }
+				if(ssh_tcp_is_up() && !ssh_started){
+					/* Offer an ephemeral ed25519 key so we can authenticate to servers that
+					   accept any public key (e.g. terminal.shop / charmbracelet wish). It's
+					   tried first; if the server rejects it, auth falls back to the password.
+					   NOTE: fresh per connection -> a new identity each time. Persistent SD-key
+					   auth (/kefyros/ssh/id_ed25519) is M5. */
+					uint8_t seed[32]; ev_rng(seed, 32, NULL);
+					ssh_set_key(g_ssh, seed);
+					memset(seed, 0, sizeof seed);   /* core copied it */
+					ssh_start(g_ssh, s_user); ssh_started = 1;
+				}
 				if(ssh_started){
 					ssh_tick(g_ssh);
 					if(ssh_wants_password(g_ssh)) ssh_auth_password(g_ssh, s_pass);
