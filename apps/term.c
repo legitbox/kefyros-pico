@@ -84,7 +84,7 @@ static void demo_fill(vt_t *t){
 
 	/* a box drawn with the DEC special-graphics charset */
 	feed(t, "\033(0lqqqqqqqqqk\033(B  box-drawing (ESC(0)\r\n");
-	feed(t, "\033(0x\033(B  vt100   \033(0x\033(B\r\n");
+	feed(t, "\033(0x\033(B  vt100  \033(0x\033(B\r\n");
 	feed(t, "\033(0tqqqqqqqqqu\033(B  tees + cross\r\n");
 	feed(t, "\033(0x\033(B  \033[33mgrid\033[0m   \033(0x\033(B\r\n");
 	feed(t, "\033(0mqqqqqqqqqj\033(B\r\n\r\n");
