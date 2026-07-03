@@ -55,9 +55,10 @@ static void deskconf_save(void){
 	for(int i=0;i<nkv;i++)
 		if(fprintf(f, "%s=%s\n", kv[i].k, kv[i].v) < 0){ ok = 0; break; }
 	if(fclose(f) != 0) ok = 0;
-	if(!ok || rename(tmp, CONF_PATH) != 0){   /* leave the existing config intact on failure */
-		remove(tmp);
-		return;
+	if(!ok){ remove(tmp); return; }           /* write failed: existing config intact */
+	if(rename(tmp, CONF_PATH) != 0){          /* FatFs f_rename won't overwrite -> drop old, retry */
+		remove(CONF_PATH);
+		if(rename(tmp, CONF_PATH) != 0) remove(tmp);
 	}
 }
 

@@ -133,7 +133,8 @@ void bi_sub(bigint *r, const bigint *a, const bigint *b){
 
 void bi_mul(bigint *r, const bigint *a, const bigint *b){
 	if(a->sign == 0 || b->sign == 0){ r->n = 0; r->sign = 0; return; }
-	bigint out; bi_init(&out); bi_reserve(&out, a->n + b->n);
+	bigint out; bi_init(&out);
+	if(!bi_reserve(&out, a->n + b->n)) return;    /* OOM: r left unchanged, bi_oom set */
 	memset(out.limb, 0, (size_t)(a->n + b->n) * sizeof(uint32_t));
 	for(int i = 0; i < a->n; i++){
 		uint64_t carry = 0, ai = a->limb[i];
@@ -157,7 +158,7 @@ static int bit_len(const bigint *a){
 static int get_bit(const bigint *a, int i){ return (a->limb[i>>5] >> (i & 31)) & 1u; }
 /* out <<= 1; then OR in `bit` at position 0 */
 static void shl1_or(bigint *a, int bit){
-	bi_reserve(a, a->n + 1);
+	if(!bi_reserve(a, a->n + 1)) return;          /* OOM: leave a unchanged, no OOB write */
 	uint32_t carry = (uint32_t)(bit & 1);
 	for(int i = 0; i < a->n; i++){
 		uint32_t nc = a->limb[i] >> 31;
@@ -179,7 +180,7 @@ void bi_divmod(bigint *q, bigint *rem, const bigint *a, const bigint *b){
 	bigint Q, R, babs; bi_init(&Q); bi_init(&R); bi_init(&babs);
 	bi_copy(&babs, b); babs.sign = 1;
 	int bl = bit_len(a);
-	bi_reserve(&Q, (bl>>5) + 1);
+	if(!bi_reserve(&Q, (bl>>5) + 1)){ bi_free(&Q); bi_free(&R); bi_free(&babs); return; } /* OOM: q,rem unchanged */
 	memset(Q.limb, 0, (size_t)Q.cap * sizeof(uint32_t));
 	Q.n = (bl>>5) + 1;
 	for(int i = bl - 1; i >= 0; i--){

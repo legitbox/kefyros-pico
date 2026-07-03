@@ -102,10 +102,13 @@ static int write_current(void){
 		lv_label_set_text(lbl_keys, "SAVE FAILED");
 		return -1;
 	}
-	if(rename(tmp, path) != 0){               /* swap in only on full success */
-		remove(tmp);
-		lv_label_set_text(lbl_keys, "SAVE FAILED");
-		return -1;
+	if(rename(tmp, path) != 0){               /* FatFs f_rename won't overwrite -> drop old, retry */
+		remove(path);
+		if(rename(tmp, path) != 0){
+			remove(tmp);
+			lv_label_set_text(lbl_keys, "SAVE FAILED");
+			return -1;
+		}
 	}
 	dirty = 0; set_title();
 	lv_label_set_text(lbl_keys, "saved");

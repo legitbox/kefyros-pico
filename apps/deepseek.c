@@ -117,9 +117,10 @@ static void save_chat(void){
 		if(fputc('\n', f) == EOF){ ok = 0; break; }
 	}
 	if(fclose(f) != 0) ok = 0;
-	if(!ok || rename(tmp, cur_path) != 0){   /* keep the previous file intact on any failure */
-		remove(tmp);
-		return;
+	if(!ok){ remove(tmp); return; }          /* write failed: previous file intact */
+	if(rename(tmp, cur_path) != 0){          /* FatFs f_rename won't overwrite -> drop old, retry */
+		remove(cur_path);
+		if(rename(tmp, cur_path) != 0) remove(tmp);
 	}
 }
 
