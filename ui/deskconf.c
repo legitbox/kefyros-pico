@@ -8,14 +8,18 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define KV_MAX   128    /* was 48 — the table filled (13 app slots + settings + wifi list +
+#define KV_MAX   96     /* was 48 — the table filled (13 app slots + settings + wifi list +
                            accumulated dead keys from renamed/archived apps), so new keys like
                            slot.term / slot.demo were silently dropped and their icon moves never
-                           persisted. Headroom now well above the realistic live-key count. */
+                           persisted. 96 is comfortable headroom over the realistic live-key count. */
+#define VAL_MAX  128    /* per-value buffer. Was 256, which at KV_MAX entries dominated .bss for no
+                           reason — every real value (paths, WPA passphrase ≤63, api key ~35) fits
+                           in <128. Shrinking this keeps the bigger table CHEAPER than the old 48×256
+                           (avoids stealing boot heap from the WiFi stack + icon PNG decodes). */
 #define CONF_DIR  KF_ROOT       /* "/kefyros" */
 #define CONF_PATH KF_CONFIG     /* "/kefyros/config.txt" */
 
-static struct { char k[40]; char v[256]; } kv[KV_MAX];
+static struct { char k[40]; char v[VAL_MAX]; } kv[KV_MAX];
 static int nkv = 0;
 
 void deskconf_load(void){
