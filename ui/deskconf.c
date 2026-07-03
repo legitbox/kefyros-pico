@@ -8,7 +8,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define KV_MAX   48
+#define KV_MAX   128    /* was 48 — the table filled (13 app slots + settings + wifi list +
+                           accumulated dead keys from renamed/archived apps), so new keys like
+                           slot.term / slot.demo were silently dropped and their icon moves never
+                           persisted. Headroom now well above the realistic live-key count. */
 #define CONF_DIR  KF_ROOT       /* "/kefyros" */
 #define CONF_PATH KF_CONFIG     /* "/kefyros/config.txt" */
 
