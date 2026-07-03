@@ -101,19 +101,26 @@ static void add_msg(char role, const char *text){
 static void save_chat(void){
 	if(!cur_path[0]) return;
 	mkdir(DS_CHATDIR, 0755);
-	FILE *f = fopen(cur_path, "w");
+	char tmp[620];
+	snprintf(tmp, sizeof tmp, "%s.tmp", cur_path);
+	FILE *f = fopen(tmp, "w");
 	if(!f) return;
-	for(int i=0;i<nmsg;i++){
-		fputc(msgs[i].role, f);
+	int ok = 1;
+	for(int i=0;i<nmsg && ok;i++){
+		if(fputc(msgs[i].role, f) == EOF){ ok = 0; break; }
 		for(const char *p = msgs[i].text; *p; p++){
 			if(*p=='\\'){ fputc('\\',f); fputc('\\',f); }
 			else if(*p=='\n'){ fputc('\\',f); fputc('n',f); }
 			else if(*p=='\r'){ /* drop */ }
 			else fputc(*p, f);
 		}
-		fputc('\n', f);
+		if(fputc('\n', f) == EOF){ ok = 0; break; }
 	}
-	fclose(f);
+	if(fclose(f) != 0) ok = 0;
+	if(!ok || rename(tmp, cur_path) != 0){   /* keep the previous file intact on any failure */
+		remove(tmp);
+		return;
+	}
 }
 
 static void load_chat(const char *path){
@@ -616,19 +623,25 @@ static void build_list_body(void){
 	lv_obj_t *b;
 	b = lv_list_add_button(list_w, NULL, "[ + New chat ]");
 	names[nnames] = strdup("\x01");
-	lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
-	lv_group_add_obj(grp, b); nnames++;
+	if(names[nnames]){
+		lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
+		lv_group_add_obj(grp, b); nnames++;
+	} else lv_obj_delete(b);                    /* strdup failed: no NULL user_data */
 
 	b = lv_list_add_button(list_w, NULL, ds_key[0] ? "[ API key: set ]" : "[ API key: NOT SET ]");
 	names[nnames] = strdup("\x02");
-	lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
-	lv_group_add_obj(grp, b); nnames++;
+	if(names[nnames]){
+		lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
+		lv_group_add_obj(grp, b); nnames++;
+	} else lv_obj_delete(b);
 
 	{ char row[64]; snprintf(row, sizeof row, "[ Model: %s ]", ds_model);
 	  b = lv_list_add_button(list_w, NULL, row);
 	  names[nnames] = strdup("\x03");
-	  lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
-	  lv_group_add_obj(grp, b); nnames++; }
+	  if(names[nnames]){
+	  	lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
+	  	lv_group_add_obj(grp, b); nnames++;
+	  } else lv_obj_delete(b); }
 
 	DIR *d = opendir(DS_CHATDIR);
 	if(d){ struct dirent *e;
@@ -639,8 +652,10 @@ static void build_list_body(void){
 			char title[40]; chat_title(full, title, sizeof title);
 			b = lv_list_add_button(list_w, NULL, title);
 			names[nnames] = strdup(e->d_name);
-			lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
-			lv_group_add_obj(grp, b); nnames++;
+			if(names[nnames]){
+				lv_obj_add_event_cb(b, list_click, LV_EVENT_CLICKED, names[nnames]);
+				lv_group_add_obj(grp, b); nnames++;
+			} else lv_obj_delete(b);            /* strdup failed: skip this chat */
 		}
 		closedir(d);
 	}

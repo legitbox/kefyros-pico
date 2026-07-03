@@ -156,7 +156,7 @@ double calc_eval(const cnode *node, int *ok){
 		const struct cfun *f = calc_find_fun(node->name);
 		if(f){
 			if(n != f->nparams){ *ok=0; err("arg count: %s", node->name); return NAN; }
-			if(++g_depth > 180){ g_depth--; *ok=0; err("%s","recursion too deep"); return NAN; }
+			if(++g_depth > 24){ g_depth--; *ok=0; err("%s","recursion too deep"); return NAN; }
 			double saved[CN_MAXPARAMS]; int had[CN_MAXPARAMS];
 			for(int i=0;i<f->nparams;i++){ had[i]=calc_get_var(f->params[i],&saved[i]); calc_set_var(f->params[i], v[i]); }
 			double r = calc_eval(f->body, ok);

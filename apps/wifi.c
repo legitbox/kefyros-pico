@@ -23,7 +23,6 @@ static char ap_ssid[AP_MAX][33];
 static int  ap_secured[AP_MAX];
 static int  ap_n;
 static char pend_ssid[33];        /* AP awaiting a password */
-static char last_pass[65];        /* DEBUG: last password actually sent to connect */
 static int  s_scan_rc = -99;      /* DEBUG: last kf_net_scan_start() return code */
 
 static void rebuild_list(void);
@@ -46,7 +45,7 @@ static void refresh_status(void){
 	case 3: lv_label_set_text_fmt(lbl_pw, "bench: %lu KB/s (%lu KB)",
 	            (unsigned long)kf_net_bench_kbps(), (unsigned long)(kf_net_bench_bytes()/1024u)); break;
 	case 4: lv_label_set_text(lbl_pw, "bench: failed"); break;
-	default: lv_label_set_text_fmt(lbl_pw, "pw='%s'", last_pass); break;
+	default: lv_label_set_text(lbl_pw, ""); break;
 	}
 
 	if(!kf_net_present()){
@@ -77,10 +76,10 @@ static void close_pw(void){
 static void pw_ready(lv_event_t *e){
 	lv_obj_t *ta = lv_event_get_target(e);
 	const char *pass = lv_textarea_get_text(ta);
-	snprintf(last_pass, sizeof last_pass, "%s", pass);   /* safe copy BEFORE close_pw frees ta */
+	char pass_copy[65]; snprintf(pass_copy, sizeof pass_copy, "%s", pass);   /* safe copy BEFORE close_pw frees ta */
 	char ssid[33]; snprintf(ssid, sizeof ssid, "%s", pend_ssid);
 	close_pw();                     /* deletes the textarea -> `pass` is now dangling! */
-	kf_net_connect(ssid, last_pass);/* use the COPY, not the freed textarea buffer */
+	kf_net_connect(ssid, pass_copy);/* use the COPY, not the freed textarea buffer */
 	refresh_status();
 }
 
@@ -106,7 +105,7 @@ static void open_pw(const char *ssid){
 
 	lv_obj_t *ta = lv_textarea_create(pw_box);
 	lv_textarea_set_one_line(ta, true);
-	lv_textarea_set_password_mode(ta, false);   /* DEBUG: show what the keyboard captures */
+	lv_textarea_set_password_mode(ta, true);    /* mask the password as it is typed */
 	lv_textarea_set_placeholder_text(ta, "password");
 	lv_obj_set_width(ta, LCD_W-40);
 	lv_obj_align(ta, LV_ALIGN_BOTTOM_LEFT, 0, 0);

@@ -25,6 +25,7 @@ static int  editing   = 0;
 static int  dirty     = 0;
 static int  in_prompt = 0;     /* the Save-As name modal is up */
 static int  quit_armed = 0;    /* pressed quit once with unsaved changes */
+static int  load_ok_to_save = 1; /* 0 => load was partial/failed; never overwrite the file */
 static char path[512];         /* "" => untitled new note */
 
 #define MAXN 128
@@ -45,12 +46,20 @@ static void set_title(void){
 }
 
 static void load_file(void){
-	if(path[0] == 0){ lv_textarea_set_text(ta, ""); return; }
+	load_ok_to_save = 1;                       /* clean load until proven otherwise */
+	if(path[0] == 0){ lv_textarea_set_text(ta, ""); return; }   /* new untitled note */
 	FILE *f = fopen(path, "r");
 	if(!f){ lv_textarea_set_text(ta, ""); return; }
+	/* refuse to edit a file we cannot fully load — a later save must not truncate it */
+	struct stat st;
+	if(stat(path,&st)==0 && st.st_size > MAXLOAD){
+		fclose(f); lv_textarea_set_text(ta, ""); load_ok_to_save = 0; return;
+	}
 	char *buf = malloc(MAXLOAD + 1);
-	if(!buf){ fclose(f); lv_textarea_set_text(ta, ""); return; }
-	size_t n = fread(buf, 1, MAXLOAD, f); buf[n] = 0; fclose(f);
+	if(!buf){ fclose(f); lv_textarea_set_text(ta, ""); load_ok_to_save = 0; return; }
+	size_t n = fread(buf, 1, MAXLOAD, f); buf[n] = 0;
+	if(fgetc(f) != EOF) load_ok_to_save = 0;   /* still data past MAXLOAD -> partial load */
+	fclose(f);
 	lv_textarea_set_text(ta, buf);
 	free(buf);
 	lv_textarea_set_cursor_pos(ta, 0);
@@ -75,12 +84,29 @@ static void build_path_from_text(void){
 	while(stat(path,&st)==0) snprintf(path, sizeof path, "%s/%s-%d.txt", DOCDIR, base, k++);
 }
 
-/* write the textarea to `path`; returns 0 on success */
+/* write the textarea to `path` atomically (tmp then rename); returns 0 on success */
 static int write_current(void){
-	FILE *f = fopen(path, "w");
+	if(!load_ok_to_save){
+		lv_label_set_text(lbl_keys, "load failed - file too large, not saved");
+		return -1;
+	}
+	char tmp[520];
+	snprintf(tmp, sizeof tmp, "%s.tmp", path);
+	FILE *f = fopen(tmp, "w");
 	if(!f){ lv_label_set_text(lbl_keys, "SAVE FAILED"); return -1; }
 	const char *t = lv_textarea_get_text(ta);
-	fwrite(t, 1, strlen(t), f); fclose(f);
+	size_t len = strlen(t);
+	size_t wr  = fwrite(t, 1, len, f);
+	if(wr != len || fclose(f) != 0){          /* partial write / flush error: keep original */
+		remove(tmp);
+		lv_label_set_text(lbl_keys, "SAVE FAILED");
+		return -1;
+	}
+	if(rename(tmp, path) != 0){               /* swap in only on full success */
+		remove(tmp);
+		lv_label_set_text(lbl_keys, "SAVE FAILED");
+		return -1;
+	}
 	dirty = 0; set_title();
 	lv_label_set_text(lbl_keys, "saved");
 	return 0;
@@ -196,7 +222,11 @@ void editor_poll(void){
 			switch(key - DK_F1){
 			case 0: do_save(); break;                                            /* F1 Save */
 			case 1: open_save_as(); break;                                       /* F2 SaveAs */
-			case 2: editing=0; kf_grab_input(0); app_files_open(); return;       /* F3 Open  */
+			case 2: { editing=0; kf_grab_input(0);
+			          lv_obj_t *prev = lv_screen_active();                       /* our editor screen */
+			          app_files_open();
+			          if(prev) lv_obj_delete_async(prev); }
+			        return;                                                       /* F3 Open  */
 			case 3: open_editor(NULL); return;                                   /* F4 New   */
 			case 4: try_quit(); return;                                          /* F5 Quit  */
 			}
@@ -228,6 +258,9 @@ void editor_poll(void){
 }
 
 static void open_editor(const char *p){
+	/* the picker / a prior editor / the Files screen is active — reclaim it after we load
+	   the new one (async: we may be inside that screen's own button-click dispatch) */
+	lv_obj_t *prev = lv_screen_active();
 	snprintf(path, sizeof path, "%s", p ? p : "");
 	dirty = 0; in_prompt = 0; quit_armed = 0; prompt_box = NULL;
 
@@ -292,6 +325,7 @@ static void open_editor(const char *p){
 	kf_grab_input(1);
 	editing = 1;
 	lv_screen_load(scr);
+	if(prev && prev != scr) lv_obj_delete_async(prev);
 }
 
 /* ---------- /kefyros/notes quick picker (the Editor tile) ---------- */
@@ -326,8 +360,10 @@ static void build_picker(void){
 
 	lv_obj_t *b = lv_list_add_button(list, NULL, "[ + New note ]");
 	names[nnames] = strdup("\x01");
-	lv_obj_add_event_cb(b, item_cb, LV_EVENT_CLICKED, names[nnames]);
-	lv_group_add_obj(grp, b); nnames++;
+	if(names[nnames]){
+		lv_obj_add_event_cb(b, item_cb, LV_EVENT_CLICKED, names[nnames]);
+		lv_group_add_obj(grp, b); nnames++;
+	} else lv_obj_delete(b);                    /* strdup failed: no NULL user_data */
 
 	DIR *d = opendir(DOCDIR);
 	if(d){ struct dirent *e;
@@ -337,8 +373,10 @@ static void build_picker(void){
 			struct stat st; if(stat(full,&st)!=0 || !S_ISREG(st.st_mode)) continue;
 			lv_obj_t *bb = lv_list_add_button(list, NULL, e->d_name);
 			names[nnames] = strdup(e->d_name);
-			lv_obj_add_event_cb(bb, item_cb, LV_EVENT_CLICKED, names[nnames]);
-			lv_group_add_obj(grp, bb); nnames++;
+			if(names[nnames]){
+				lv_obj_add_event_cb(bb, item_cb, LV_EVENT_CLICKED, names[nnames]);
+				lv_group_add_obj(grp, bb); nnames++;
+			} else lv_obj_delete(bb);           /* strdup failed: skip this entry */
 		}
 		closedir(d);
 	}

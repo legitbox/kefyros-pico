@@ -68,7 +68,7 @@ static uint32_t now_ms(void){ return (uint32_t)(time_us_64() / 1000u); }
    Must be re-applied on EVERY clk_sys change (see kf_net_reclock), or the bus runs at the old
    ratio after a clock switch (e.g. ~50 MHz at 400 with the eco-era div) and a live link drops. */
 static void set_bus_div(void){
-	uint32_t div = clock_get_hz(clk_sys) / (2u * 28000000u);
+	uint32_t div = (clock_get_hz(clk_sys) + (2u * 28000000u) - 1u) / (2u * 28000000u);  /* ceil: never under-divide (>28MHz bus is out of spec) */
 	if(div < 2u) div = 2u;
 	cyw43_set_pio_clkdiv_int_frac8(div, 0);
 }

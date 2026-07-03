@@ -74,10 +74,10 @@ static void row_key_cb(lv_event_t *e){
 
 /* ---------- Markdown article rendering ---------- */
 
-/* copy `src` into `dst` stripping inline `**` (emphasis) and backticks; dst >= src length+1 */
-static void inline_clean(char *dst, const char *src){
-	const char *s = src; char *d = dst;
-	while(*s){
+/* copy `src` into `dst` (capacity `dstsz`) stripping inline `**` (emphasis) and backticks */
+static void inline_clean(char *dst, size_t dstsz, const char *src){
+	const char *s = src; char *d = dst; char *end = dst + dstsz - 1;
+	while(*s && d < end){
 		if(s[0]=='*' && s[1]=='*'){ s += 2; continue; }
 		if(s[0]=='`'){ s++; continue; }
 		*d++ = *s++;
@@ -147,8 +147,9 @@ static void emit_code(lv_obj_t *v, const char *code){
 
 /* parse Markdown `text` into widgets under the scroll container `v`. `flow`/`code` are
    scratch buffers (each at least strlen(text)+1) reused so we make few allocations. */
-static void render_md(lv_obj_t *v, char *text, char *flow, char *code){
+static void render_md(lv_obj_t *v, char *text, char *flow, char *code, size_t cap){
 	int flen = 0;                                  /* accumulated plain-flow length */
+	int lim = (int)cap - 1;                         /* max chars before the NUL */
 	char *p = text;
 	while(*p){
 		char *nl = strchr(p, '\n');
@@ -166,7 +167,9 @@ static void render_md(lv_obj_t *v, char *text, char *flow, char *code){
 				if(qnl) *qnl = 0;
 				int cn = (int)strlen(cl); if(cn && cl[cn-1]=='\r') cl[--cn]=0;
 				if(cl[0]=='`' && cl[1]=='`' && cl[2]=='`'){ q = qnl ? qnl+1 : cl+cn; p = q; goto code_done; }
-				if(clen){ code[clen++]='\n'; }
+				if(clen && clen < lim){ code[clen++]='\n'; }
+				if(cn > lim - clen) cn = lim - clen;
+				if(cn < 0) cn = 0;
 				memcpy(code+clen, cl, cn); clen += cn; code[clen]=0;
 				q = qnl ? qnl+1 : cl+cn;
 			}
@@ -179,7 +182,7 @@ static void render_md(lv_obj_t *v, char *text, char *flow, char *code){
 			if(flen){ flow[flen]=0; emit_text(v, flow, KF_TEXT); flen=0; }
 			int h=0; while(line[h]=='#') h++;
 			const char *t = line+h; while(*t==' ') t++;
-			char tmp[256]; inline_clean(tmp, t);
+			char tmp[256]; inline_clean(tmp, sizeof tmp, t);
 			emit_heading(v, tmp, h);
 		}
 		else if((line[0]=='-'||line[0]=='*'||line[0]=='_') && (line[1]==line[0]) && (line[2]==line[0]) && !line[3]){
@@ -187,14 +190,16 @@ static void render_md(lv_obj_t *v, char *text, char *flow, char *code){
 			emit_rule(v);                                          /* --- *** ___ */
 		}
 		else {                                                     /* paragraph / list / blank */
-			char tmp[600]; inline_clean(tmp, line);
+			char tmp[600]; inline_clean(tmp, sizeof tmp, line);
 			const char *out = tmp;
 			char bullet[600];
 			if((tmp[0]=='-'||tmp[0]=='*') && tmp[1]==' '){         /* bullet -> "  - text" */
 				snprintf(bullet, sizeof bullet, "  - %s", tmp+2); out = bullet;
 			}
 			int on = (int)strlen(out);
-			if(flen){ flow[flen++]='\n'; }
+			if(flen && flen < lim){ flow[flen++]='\n'; }
+			if(on > lim - flen) on = lim - flen;
+			if(on < 0) on = 0;
 			memcpy(flow+flen, out, on); flen += on; flow[flen]=0;
 		}
 		p = nl ? nl+1 : p+n;
@@ -234,7 +239,7 @@ static void open_article(const char *topic_path, const char *file_raw, int direc
 		char *code = malloc((size_t)sz + 2);
 		if(buf && flow && code){
 			size_t rd = fread(buf, 1, (size_t)sz, f); buf[rd] = 0;
-			render_md(v, buf, flow, code);
+			render_md(v, buf, flow, code, (size_t)sz + 2);
 		} else {
 			emit_text(v, "Out of memory loading this page.", KF_TEXT_DIM);
 		}

@@ -340,7 +340,13 @@ static int kapi_run(const char *path){
     if(h.load_base != (uint32_t)(uintptr_t)g_kapi_arena){
         fclose(f); printf("kapi: load_base %08lx != arena %08lx (rebuild app)\n",
                           (unsigned long)h.load_base, (unsigned long)(uintptr_t)g_kapi_arena); return -5; }
-    if((size_t)h.image_size + h.bss_size > sizeof g_kapi_arena){ fclose(f); printf("kapi: too big\n"); return -6; }
+    /* Validate sizes WITHOUT overflowing 32-bit size_t: a huge image_size + bss_size
+       would wrap and pass a naive sum, then fread would overrun the arena. Check each
+       field against the arena using only non-wrapping subtraction. */
+    if(h.image_size > sizeof g_kapi_arena ||
+       h.bss_size   > sizeof g_kapi_arena - h.image_size){ fclose(f); printf("kapi: too big\n"); return -6; }
+    /* entry_offset must land inside the loaded image (checked before any state setup). */
+    if(h.entry_offset >= h.image_size){ fclose(f); printf("kapi: bad entry_offset\n"); return -8; }
     if(fread(g_kapi_arena, 1, h.image_size, f) != h.image_size){ fclose(f); return -7; }
     fclose(f);
     memset(g_kapi_arena + h.image_size, 0, h.bss_size);

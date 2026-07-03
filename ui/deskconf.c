@@ -47,15 +47,24 @@ const char *deskconf_get(const char *key, const char *def){
 
 static void deskconf_save(void){
 	mkdir(CONF_DIR, 0755);
-	FILE *f = fopen(CONF_PATH, "w");
+	char tmp[256];
+	snprintf(tmp, sizeof tmp, "%s.tmp", CONF_PATH);
+	FILE *f = fopen(tmp, "w");
 	if(!f) return;
-	for(int i=0;i<nkv;i++) fprintf(f, "%s=%s\n", kv[i].k, kv[i].v);
-	fclose(f);
+	int ok = 1;
+	for(int i=0;i<nkv;i++)
+		if(fprintf(f, "%s=%s\n", kv[i].k, kv[i].v) < 0){ ok = 0; break; }
+	if(fclose(f) != 0) ok = 0;
+	if(!ok || rename(tmp, CONF_PATH) != 0){   /* leave the existing config intact on failure */
+		remove(tmp);
+		return;
+	}
 }
 
 void deskconf_set(const char *key, const char *val){
 	int i;
 	for(i=0;i<nkv;i++) if(!strcmp(kv[i].k, key)) break;
+	if(i < nkv && !strcmp(kv[i].v, val)) return;   /* value unchanged: skip the no-op write */
 	if(i == nkv){
 		if(nkv >= KV_MAX) return;
 		nkv++;

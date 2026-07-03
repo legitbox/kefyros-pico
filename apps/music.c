@@ -183,12 +183,12 @@ static void flac_meta(const char *full, rec_t *r){
 			uint8_t *buf = malloc(len);
 			if(buf && fread(buf,1,len,f)==len){
 				uint32_t off = 0;
-				if(len >= 4){ uint32_t vl = le32(buf); off = 4 + vl; }
-				if(off + 4 <= len){
+				if(len >= 4){ uint32_t vl = le32(buf); off = (vl <= len - 4) ? 4 + vl : len; }
+				if(off <= len && len - off >= 4){
 					uint32_t cnt = le32(buf+off); off += 4;
-					for(uint32_t i=0;i<cnt && off+4<=len;i++){
+					for(uint32_t i=0;i<cnt && off <= len && len - off >= 4;i++){
 						uint32_t cl = le32(buf+off); off += 4;
-						if(off + cl > len) break;
+						if(cl > len - off) break;
 						char kv[300]; uint32_t cc = cl < sizeof kv-1 ? cl : sizeof kv-1;
 						memcpy(kv, buf+off, cc); kv[cc] = 0; off += cl;
 						char *eq = strchr(kv, '='); if(!eq) continue;

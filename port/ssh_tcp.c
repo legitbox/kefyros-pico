@@ -38,13 +38,15 @@ static void detach(void){
 	}
 }
 
-/* push into the ring (caller guarantees it fits or we drop — SSH never bursts
-   more than a few hundred bytes outbound). */
-static void txq_push(const uint8_t *d, int n){
-	for(int i = 0; i < n && s_txq_len < TXQ_CAP; i++){
+/* push into the ring; returns how many bytes were actually accepted (< n if the
+   ring is full, so the caller can detect a shortfall and fail the tx). */
+static int txq_push(const uint8_t *d, int n){
+	int i = 0;
+	for(; i < n && s_txq_len < TXQ_CAP; i++){
 		s_txq[(s_txq_head + s_txq_len) % TXQ_CAP] = d[i];
 		s_txq_len++;
 	}
+	return i;
 }
 static void txq_drain(void){
 	while(s_pcb && s_txq_len > 0){
@@ -75,7 +77,13 @@ int ssh_tcp_tx(const uint8_t *buf, int n, void *ud){
 			off += w;
 		}
 	}
-	if(off < n) txq_push(buf + off, n - off);
+	if(off < n && txq_push(buf + off, n - off) != n - off){
+		/* couldn't queue the whole remainder -> the tx contract ("accept ALL n")
+		   is broken; report a fatal error so the SSH core tears down cleanly
+		   rather than silently desyncing the stream. */
+		if(s_pcb) tcp_output(s_pcb);
+		return -1;
+	}
 	if(s_pcb) tcp_output(s_pcb);
 	return n;
 }

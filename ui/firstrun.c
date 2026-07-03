@@ -42,6 +42,7 @@ static const char *REQUIRED[] = {
 	"/kefyros/icons/spineko.png",
 	"/kefyros/icons/deepseek.png",
 	"/kefyros/icons/help.png",
+	"/kefyros/icons/term.png",
 	"/kefyros/help/00 Welcome/01 About Kefyros.md",
 	/* SFX (/kefyros/sfx/*.wav) are intentionally NOT required — they're optional polish and the
 	   sound engine plays silence when a file is absent, so a card without them is still healthy. */

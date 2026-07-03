@@ -192,26 +192,31 @@ static void decode_codepoint(long v){
 	else push_char('?');
 }
 static void decode_entity(void){               /* '&' already consumed */
-	char e[12]; int n=0, c=-1;
-	while(n<11){
-		c = next_byte();
-		if(c < 0) break;
-		if(c==';') break;
-		if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='#')) break;
-		e[n++] = (char)c;
-	}
-	e[n] = 0;
-	if(c==';'){
-		if(e[0]=='#'){ long v = (e[1]=='x'||e[1]=='X') ? strtol(e+2,NULL,16) : strtol(e+1,NULL,10);
-		               decode_codepoint(v); }
-		else decode_named(e);
+	/* Iterate rather than recurse: a run of N '&'-started entities is consumed in this
+	   loop (a self-call per '&' would recurse N deep and overflow the 4 KB core-0 stack). */
+	for(;;){
+		char e[12]; int n=0, c=-1;
+		while(n<11){
+			c = next_byte();
+			if(c < 0) break;
+			if(c==';') break;
+			if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='#')) break;
+			e[n++] = (char)c;
+		}
+		e[n] = 0;
+		if(c==';'){
+			if(e[0]=='#'){ long v = (e[1]=='x'||e[1]=='X') ? strtol(e+2,NULL,16) : strtol(e+1,NULL,10);
+			               decode_codepoint(v); }
+			else decode_named(e);
+			return;
+		}
+		/* not a real entity — emit literally, then re-handle the stop char */
+		push_char('&'); for(int i=0;i<n;i++) push_char((unsigned char)e[i]);
+		if(c=='<'){ read_tag(); return; }
+		if(c=='&') continue;                        /* consume the next entity iteratively */
+		if(c>=0) push_char(c);
 		return;
 	}
-	/* not a real entity — emit literally, then re-handle the stop char */
-	push_char('&'); for(int i=0;i<n;i++) push_char((unsigned char)e[i]);
-	if(c=='<') read_tag();
-	else if(c=='&') decode_entity();
-	else if(c>=0) push_char(c);
 }
 
 /* ===== attribute parsing ===== */

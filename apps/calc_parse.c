@@ -13,6 +13,13 @@
 
 static const char *P;        /* current parse position */
 
+/* Recursion-depth guard: the descent chain (parse_expr..parse_atom->parse_expr on '(') and the
+   unary self-recursion are unbounded; deep "((((" or a "-----" run would overflow the 4 KB
+   core-0 stack (no guard page). Counted in parse_atom + parse_unary (both lie on every nesting
+   step), reset per top-level parse. Cap 32 => ~16 paren levels, well inside the stack. */
+#define CALC_MAXDEPTH 32
+static int calc_depth = 0;
+
 static void seterr(const char *m){ snprintf(calc_err, sizeof calc_err, "%s", m); }
 static void skip(void){ while(*P==' '||*P=='\t') P++; }
 static int  is_namestart(int c){ return isalpha((unsigned char)c) || c=='_' || (unsigned char)c>=0x80; }
@@ -27,7 +34,14 @@ static int starts_factor(void){
 	return isdigit((unsigned char)c) || c=='.' || c=='(' || is_namestart(c);
 }
 
-static cnode *parse_atom(void){
+static cnode *parse_atom_body(void);
+static cnode *parse_atom(void){                   /* depth-guarded wrapper */
+	if(++calc_depth > CALC_MAXDEPTH){ calc_depth--; seterr("nesting too deep"); return NULL; }
+	cnode *r = parse_atom_body();
+	calc_depth--;
+	return r;
+}
+static cnode *parse_atom_body(void){
 	skip();
 	int c = *P;
 	if(c=='('){
@@ -110,7 +124,14 @@ static cnode *parse_pow(void){
 	return base;
 }
 
-static cnode *parse_unary(void){
+static cnode *parse_unary_body(void);
+static cnode *parse_unary(void){                  /* depth-guarded wrapper */
+	if(++calc_depth > CALC_MAXDEPTH){ calc_depth--; seterr("nesting too deep"); return NULL; }
+	cnode *r = parse_unary_body();
+	calc_depth--;
+	return r;
+}
+static cnode *parse_unary_body(void){
 	skip();
 	if(*P=='-'){ P++; cnode *u = parse_unary(); return u ? cn_neg(u) : NULL; }
 	if(*P=='+'){ P++; return parse_unary(); }
@@ -181,6 +202,7 @@ static cnode *parse_expr(void){
 
 cnode *calc_parse(const char *src){
 	calc_err[0] = 0;
+	calc_depth = 0;                    /* fresh parse: a prior deep parse must not poison this one */
 	P = src;
 	cnode *n = parse_expr();
 	if(!n) return NULL;

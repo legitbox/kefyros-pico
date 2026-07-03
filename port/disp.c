@@ -61,13 +61,17 @@ static volatile bool        s_job_pending = false;
  * (never mid-blit), does the switch, then disp_resume_core1(). */
 static volatile bool s_pause_req = false;
 static volatile bool s_paused    = false;
+static int           s_pause_depth = 0;   /* nesting count: only the 0<->1 edge parks/un-parks */
 
 void disp_pause_core1(void){
+	if(s_pause_depth++ > 0) return;           /* already parked -> just deepen the lease */
 	s_pause_req = true;
 	__sev();
 	while(!s_paused) tight_loop_contents();   /* wait until Core 1 is parked + idle */
 }
 void disp_resume_core1(void){
+	if(s_pause_depth <= 0) return;            /* underflow guard: nothing to resume */
+	if(--s_pause_depth > 0) return;           /* still held by an outer lease -> keep parked */
 	s_pause_req = false;
 	__sev();
 	while(s_paused) tight_loop_contents();
@@ -86,6 +90,7 @@ void disp_core1_reset(void){
 void disp_core1_relaunch(void){
 	s_pause_req   = false;       /* fresh pump: not paused, no stale job */
 	s_paused      = false;
+	s_pause_depth = 0;           /* reset nesting to match the fresh (un-parked) pump */
 	s_job_pending = false;
 	multicore_launch_core1(disp_core1_main);
 }

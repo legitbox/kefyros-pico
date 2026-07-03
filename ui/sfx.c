@@ -72,6 +72,7 @@ void kf_sfx_play(const char *name){
 	uint32_t rate, dlen; int ch, bits;
 	if(!wav_open(path, &rate, &ch, &bits, &dlen)) return;     /* missing/odd file -> silent */
 	if(bits != 16 && bits != 8){ sfx_close(); return; }
+	if(ch != 1 && ch != 2){ sfx_close(); return; }            /* mono or stereo only */
 	sfx_ch = ch; sfx_bits = bits; sfx_left = dlen;
 	kf_audio_start((int)rate);
 	sfx_active = 1;
@@ -86,6 +87,7 @@ void sfx_poll(void){
 			int bps = (sfx_bits/8) * sfx_ch;                 /* bytes per source frame */
 			uint32_t want = (uint32_t)frames * (uint32_t)bps;
 			if(want > sfx_left) want = sfx_left;
+			if(want > sizeof sfx_raw) want = (sizeof sfx_raw / (uint32_t)bps) * (uint32_t)bps;  /* never overrun sfx_raw */
 			size_t got = fread(sfx_raw, 1, want, sfx_f);
 			if(got >= (size_t)bps){
 				sfx_left -= (uint32_t)got;

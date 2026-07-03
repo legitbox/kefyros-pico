@@ -62,7 +62,9 @@ struct ssh {
 	uint8_t  host_pub[32];
 
 	/* transport keys */
-	uint8_t  key_c2s[64], key_s2c[64];
+	uint8_t  key_c2s[64], key_s2c[64];      /* ACTIVE keys used by send/recv right now */
+	uint8_t  pending_s2c[64];               /* inbound key derived at ECDH reply, activated at peer NEWKEYS */
+	int      newkeys_pending;               /* pending_s2c holds a key awaiting the peer's NEWKEYS */
 	uint32_t seq_in, seq_out;
 	int      enc_in, enc_out;
 	int      service_sent;
@@ -348,14 +350,23 @@ static void handle_ecdh_reply(ssh_t *s, const uint8_t *pl, int len){
 	if(!s->have_sid){ memcpy(s->session_id, H, 32); s->have_sid = 1; }
 
 	/* derive c2s/s2c keys (mpint(K) is the KDF's K input). Max mpint = 4 len +
-	   1 sign byte + 32 value = 37 bytes when K's high bit is set. */
+	   1 sign byte + 32 value = 37 bytes when K's high bit is set.
+	   On a REKEY the ACTIVE keys must stay in force until the NEWKEYS boundary
+	   (RFC 4253 §7.3): our outgoing NEWKEYS must still go out under the OLD c2s
+	   key, and the server's NEWKEYS still arrives under the OLD s2c key. So derive
+	   the new keys into temporaries and only swap them in at the exact boundaries. */
 	uint8_t K_mp[40]; wbuf kb; wb_init(&kb, K_mp, sizeof K_mp); wb_mpint(&kb, K, 32);
-	derive_key2(K_mp, kb.len, H, s->session_id, 'C', s->key_c2s);
-	derive_key2(K_mp, kb.len, H, s->session_id, 'D', s->key_s2c);
+	uint8_t new_c2s[64];
+	derive_key2(K_mp, kb.len, H, s->session_id, 'C', new_c2s);
+	derive_key2(K_mp, kb.len, H, s->session_id, 'D', s->pending_s2c);
+	s->newkeys_pending = 1;             /* inbound activates when the peer's NEWKEYS arrives */
 	crypto_wipe(K, 32);
 
-	/* send NEWKEYS (last cleartext packet), then switch our direction on */
+	/* send NEWKEYS under the OLD outbound key (cleartext on the first handshake,
+	   since enc_out is still 0 then), THEN activate our new send key. */
 	uint8_t nk = MSG_NEWKEYS; send_packet(s, &nk, 1);
+	memcpy(s->key_c2s, new_c2s, 64);
+	crypto_wipe(new_c2s, 64);
 	s->enc_out = 1;
 
 	/* request the userauth service (encrypted) once */
@@ -501,6 +512,13 @@ static void dispatch(ssh_t *s, const uint8_t *pl, int len){
 			handle_ecdh_reply(s, pl, len);
 			break;
 		case MSG_NEWKEYS:
+			/* The peer's NEWKEYS is the last packet under the OLD s2c key; activate
+			   the new inbound key now so everything after it decrypts correctly. */
+			if(s->newkeys_pending){
+				memcpy(s->key_s2c, s->pending_s2c, 64);
+				crypto_wipe(s->pending_s2c, 64);
+				s->newkeys_pending = 0;
+			}
 			s->enc_in = 1;
 			s->kex_sent = 0;   /* ready for a future rekey */
 			break;
@@ -677,7 +695,7 @@ ssh_t *ssh_create(const ssh_cb_t *cb, void *(*alloc)(size_t), void (*dealloc)(vo
 void ssh_destroy(ssh_t *s){
 	if(!s) return;
 	void (*df)(void*) = s->dealloc;
-	crypto_wipe(s->key_c2s, 64); crypto_wipe(s->key_s2c, 64);
+	crypto_wipe(s->key_c2s, 64); crypto_wipe(s->key_s2c, 64); crypto_wipe(s->pending_s2c, 64);
 	crypto_wipe(s->seed, 32); crypto_wipe(s->x_priv, 32);
 	crypto_wipe(s, sizeof *s);
 	df(s);

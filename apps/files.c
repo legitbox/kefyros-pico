@@ -169,6 +169,7 @@ static void item_long_cb(lv_event_t *e){          /* hold ENTER: rename/delete *
 static void add_row(const char *shown, const char *key){
 	lv_obj_t *b = lv_list_add_button(list, NULL, shown);
 	names[nnames] = strdup(key);
+	if(!names[nnames]){ lv_obj_delete(b); return; }   /* strdup failed: no NULL user_data */
 	lv_obj_add_event_cb(b, item_cb,      LV_EVENT_SHORT_CLICKED, names[nnames]);
 	lv_obj_add_event_cb(b, item_long_cb, LV_EVENT_LONG_PRESSED,  names[nnames]);
 	lv_group_add_obj(grp, b);

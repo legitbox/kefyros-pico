@@ -8,12 +8,23 @@
 
 /* ---------- low-level magnitude helpers ---------- */
 
-static void bi_reserve(bigint *a, int cap){
-	if(a->cap >= cap) return;
+/* Sticky out-of-memory flag. A failed bi_reserve sets it and leaves the object UNCHANGED
+   (old buffer + cap kept), returning 0 so the caller bails before any write — never a
+   NULL/undersized limb deref. Cleared/queried via bi_take_oom() by the calculator layer so a
+   giant result (e.g. 1e18^15000, 20000!) surfaces as a clean error instead of corrupting the
+   4 KB core-0 stack/heap. */
+static int bi_oom = 0;
+int bi_take_oom(void){ int v = bi_oom; bi_oom = 0; return v; }
+
+static int bi_reserve(bigint *a, int cap){
+	if(a->cap >= cap) return 1;
 	int nc = a->cap ? a->cap : 4;
 	while(nc < cap) nc *= 2;
-	a->limb = (uint32_t*)realloc(a->limb, (size_t)nc * sizeof(uint32_t));
+	uint32_t *nl = (uint32_t*)realloc(a->limb, (size_t)nc * sizeof(uint32_t));
+	if(!nl){ bi_oom = 1; return 0; }     /* keep old limb+cap: caller must bail, no deref */
+	a->limb = nl;
 	a->cap = nc;
+	return 1;
 }
 
 static void bi_trim(bigint *a){
@@ -33,7 +44,7 @@ void bi_set_i64(bigint *a, int64_t v){
 	uint64_t m;
 	if(v < 0){ a->sign = -1; m = (uint64_t)(-(v+1)) + 1u; }   /* avoids -INT64_MIN UB */
 	else     { a->sign =  1; m = (uint64_t)v; }
-	bi_reserve(a, 2);
+	if(!bi_reserve(a, 2)){ a->sign = 0; return; }            /* OOM: leave a as a clean zero */
 	a->limb[0] = (uint32_t)(m & 0xffffffffu);
 	a->limb[1] = (uint32_t)(m >> 32);
 	a->n = 2;
@@ -42,7 +53,7 @@ void bi_set_i64(bigint *a, int64_t v){
 
 void bi_copy(bigint *dst, const bigint *src){
 	if(dst == src) return;
-	bi_reserve(dst, src->n);
+	if(!bi_reserve(dst, src->n)) return;         /* OOM: leave dst unchanged (still valid) */
 	memcpy(dst->limb, src->limb, (size_t)src->n * sizeof(uint32_t));
 	dst->n = src->n; dst->sign = src->sign;
 }
@@ -70,7 +81,8 @@ void bi_abs(bigint *a){ if(a->sign) a->sign = 1; }
 /* r = |a| + |b|  (sign set by caller) */
 static void add_abs(bigint *r, const bigint *a, const bigint *b){
 	if(a->n < b->n){ const bigint *t = a; a = b; b = t; }
-	bigint out; bi_init(&out); bi_reserve(&out, a->n + 1);
+	bigint out; bi_init(&out);
+	if(!bi_reserve(&out, a->n + 1)) return;       /* OOM: r left unchanged, bi_oom set */
 	uint64_t carry = 0; int i;
 	for(i = 0; i < b->n; i++){
 		uint64_t s = (uint64_t)a->limb[i] + b->limb[i] + carry;
@@ -87,7 +99,8 @@ static void add_abs(bigint *r, const bigint *a, const bigint *b){
 
 /* r = |a| - |b|, requires |a| >= |b| (sign set by caller) */
 static void sub_abs(bigint *r, const bigint *a, const bigint *b){
-	bigint out; bi_init(&out); bi_reserve(&out, a->n);
+	bigint out; bi_init(&out);
+	if(!bi_reserve(&out, a->n)) return;           /* OOM: r left unchanged, bi_oom set */
 	int64_t borrow = 0; int i;
 	for(i = 0; i < b->n; i++){
 		int64_t d = (int64_t)a->limb[i] - b->limb[i] - borrow;
