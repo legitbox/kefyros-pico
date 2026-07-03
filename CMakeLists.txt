@@ -45,6 +45,10 @@ add_executable(kefyros
     port/css.c                     # Spineko CSS engine (rules in PSRAM)
     port/vt100.c                   # Term: VT100/xterm terminal emulator core
     port/sha256.c                  # Term: SHA-256 (SSH exchange hash + KDF)
+    port/ssh.c                     # Term: SSH-2 protocol core
+    port/ssh_tcp.c                 # Term: lwIP glue for the SSH client
+    lib/monocypher/monocypher.c            # Term: x25519 / chacha20 / poly1305
+    lib/monocypher/monocypher-ed25519.c    # Term: ed25519 + sha512
     port/tls.c
     port/imgdec.c
     port/kapi.c                    # KAPI class-1 app loader + vtable glue
@@ -99,6 +103,7 @@ target_include_directories(kefyros PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/lib/bearssl/inc   # bearssl.h (public API)
     ${CMAKE_CURRENT_LIST_DIR}/lib/bearssl/src   # inner.h, config.h (BearSSL internals)
     ${CMAKE_CURRENT_LIST_DIR}/lib/miniz         # miniz_tinfl.h (PNG inflate)
+    ${CMAKE_CURRENT_LIST_DIR}/lib/monocypher     # Term: SSH crypto (Monocypher)
     ${CMAKE_CURRENT_LIST_DIR}/lib/nanosvg/src   # nanosvg.h, nanosvgrast.h (SVG)
     ${CMAKE_CURRENT_LIST_DIR}/sdk               # kapi.h (the class-1 app ABI)
 )
