@@ -39,7 +39,8 @@ extern const uint8_t kf_font6x12[0x91][12];
 #define C_RED   0xF800
 #define C_GREEN 0x07E0
 
-static uint16_t s_rowbuf[STRIP_W * CELL_H];
+static uint16_t *s_rowbuf;   /* malloc'd while Term is open, freed on exit — keeps ~7.6 KB
+                                off the shared heap when Term is closed (so calc etc. get it) */
 static vt_t   *g_vt;
 static ssh_t  *g_ssh;
 static int     s_cursor_on = 1;
@@ -344,7 +345,13 @@ void app_term_open(void){
 	kf_net_init();
 	disp_pause_core1();
 
-	while(connect_screen()) run_ssh_session();
+	/* row compose buffer: malloc while Term runs, free on exit, so its ~7.6 KB isn't
+	   permanently parked in .bss starving the shared heap (calc OOM'd because of it). */
+	s_rowbuf = malloc((size_t)STRIP_W * CELL_H * sizeof *s_rowbuf);
+	if(s_rowbuf){
+		while(connect_screen()) run_ssh_session();
+		free(s_rowbuf); s_rowbuf = NULL;
+	}
 
 	disp_resume_core1();
 	kf_grab_input(0);

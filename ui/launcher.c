@@ -40,10 +40,10 @@ static const desk_app_t dapps[] = {
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "help",       "Help",        app_help_open,        11 },
 	{ "term",       "Terminal",    app_term_open,        12 },   /* SSH-2 terminal client */
-	/* "KAPI Demo" (app_demo_open, port/kapi.c) is a developer-only class-1 .kx loader
-	   test: it needs an /apps/demo/demo.kx rebuilt against each exact firmware ELF, which
-	   is too fragile for a distributable card. Dropped from the release launcher; re-add
-	   `{ "demo","KAPI Demo",app_demo_open,13 }` for dev builds that ship a matching .kx. */
+	/* The "KAPI Demo" tile was removed for release (a developer-only class-1 .kx loader
+	   test needing an /apps/demo/demo.kx rebuilt against each exact firmware ELF — too
+	   fragile for a distributable card). The loader itself lives on as kapi_run(path) in
+	   port/kapi.c for real .kx apps; add a tile with a small wrapper to bring it back. */
 };
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */

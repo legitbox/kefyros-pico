@@ -5,6 +5,7 @@
 // queue so ssh.c can always "accept all" outgoing bytes.
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "pico/stdlib.h"
 #include "lwip/tcp.h"
 #include "lwip/dns.h"
@@ -22,7 +23,8 @@ static char            s_err[64];
 /* outbound queue (drained as tcp_sndbuf frees). Outbound SSH traffic is tiny
    (typing, window adjusts, keepalives) so this rarely fills. */
 #define TXQ_CAP 8192
-static uint8_t  s_txq[TXQ_CAP];
+static uint8_t *s_txq;            /* malloc'd on session init, freed on close — keeps 8 KB off
+                                    the shared heap while Term is closed (so calc etc. get it) */
 static int      s_txq_head, s_txq_len;
 
 static void tcp_err_set(const char *m){
@@ -42,7 +44,7 @@ static void detach(void){
    ring is full, so the caller can detect a shortfall and fail the tx). */
 static int txq_push(const uint8_t *d, int n){
 	int i = 0;
-	for(; i < n && s_txq_len < TXQ_CAP; i++){
+	for(; i < n && s_txq && s_txq_len < TXQ_CAP; i++){
 		s_txq[(s_txq_head + s_txq_len) % TXQ_CAP] = d[i];
 		s_txq_len++;
 	}
@@ -128,7 +130,7 @@ static void on_dns(const char *name, const ip_addr_t *ip, void *arg){
 }
 
 /* ---- public API (used by apps/term.c) ---- */
-void ssh_tcp_init(ssh_t *s){ s_ssh = s; }
+void ssh_tcp_init(ssh_t *s){ s_ssh = s; if(!s_txq) s_txq = malloc(TXQ_CAP); }
 
 int ssh_tcp_connect(const char *host, uint16_t port){
 	detach();
@@ -141,7 +143,7 @@ int ssh_tcp_connect(const char *host, uint16_t port){
 	return 0;
 }
 void ssh_tcp_poll(void){ txq_drain(); }
-void ssh_tcp_close(void){ detach(); s_state = TCP_CLOSED; s_ssh = NULL; s_txq_head = s_txq_len = 0; }
+void ssh_tcp_close(void){ detach(); s_state = TCP_CLOSED; s_ssh = NULL; s_txq_head = s_txq_len = 0; free(s_txq); s_txq = NULL; }
 int  ssh_tcp_state(void){ return s_state; }
 const char *ssh_tcp_err(void){ return s_err; }
 

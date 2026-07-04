@@ -330,7 +330,9 @@ void kapi_poll(void){
 }
 
 /* ===================== loader ===================== */
-static int kapi_run(const char *path){
+/* Public entry to launch a class-1 .kx by path (e.g. a future calc.kx). The bundled
+   "KAPI Demo" desktop tile was dropped from the release; this loader stays for real apps. */
+int kapi_run(const char *path){
     if(s_active) return -1;
     FILE *f = fopen(path, "rb");
     if(!f){ printf("kapi: cannot open %s\n", path); return -2; }
@@ -372,11 +374,4 @@ static int kapi_run(const char *path){
     app_main_fn entry = (app_main_fn)(((uintptr_t)g_kapi_arena + h.entry_offset) | 1u);  /* Thumb bit */
     entry(&G_KAPI);
     return 0;
-}
-
-/* desktop tile entry — launch the bundled demo */
-void app_demo_open(void){
-    if(kapi_run("/apps/demo/demo.kx") != 0){
-        /* loader refused: stay on the launcher (screen untouched on pre-entry failure) */
-    }
 }
