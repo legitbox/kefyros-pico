@@ -1,7 +1,7 @@
 // port/lwipopts.h — lwIP config for the Kefyros WiFi stack (Pico 2 W / CYW43).
 // NO_SYS (bare-metal, poll mode: pico_cyw43_arch_lwip_poll). DHCP + DNS + TCP/UDP +
 // SNTP. Single radio, single TCP connection at a time, so the pools stay modest.
-// (No TLS — the Spineko browser is HTTP-only.)
+// TLS via BearSSL (port/tls.c).
 #ifndef KF_LWIPOPTS_H
 #define KF_LWIPOPTS_H
 

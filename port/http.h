@@ -6,7 +6,7 @@
 // 301/302/303/307/308 redirects are followed automatically (bounded). Driven by the
 // lwIP callbacks that fire inside cyw43_arch_poll() (which kf_net_poll() calls every
 // superloop tick); the app must also call kf_http_poll() each tick for redirects +
-// timeouts. https:// URLs return "HTTPS not supported".
+// timeouts.
 #ifndef KF_HTTP_H
 #define KF_HTTP_H
 #include <stdint.h>

@@ -3,8 +3,6 @@
 #include "pico/multicore.h"
 #include <hardware/spi.h>
 
-//#define LCD_SPI_SPEED   6000000
-//#define LCD_SPI_SPEED 25000000
 #define LCD_SPI_SPEED  100000000    /* = clk_sys/4 at the 400 MHz UI clock = 100 MHz. SPI baud is
                                        clk_sys/4 (next divider step ÷2 is unsurvivable), so the panel
                                        speed is tied to the UI clock: 400→100. The Screen Test
@@ -76,7 +74,6 @@
 
 //Pico spi0 or spi1 must match GPIO pins used above.
 #define Pico_LCD_SPI_MOD spi1
-#define nop asm("NOP")
 //xmit_byte_multi == HW1SendSPI
 
 
@@ -116,12 +113,8 @@ extern void lcd_spi_lower_cs(void);
 extern void spi_write_data(unsigned char data);
 extern void spi_write_command(unsigned char data);
 extern void spi_write_cd(unsigned char command, int data, ...);
-extern void spi_write_data24(uint32_t data);
-
-extern void spi_draw_pixel(uint16_t x, uint16_t y, uint16_t color) ;
 extern void lcd_putc(uint8_t devn, uint8_t c);
 extern int  lcd_getc(uint8_t devn);
-extern void lcd_sleeping(uint8_t devn);
 
 
 void draw_rect_spi(int x1, int y1, int x2, int y2, int c);

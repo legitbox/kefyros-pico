@@ -251,16 +251,6 @@ void draw_bitmap_spi(int x1, int y1, int width, int height, int scale, int fc, i
                     if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1) {
                         hw_send_spi((uint8_t *) &f, 3);
                     } else {
-                        if (bc == -1) {
-                            c.rgbbytes[0] = p[n];
-                            c.rgbbytes[1] = p[n + 1];
-                            c.rgbbytes[2] = p[n + 2];
-#ifdef ILI9488
-                            b[0] = c.rgbbytes[2];
-                            b[1] = c.rgbbytes[1];
-                            b[2] = c.rgbbytes[0];
-#endif
-                        }
                         hw_send_spi((uint8_t *) &b, 3);
                     }
                     n += 3;
@@ -659,19 +649,6 @@ void spi_write_data(unsigned char data) {
     lcd_spi_lower_cs();
     hw_send_spi(&data, 1);
     lcd_spi_raise_cs();
-}
-
-void spi_write_data24(uint32_t data) {
-    uint8_t data_array[3];
-    data_array[0] = data >> 16;
-    data_array[1] = (data >> 8) & 0xFF;
-    data_array[2] = data & 0xFF;
-
-
-    gpio_put(Pico_LCD_DC, 1); // Data mode
-    gpio_put(Pico_LCD_CS, 0);
-    spi_write_blocking(Pico_LCD_SPI_MOD, data_array, 3);
-    gpio_put(Pico_LCD_CS, 1);
 }
 
 void spi_write_command(unsigned char data) {
