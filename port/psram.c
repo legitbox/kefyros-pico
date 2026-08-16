@@ -221,6 +221,8 @@ void kf_psram_read(uint32_t addr, void *buf, uint32_t n){
 	s_prime = 1;     /* E9: the first read of this call may follow an idle float -> prime it */
 	qchunked(0, addr, NULL, (uint8_t*)buf, n);
 }
+/* The PicoCalc mainboard PSRAM is a PIO block device, not an address window. */
+void *kf_psram_map(uint32_t addr, uint32_t n){ (void)addr; (void)n; return NULL; }
 
 uint32_t kf_psram_size(void){ return s_size; }
 uint32_t kf_psram_brk(void){ return s_brk; }   /* allocator high-water: [brk,size) is free */

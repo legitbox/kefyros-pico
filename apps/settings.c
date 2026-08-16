@@ -233,18 +233,6 @@ static lv_obj_t *additem(lv_obj_t *list, lv_group_t *g, const char *txt,
 	return b;
 }
 
-/* OS sound-effects on/off (deskconf "sfx", default on). The button's label child shows
-   the live state and flips on each press. */
-static lv_obj_t *btn_sfx;
-static void sfx_label(void){
-	lv_obj_t *l = lv_obj_get_child(btn_sfx, 0);
-	if(l) lv_label_set_text_fmt(l, "Sound FX: %s", deskconf_get_int("sfx",1) ? "ON" : "off");
-}
-static void act_sfx(lv_event_t *e){ (void)e;
-	deskconf_set_int("sfx", !deskconf_get_int("sfx",1));
-	sfx_label();
-}
-
 /* --- Time: zone/city picker + 24h/12h toggle ---
    The picker cycles a curated city list; each entry sets the UTC offset (minutes) and the DST rule
    (0 none, 1 EU, 2 US), stored in deskconf (tz_city index + tz_offset + tz_dst). The clock (topbar)
@@ -386,7 +374,6 @@ void app_settings_open(void){
 	btn_24 = additem(list,g, "Time format", act_clock24, NULL); clock24_label();
 	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
 	additem(list,g, "Screen Test",      act_screentest, NULL);
-	btn_sfx = additem(list,g, "Sound FX: ON", act_sfx, NULL); sfx_label();
 	additem(list,g, "About Kefyros",    act_about, NULL);
 	additem(list,g, "Power...",         act_power, NULL);
 

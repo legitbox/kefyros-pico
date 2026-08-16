@@ -1,10 +1,11 @@
 // port/css.c — streaming CSS parser + PSRAM rule store + computed styles (see css.h).
 //
-// Deliberately lenient and bounded: selectors with combinators/pseudo-classes we
-// don't support (>, +, ~, :, [) are skipped selector-by-selector; @-rules (@media,
+// Deliberately lenient and bounded: common descendant/child/class/id/attribute and
+// structural selectors are compiled; unsupported sibling/functional selectors are
+// skipped selector-by-selector. @-rules (@media,
 // @font-face, ...) are skipped whole-block (correct-ish for a fixed 320px always-
 // light-mode device); unknown properties are dropped at parse time. All heavy state
-// lives in PSRAM; SRAM cost is ~1 KB of static parse buffers plus a 4 KB rule index
+// lives in PSRAM; SRAM cost is ~1 KB of static parse buffers plus a 16 KB rule index
 // that exists only between kf_css_reset() and kf_css_shutdown().
 #include <string.h>
 #include <stdlib.h>
@@ -12,31 +13,44 @@
 #include "../kefyros.h"
 #include "css.h"
 
-#define MAX_RULES 512
-#define MAX_DECLS 8
+#define MAX_RULES 2048
+#define MAX_DECLS 12
 #define MAX_SELS  3
-#define MAX_VARS  96          /* CSS custom properties (--x), global last-wins */
+#define MAX_VARS  128         /* CSS custom properties (--x), global last-wins */
+#define MAX_FONTS 2           /* one body + one display face covers classic sites */
 #define SCREEN_W  320         /* @media evaluation viewport */
 
-typedef struct { uint32_t id_hash, cls_hash; uint16_t tag, pad; } c_sel;   /* 12 B */
+enum { REL_DESC=0, REL_CHILD=1 };
+#define SP_ROOT  0x01
+#define SP_FIRST 0x02
+#define SP_LINK  0x04
+typedef struct {
+	uint32_t id_hash, cls_hash[3], attr_hash;
+	uint16_t tag;
+	uint8_t ncls, rel, pseudo, pad;
+} c_sel;
 typedef struct { uint8_t prop, v8; uint16_t v16; } c_decl;                 /*  4 B */
 typedef struct {
 	c_sel    sel[MAX_SELS];        /* sel[nsel-1] = rightmost (the subject) */
 	uint16_t spec;
 	uint8_t  nsel, ndecl;
 	c_decl   d[MAX_DECLS];
-} c_rule;                          /* 64 B */
+} c_rule;                          /* expanded fixed record; capacity checked at runtime */
 
 enum { CP_COLOR=1, CP_BG, CP_DISPLAY, CP_ALIGN, CP_DECOR, CP_FSIZE, CP_INDENT, CP_LIST,
        CP_BORDER,   /* v8 = width px, v16 = color */
        CP_RADIUS, CP_MARGV, CP_LINEH /* v16 = signed extra line space */,
-       CP_LETSP /* v16 = signed px */, CP_XFORM };
+       CP_LETSP /* v16 = signed px */, CP_XFORM,
+       CP_PADH, CP_PADDING, CP_GAP, CP_OPACITY, CP_FLEXDIR, CP_FLEXWRAP,
+       CP_JUSTIFY, CP_ITEMS, CP_GRIDCOLS, CP_WIDTH, CP_MAXWIDTH, CP_SHADOW,
+       CP_OVERFLOW, CP_WHITESPACE, CP_BORDERCOLOR, CP_BORDERWIDTH, CP_FONTFAM };
+#define CP_IMPORTANT 0x80u
 
 static uint32_t s_base, s_cap;     /* PSRAM rule store */
 static uint32_t s_nrules;
 
 /* SRAM index: one entry per rule, keyed on its rightmost compound (id > class > tag)
-   so per-element matching is a cheap SRAM scan + a few 64-byte PSRAM reads. */
+   so per-element matching is a cheap SRAM scan + bounded PSRAM reads. */
 typedef struct { uint32_t key; uint16_t idx; uint8_t kind; uint8_t pad; } c_idx;
 enum { K_TAG=0, K_CLASS, K_ID };   /* K_TAG with key==0 = universal '*' */
 static c_idx  *s_idx;              /* malloc'd MAX_RULES entries; NULL = css disabled */
@@ -45,6 +59,9 @@ static c_idx  *s_idx;              /* malloc'd MAX_RULES entries; NULL = css dis
 typedef struct { uint32_t h; char v[44]; } c_var;
 static c_var *s_vars;              /* malloc'd MAX_VARS alongside s_idx */
 static int    s_nvars;
+typedef struct { uint32_t family;char src[220];char base[260]; } c_font;
+static c_font s_fonts[MAX_FONTS];static int s_nfonts;
+static char s_sheet_base[260];
 
 /* ===== hashing ===== */
 uint32_t kf_css_hash(const char *s, int n){
@@ -66,10 +83,14 @@ uint16_t kf_css_tag_hash(const char *name){
 void kf_css_set_arena(uint32_t base, uint32_t cap){ s_base=base; s_cap=cap; s_nrules=0; }
 uint32_t kf_css_rule_count(void){ return s_nrules; }
 void kf_css_reset(void){
-	s_nrules = 0; s_nvars = 0;
+	s_nrules = 0; s_nvars = 0;s_nfonts=0;
 	if(!s_idx)  s_idx  = malloc(sizeof(c_idx)*MAX_RULES);   /* NULL -> css quietly off */
 	if(!s_vars) s_vars = malloc(sizeof(c_var)*MAX_VARS);    /* NULL -> vars quietly off */
 }
+void kf_css_sheet_set_base(const char *u){snprintf(s_sheet_base,sizeof s_sheet_base,"%s",u?u:"");}
+int kf_css_font_count(void){return s_nfonts;}
+const char *kf_css_font_src(int i){return i>=0&&i<s_nfonts?s_fonts[i].src:"";}
+const char *kf_css_font_base(int i){return i>=0&&i<s_nfonts?s_fonts[i].base:"";}
 void kf_css_shutdown(void){
 	free(s_idx);  s_idx=NULL;  s_nrules=0;
 	free(s_vars); s_vars=NULL; s_nvars=0;
@@ -88,6 +109,7 @@ static const struct { const char *n; uint32_t rgb; } NAMED[] = {
 	{"brown",0xa52a2a},{"pink",0xffc0cb},{"gold",0xffd700},{"whitesmoke",0xf5f5f5},
 	{"darkgray",0xa9a9a9},{"lightgray",0xd3d3d3},{"darkred",0x8b0000},
 	{"darkblue",0x00008b},{"darkgreen",0x006400},{"lightblue",0xadd8e6},
+	{"rebeccapurple",0x663399},{"coral",0xff7f50},{"tomato",0xff6347},
 };
 
 static int hexv(int c){
@@ -137,11 +159,10 @@ static int parse_color(const char *v, uint16_t *out){
 }
 /* find the first color anywhere in a value (for the `background` shorthand) */
 static int color_in_value(const char *v, uint16_t *out){
-	while(*v){
-		while(*v==' ') v++;
-		int r = parse_color(v, out);
-		if(r) return r;
-		while(*v && *v!=' ') v++;
+	for(const char *p=v;*p;p++){
+		int prev=(p==v)?0:(uint8_t)p[-1];
+		int boundary=!((prev>='a'&&prev<='z')||(prev>='A'&&prev<='Z')||(prev>='0'&&prev<='9')||prev=='-'||prev=='_');
+		if(boundary){ int r=parse_color(p,out); if(r)return r; }
 	}
 	return 0;
 }
@@ -152,9 +173,36 @@ static int parse_px(const char *v){
 	if(!strncmp(e,"pt",2)) x = x*4.0/3.0;
 	else if(!strncmp(e,"em",2) || !strncmp(e,"rem",3)) x = x*13.0;
 	else if(*e=='%') x = x*13.0/100.0;
+	else if(!strncmp(e,"vw",2)) x = x*4.8;       /* PicoCalc's 480 px CSS viewport */
+	else if(!strncmp(e,"vh",2)) x = x*3.2;       /* 320 px physical viewport */
 	if(x < 0) x = 0;
 	if(x > 400) x = 400;
 	return (int)x;
+}
+
+static int parse_size(const char *v, uint16_t *value, uint8_t *unit){
+	char *e; double x = strtod(v, &e);
+	if(e==v || x<0) return 0;
+	if(*e=='%'){
+		if(x>100) x=100;
+		*unit=KF_CSS_SIZE_PCT; *value=(uint16_t)x; return 1;
+	}
+	if(!strncmp(e,"em",2)||!strncmp(e,"rem",3)) x*=13.0;
+	else if(!strncmp(e,"pt",2)) x=x*4.0/3.0;
+	if(x>400) x=400;
+	*unit=KF_CSS_SIZE_PX; *value=(uint16_t)x; return 1;
+}
+
+static int parse_grid_cols(const char *v){
+	const char *r = strstr(v,"repeat(");
+	if(r){ int n=atoi(r+7); return n<1?1:(n>4?4:n); }
+	int n=0, in_token=0;
+	for(const char *p=v; *p; ++p){
+		if(*p==' '||*p=='\t'||*p=='\n'||*p==','){ if(in_token){ n++; in_token=0; } }
+		else in_token=1;
+	}
+	if(in_token) n++;
+	return n<1?1:(n>4?4:n);
 }
 
 /* ===== CSS custom properties ===== */
@@ -204,6 +252,13 @@ static int var_expand(const char *in, char *out, int cap){
 	return changed;
 }
 
+static uint16_t family_key(const char *v){
+	while(*v==' '||*v=='\t'||*v=='\''||*v=='"')v++;
+	const char *e=v;while(*e&&*e!=','&&*e!='\''&&*e!='"')e++;
+	while(e>v&&(e[-1]==' '||e[-1]=='\t'))e--;
+	if(e==v)return 0;uint32_t h=kf_css_hash(v,(int)(e-v));return (uint16_t)(h^(h>>16));
+}
+
 /* ===== declaration parsing (shared by rule bodies and style="" attributes) ===== */
 static int parse_decls(const char *s, c_decl *out, int cap){
 	int n = 0;
@@ -222,6 +277,7 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 		while(vl>0 && val[vl-1]==' ') vl--;
 		val[vl]=0;
 		char *im = strstr(val,"!important");
+		int important = im != NULL;
 		if(im){ *im=0; vl=(int)strlen(val); while(vl>0&&val[vl-1]==' ') val[--vl]=0; }
 
 		if(prop[0]=='-' && prop[1]=='-'){ var_set(prop, val); continue; }
@@ -244,7 +300,8 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 			else if(cr==2){ d->prop=CP_BG; d->v8=0; }
 		} else if(!strcmp(prop,"display")){
 			d->prop=CP_DISPLAY;
-			d->v8 = !strcmp(val,"none") ? 1 : (strstr(val,"flex") ? 2 : 0);
+			d->v8 = !strcmp(val,"none") ? 1 : (strstr(val,"flex") ? 2 :
+			        (strstr(val,"grid") ? 3 : 0));
 		} else if(!strcmp(prop,"visibility")){
 			d->prop=CP_DISPLAY; d->v8 = !strcmp(val,"hidden");
 		} else if(!strcmp(prop,"text-align")){
@@ -263,9 +320,12 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 				else px=13;
 			}
 			d->prop=CP_FSIZE; d->v16=(uint16_t)px;
-		} else if(!strcmp(prop,"margin-left")||!strcmp(prop,"padding-left")){
+		} else if(!strcmp(prop,"margin-left")){
 			int px = parse_px(val);
 			if(px>=0){ d->prop=CP_INDENT; d->v16=(uint16_t)(px>200?200:px); }
+		} else if(!strcmp(prop,"padding-left")||!strcmp(prop,"padding-right")){
+			int px = parse_px(val);
+			if(px>=0){ d->prop=CP_PADH; d->v16=(uint16_t)(px>48?48:px); }
 		} else if(!strcmp(prop,"list-style")||!strcmp(prop,"list-style-type")){
 			d->prop=CP_LIST; d->v8 = strstr(val,"none")!=NULL;
 		} else if(!strcmp(prop,"border")||!strcmp(prop,"border-top")||!strcmp(prop,"border-bottom")||
@@ -279,9 +339,12 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 		} else if(!strcmp(prop,"border-radius")){
 			int r = parse_px(val); if(r<0) r=0; if(r>24) r=24;
 			d->prop=CP_RADIUS; d->v16=(uint16_t)r;
+		} else if(!strcmp(prop,"padding")){
+			int m = parse_px(val);
+			if(m>=0){ d->prop=CP_PADDING; d->v16=(uint16_t)(m>48?48:m); }
 		} else if(!strcmp(prop,"margin-top")||!strcmp(prop,"margin-bottom")||
 		          !strcmp(prop,"padding-top")||!strcmp(prop,"padding-bottom")||
-		          !strcmp(prop,"margin")||!strcmp(prop,"padding")){
+		          !strcmp(prop,"margin")){
 			int m = parse_px(val);                    /* shorthand: first value = vertical */
 			if(m>=0){ d->prop=CP_MARGV; d->v16=(uint16_t)(m>24?24:m); }
 		} else if(!strcmp(prop,"line-height")){
@@ -303,8 +366,51 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 		} else if(!strcmp(prop,"text-transform")){
 			d->prop=CP_XFORM;
 			d->v8 = strstr(val,"upper") ? 1 : (strstr(val,"lower") ? 2 : 0);
+		} else if(!strcmp(prop,"gap")||!strcmp(prop,"row-gap")||!strcmp(prop,"column-gap")){
+			int g=parse_px(val); if(g>=0){ d->prop=CP_GAP; d->v16=(uint16_t)(g>32?32:g); }
+		} else if(!strcmp(prop,"opacity")){
+			char *e; double x=strtod(val,&e);
+			if(e!=val){ if(x<0)x=0; if(x>1)x=1; d->prop=CP_OPACITY; d->v16=(uint16_t)(x*255.0); }
+		} else if(!strcmp(prop,"flex-direction")){
+			d->prop=CP_FLEXDIR;
+			d->v8 = !strncmp(val,"column-reverse",14) ? 3 : (!strncmp(val,"row-reverse",11) ? 2 :
+			        (!strncmp(val,"column",6) ? 1 : 0));
+		} else if(!strcmp(prop,"flex-wrap")){
+			d->prop=CP_FLEXWRAP;
+			d->v8 = strstr(val,"wrap-reverse") ? 2 : (!strcmp(val,"wrap") ? 1 : 0);
+		} else if(!strcmp(prop,"justify-content")){
+			d->prop=CP_JUSTIFY;
+			d->v8 = strstr(val,"space-between") ? KF_CSS_JUSTIFY_BETWEEN :
+			        (strstr(val,"space-around") ? KF_CSS_JUSTIFY_AROUND :
+			        (strstr(val,"space-evenly") ? KF_CSS_JUSTIFY_EVENLY :
+			        (strstr(val,"center") ? KF_CSS_JUSTIFY_CENTER :
+			        ((strstr(val,"end")||strstr(val,"right")) ? KF_CSS_JUSTIFY_END : KF_CSS_JUSTIFY_START))));
+		} else if(!strcmp(prop,"align-items")||!strcmp(prop,"align-content")){
+			d->prop=CP_ITEMS;
+			d->v8 = strstr(val,"center") ? KF_CSS_ALIGN_CENTER :
+			        ((strstr(val,"end")||strstr(val,"right")) ? KF_CSS_ALIGN_END :
+			        (strstr(val,"stretch") ? KF_CSS_ALIGN_STRETCH : KF_CSS_ALIGN_START));
+		} else if(!strcmp(prop,"grid-template-columns")){
+			d->prop=CP_GRIDCOLS; d->v8=(uint8_t)parse_grid_cols(val);
+		} else if(!strcmp(prop,"width")||!strcmp(prop,"max-width")){
+			uint16_t sz; uint8_t un;
+			if(parse_size(val,&sz,&un)){ d->prop=!strcmp(prop,"width")?CP_WIDTH:CP_MAXWIDTH; d->v8=un; d->v16=sz; }
+		} else if(!strcmp(prop,"overflow")||!strcmp(prop,"overflow-x")||!strcmp(prop,"overflow-y")){
+			d->prop=CP_OVERFLOW; d->v8=(strstr(val,"hidden")||strstr(val,"clip"))?1:0;
+		} else if(!strcmp(prop,"white-space")){
+			d->prop=CP_WHITESPACE; d->v8=(strstr(val,"nowrap")||strstr(val,"pre"))?1:0;
+		} else if(!strcmp(prop,"box-shadow")){
+			if(strstr(val,"none")){ d->prop=CP_SHADOW; d->v8=0; }
+			else { uint16_t sc=0x8410; color_in_value(val,&sc); d->prop=CP_SHADOW; d->v8=8; d->v16=sc; }
+		} else if(!strcmp(prop,"border-color")){
+			if(parse_color(val,&col)==1){ d->prop=CP_BORDERCOLOR; d->v16=col; }
+		} else if(!strcmp(prop,"border-width")){
+			int w=parse_px(val); if(w>=0){ d->prop=CP_BORDERWIDTH; d->v8=(uint8_t)(w>6?6:w); }
+		} else if(!strcmp(prop,"font-family")){
+			d->prop=CP_FONTFAM;d->v16=family_key(val);
+			d->v8=(strstr(val,"mono")||strstr(val,"courier")||strstr(val,"consolas"))?1:0;
 		}
-		if(d->prop) n++;
+		if(d->prop){ if(important) d->prop|=CP_IMPORTANT; n++; }
 	}
 	return n;
 }
@@ -313,7 +419,8 @@ static int parse_decls(const char *s, c_decl *out, int cap){
 static int is_ident(int c){
 	return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||(uint8_t)c>=0x80;
 }
-/* parse one compound ("tag.cls#id" / "*" / ".cls" ...). 1 ok, 0 unsupported. */
+/* parse one compound (tag.a.b#id[attr]:first-child). Attribute support is
+   intentionally presence-only; value operators are rejected rather than overmatching. */
 static int parse_compound(const char *s, int len, c_sel *o, int *spec){
 	memset(o, 0, sizeof *o);
 	int i = 0;
@@ -327,32 +434,62 @@ static int parse_compound(const char *s, int len, c_sel *o, int *spec){
 	}
 	while(i<len){
 		int kind = s[i];
-		if(kind!='.' && kind!='#') return 0;
-		i++;
-		int st=i;
-		while(i<len && is_ident(s[i])) i++;
-		if(i==st) return 0;
-		uint32_t h = kf_css_hash(s+st, i-st);
-		if(kind=='#'){ o->id_hash=h; *spec+=100; }
-		else { if(!o->cls_hash) o->cls_hash=h; *spec+=10; }   /* .a.b: match first, count both */
+		if(kind=='.' || kind=='#'){
+			i++; int st=i;
+			while(i<len && is_ident(s[i])) i++;
+			if(i==st) return 0;
+			uint32_t h = kf_css_hash(s+st, i-st);
+			if(kind=='#'){ o->id_hash=h; *spec+=100; }
+			else { if(o->ncls>=3) return 0; o->cls_hash[o->ncls++]=h; *spec+=10; }
+		} else if(kind=='['){
+			i++; while(i<len && (s[i]==' '||s[i]=='\t')) i++;
+			int st=i; while(i<len && is_ident(s[i])) i++;
+			if(i==st) return 0;
+			o->attr_hash=kf_css_hash(s+st,i-st); *spec+=10;
+			while(i<len && (s[i]==' '||s[i]=='\t')) i++;
+			if(i>=len || s[i]!=']') return 0;       /* no =, ~=, ^= etc. yet */
+			i++;
+		} else if(kind==':'){
+			i++; int st=i; while(i<len && is_ident(s[i])) i++;
+			int n=i-st;
+			if(n==4 && !strncmp(s+st,"root",4)) o->pseudo|=SP_ROOT;
+			else if(n==11 && !strncmp(s+st,"first-child",11)) o->pseudo|=SP_FIRST;
+			else if((n==4&&!strncmp(s+st,"link",4)) || (n==8&&!strncmp(s+st,"any-link",8))) o->pseudo|=SP_LINK;
+			else return 0;
+			*spec+=10;
+		} else return 0;
 	}
 	return 1;
 }
-/* parse one full selector (descendant chain); 1 ok. */
+/* parse descendant and direct-child chains. */
 static int parse_selector(const char *s, int len, c_sel *sels, int *nsel, uint16_t *spec){
 	for(int i=0;i<len;i++){
 		int c=s[i];
-		if(c==':'||c=='['||c=='>'||c=='+'||c=='~'||c=='('||c==')') return 0;
+		if(c=='+'||c=='~'||c=='('||c==')') return 0;
 	}
 	int sp = 0;
 	c_sel tmp[8]; int nt=0;
-	int i=0;
+	int i=0; uint8_t rel=REL_DESC;
 	while(i<len){
 		while(i<len && (s[i]==' '||s[i]=='\t'||s[i]=='\n'||s[i]=='\r')) i++;
+		if(i<len && s[i]=='>'){
+			rel=REL_CHILD; i++;
+			while(i<len && (s[i]==' '||s[i]=='\t'||s[i]=='\n'||s[i]=='\r')) i++;
+		}
 		int st=i;
-		while(i<len && s[i]!=' '&&s[i]!='\t'&&s[i]!='\n'&&s[i]!='\r') i++;
+		int brackets=0;
+		while(i<len){
+			if(s[i]=='[') brackets++;
+			else if(s[i]==']'&&brackets) brackets--;
+			if(!brackets && (s[i]=='>'||s[i]==' '||s[i]=='\t'||s[i]=='\n'||s[i]=='\r')) break;
+			i++;
+		}
 		if(i==st) break;
-		if(nt<8){ if(!parse_compound(s+st, i-st, &tmp[nt], &sp)) return 0; nt++; }
+		if(nt<8){
+			if(!parse_compound(s+st, i-st, &tmp[nt], &sp)) return 0;
+			tmp[nt].rel = nt ? rel : REL_DESC;
+			nt++; rel=REL_DESC;
+		}
 	}
 	if(!nt) return 0;
 	/* keep the rightmost MAX_SELS compounds (deep chains degrade gracefully) */
@@ -374,7 +511,7 @@ static void emit_rule(const c_sel *sels, int nsel, uint16_t spec, const c_decl *
 	const c_sel *rm = &sels[nsel-1];
 	c_idx *ix = &s_idx[s_nrules];
 	if(rm->id_hash){ ix->kind=K_ID; ix->key=rm->id_hash; }
-	else if(rm->cls_hash){ ix->kind=K_CLASS; ix->key=rm->cls_hash; }
+	else if(rm->ncls){ ix->kind=K_CLASS; ix->key=rm->cls_hash[0]; }
 	else { ix->kind=K_TAG; ix->key=rm->tag; }   /* tag 0 = universal */
 	ix->idx=(uint16_t)s_nrules;
 	s_nrules++;
@@ -440,12 +577,34 @@ static int media_true(const char *q){                     /* q = text after '@' 
 	}
 }
 
+static char dclb[512]; static int dcln;
+static void finish_font_face(void){
+	dclb[dcln]=0;char lo[sizeof dclb];
+	for(int i=0;i<=dcln;i++)lo[i]=(char)lc(dclb[i]);
+	char *fp=strstr(lo,"font-family");if(!fp)return;fp=strchr(fp,':');if(!fp)return;fp++;
+	while(*fp==' '||*fp=='\t'||*fp=='\''||*fp=='"')fp++;
+	char *fe=fp;while(*fe&&*fe!=';'&&*fe!='\''&&*fe!='"'&&*fe!=',')fe++;
+	while(fe>fp&&(fe[-1]==' '||fe[-1]=='\t'))fe--;
+	uint16_t key=family_key(fp);if(!key)return;
+	char *sp=strstr(lo,"src");if(!sp)return;sp=strstr(sp,"url(");if(!sp)return;sp+=4;
+	int so=(int)(sp-lo);const char *orig=dclb+so;
+	while(*orig==' '||*orig=='\t'||*orig=='\''||*orig=='"')orig++;
+	const char *se=orig;while(*se&&*se!=')'&&*se!='\''&&*se!='"')se++;
+	while(se>orig&&(se[-1]==' '||se[-1]=='\t'))se--;
+	if(se==orig)return;
+	int slot=-1;for(int i=0;i<s_nfonts;i++)if((uint16_t)(s_fonts[i].family^(s_fonts[i].family>>16))==key)slot=i;
+	if(slot<0){if(s_nfonts>=MAX_FONTS)return;slot=s_nfonts++;}
+	s_fonts[slot].family=kf_css_hash(fp,(int)(fe-fp));
+	int n=(int)(se-orig);if(n>=(int)sizeof s_fonts[slot].src)n=sizeof s_fonts[slot].src-1;
+	memcpy(s_fonts[slot].src,orig,n);s_fonts[slot].src[n]=0;
+	snprintf(s_fonts[slot].base,sizeof s_fonts[slot].base,"%s",s_sheet_base);
+}
+
 /* ===== stylesheet tokenizer (streaming) ===== */
-enum { TS_SEL, TS_DECL, TS_ATHEAD, TS_ATBLK };
+enum { TS_SEL, TS_DECL, TS_ATHEAD, TS_ATBLK,TS_FONT };
 static int  ts_state, ts_atdepth, ts_cmt, ts_star, ts_slash, ts_selovf;
 static int  ts_mdepth;             /* inside N accepted @media blocks */
 static char selb[256]; static int seln;
-static char dclb[512]; static int dcln;
 static char atb[160];  static int atbn;
 
 void kf_css_sheet_begin(void){
@@ -487,6 +646,7 @@ static void feed2(int c){
 		else if(c=='{'){
 			atb[atbn]=0;
 			if(media_true(atb)){ ts_mdepth++; ts_state=TS_SEL; seln=0; }  /* parse inside */
+			else if(strstr(atb,"font-face")){ts_state=TS_FONT;dcln=0;}
 			else { ts_atdepth=1; ts_state=TS_ATBLK; }                     /* skip block */
 		}
 		else { if(atbn<(int)sizeof atb-1) atb[atbn++]=(char)lc(c); }
@@ -498,6 +658,10 @@ static void feed2(int c){
 	case TS_DECL:
 		if(c=='}'){ finish_rule(); seln=0; dcln=0; ts_selovf=0; ts_state=TS_SEL; }
 		else { if(dcln<(int)sizeof dclb-1) dclb[dcln++]=(char)c; }
+		break;
+	case TS_FONT:
+		if(c=='}'){finish_font_face();dcln=0;ts_state=TS_SEL;seln=0;ts_selovf=0;}
+		else if(dcln<(int)sizeof dclb-1)dclb[dcln++]=(char)c;
 		break;
 	}
 }
@@ -516,62 +680,73 @@ void kf_css_sheet_end(void){
 }
 
 /* ===== matching + computed style ===== */
-static int sel_match(const c_sel *s, const kf_css_elem *e){
+static int sel_match(const c_sel *s, const kf_css_elem *e, int stack_pos){
 	if(s->tag && s->tag != e->tag) return 0;
 	if(s->id_hash && s->id_hash != e->id_hash) return 0;
-	if(s->cls_hash){
-		int ok=0;
-		for(int i=0;i<e->ncls;i++) if(e->cls[i]==s->cls_hash){ ok=1; break; }
+	for(int c=0;c<s->ncls;c++){
+		int ok=0; for(int i=0;i<e->ncls;i++) if(e->cls[i]==s->cls_hash[c]){ ok=1; break; }
 		if(!ok) return 0;
 	}
+	if(s->attr_hash){
+		int ok=0; for(int i=0;i<e->nattr;i++) if(e->attr[i]==s->attr_hash){ ok=1; break; }
+		if(!ok) return 0;
+	}
+	if((s->pseudo&SP_ROOT) && stack_pos!=0) return 0;
+	if((s->pseudo&SP_FIRST) && e->child_index!=1) return 0;
+	if((s->pseudo&SP_LINK) && e->tag!=kf_css_tag_hash("a")) return 0;
 	return 1;
 }
-static c_rule r_scratch;           /* static: keep 64 B off the 4 KB core0 stack */
+static c_rule r_scratch;           /* static: keep the expanded rule off the 4 KB stack */
 static int rule_match(const c_rule *r, const kf_css_elem *stk, int depth){
-	if(!sel_match(&r->sel[r->nsel-1], &stk[depth-1])) return 0;
+	if(!sel_match(&r->sel[r->nsel-1], &stk[depth-1], depth-1)) return 0;
 	int k = depth-2;
 	for(int j=r->nsel-2; j>=0; j--){
-		int found=0;
-		while(k>=0){
-			if(sel_match(&r->sel[j], &stk[k])){ found=1; k--; break; }
-			k--;
+		int found=0; uint8_t rel=r->sel[j+1].rel;
+		if(rel==REL_CHILD){
+			if(k>=0 && sel_match(&r->sel[j],&stk[k],k)){ found=1; k--; }
+		} else {
+			while(k>=0){
+				if(sel_match(&r->sel[j], &stk[k], k)){ found=1; k--; break; }
+				k--;
+			}
 		}
 		if(!found) return 0;
 	}
 	return 1;
 }
 static void apply_decl(kf_css_style *st, const c_decl *d){
-	switch(d->prop){
+	switch(d->prop & (uint8_t)~CP_IMPORTANT){
 	case CP_COLOR: st->fg=d->v16; st->flags|=KF_CSS_F_FG; break;
 	case CP_BG:
 		if(d->v8){ st->bg=d->v16; st->flags|=KF_CSS_F_BG; }
-		else st->flags &= (uint16_t)~KF_CSS_F_BG;
+		else st->flags &= ~KF_CSS_F_BG;
 		break;
 	case CP_DISPLAY:
-		st->flags &= (uint16_t)~(KF_CSS_F_HIDE|KF_CSS_F_FLEX);
+		st->flags &= ~(KF_CSS_F_HIDE|KF_CSS_F_FLEX|KF_CSS_F_GRID);
 		if(d->v8==1) st->flags|=KF_CSS_F_HIDE;
 		else if(d->v8==2) st->flags|=KF_CSS_F_FLEX;
+		else if(d->v8==3) st->flags|=KF_CSS_F_GRID;
 		break;
 	case CP_ALIGN:
-		st->flags &= (uint16_t)~(KF_CSS_F_CENTER|KF_CSS_F_RIGHT);
+		st->flags &= ~(KF_CSS_F_CENTER|KF_CSS_F_RIGHT);
 		if(d->v8==1) st->flags|=KF_CSS_F_CENTER;
 		else if(d->v8==2) st->flags|=KF_CSS_F_RIGHT;
 		break;
 	case CP_DECOR:
-		st->flags &= (uint16_t)~(KF_CSS_F_UNDER|KF_CSS_F_STRIKE);
+		st->flags &= ~(KF_CSS_F_UNDER|KF_CSS_F_STRIKE);
 		if(d->v8 & 1) st->flags|=KF_CSS_F_UNDER;
 		if(d->v8 & 2) st->flags|=KF_CSS_F_STRIKE;
 		break;
 	case CP_FSIZE:
 		/* >=20px: modern sites set 17-19px BODY text; only genuinely-large text
 		   (headings) should get the 20px font */
-		if(d->v16>=20) st->flags|=KF_CSS_F_BIG; else st->flags&=(uint16_t)~KF_CSS_F_BIG;
+		if(d->v16>=20) st->flags|=KF_CSS_F_BIG; else st->flags&=~KF_CSS_F_BIG;
 		break;
 	case CP_INDENT:
 		if(d->v16 > st->indent) st->indent = (uint8_t)(d->v16>200?200:d->v16);
 		break;
 	case CP_LIST:
-		if(d->v8) st->flags|=KF_CSS_F_NOBULLET; else st->flags&=(uint16_t)~KF_CSS_F_NOBULLET;
+		if(d->v8) st->flags|=KF_CSS_F_NOBULLET; else st->flags&=~KF_CSS_F_NOBULLET;
 		break;
 	case CP_BORDER: st->border_w=d->v8; st->border_c=d->v16; break;
 	case CP_RADIUS: st->radius=(uint8_t)d->v16; break;
@@ -579,18 +754,46 @@ static void apply_decl(kf_css_style *st, const c_decl *d){
 	case CP_LINEH:  st->line_sp=(int8_t)(int16_t)d->v16; break;
 	case CP_LETSP:  st->let_sp=(int8_t)(int16_t)d->v16; break;
 	case CP_XFORM:  st->xform=d->v8; break;
+	case CP_PADH: st->pad_h=(uint8_t)d->v16; break;
+	case CP_PADDING: st->pad_h=(uint8_t)d->v16; st->pad_v=(uint8_t)d->v16; break;
+	case CP_GAP: st->gap=(uint8_t)d->v16; break;
+	case CP_OPACITY: st->opacity=(uint8_t)d->v16; break;
+	case CP_FLEXDIR: st->flex_dir=d->v8; break;
+	case CP_FLEXWRAP: st->flex_wrap=d->v8; break;
+	case CP_JUSTIFY: st->justify=d->v8; break;
+	case CP_ITEMS: st->align=d->v8; break;
+	case CP_GRIDCOLS: st->grid_cols=d->v8; break;
+	case CP_WIDTH: st->width=d->v16; st->width_unit=d->v8; break;
+	case CP_MAXWIDTH: st->max_width=d->v16; st->max_width_unit=d->v8; break;
+	case CP_SHADOW: st->shadow_w=d->v8; st->shadow_c=d->v16; break;
+	case CP_OVERFLOW:
+		if(d->v8) st->flags|=KF_CSS_F_CLIP; else st->flags&=~KF_CSS_F_CLIP;
+		break;
+	case CP_WHITESPACE:
+		if(d->v8) st->flags|=KF_CSS_F_NOWRAP; else st->flags&=~KF_CSS_F_NOWRAP;
+		break;
+	case CP_BORDERCOLOR: st->border_c=d->v16; break;
+	case CP_BORDERWIDTH: st->border_w=d->v8; break;
+	case CP_FONTFAM:
+		st->font_id=0;
+		for(int i=0;i<s_nfonts;i++){
+			uint32_t h=s_fonts[i].family;
+			if((uint16_t)(h^(h>>16))==d->v16){st->font_id=(uint8_t)(i+1);break;}
+		}
+		if(d->v8) st->flags|=KF_CSS_F_MONO; else st->flags&=~KF_CSS_F_MONO;
+		break;
 	}
 }
 
-/* bg inherits too (unlike real CSS): styling is per-BLOCK, and pages hang their
-   backgrounds on <div>/<body> containers whose text lives in child <p>s — without
-   propagation a container background would never be visible at all. */
-#define INHERIT_MASK (KF_CSS_F_FG|KF_CSS_F_BG|KF_CSS_F_CENTER|KF_CSS_F_RIGHT| \
-                      KF_CSS_F_BIG|KF_CSS_F_NOBULLET|KF_CSS_F_HIDE)
+/* Only genuinely inherited properties flow down. Container backgrounds now render
+   on their own BOX operation, so they no longer need the old non-CSS propagation hack. */
+#define INHERIT_MASK (KF_CSS_F_FG|KF_CSS_F_CENTER|KF_CSS_F_RIGHT|KF_CSS_F_BIG| \
+                      KF_CSS_F_NOBULLET|KF_CSS_F_HIDE|KF_CSS_F_NOWRAP|KF_CSS_F_MONO)
 
 void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
                   const kf_css_style *parent, kf_css_style *out){
 	memset(out, 0, sizeof *out);
+	out->opacity = 255;
 	if(parent){
 		out->flags   = parent->flags & INHERIT_MASK;
 		out->fg      = parent->fg;
@@ -598,13 +801,14 @@ void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
 		out->line_sp = parent->line_sp;    /* typography inherits (per CSS) */
 		out->let_sp  = parent->let_sp;
 		out->xform   = parent->xform;
+		out->font_id = parent->font_id;
 	}
 	if(depth<=0) return;
 	const kf_css_elem *E = &stk[depth-1];
 
 	if(s_idx && s_nrules){
 		/* gather matches, sorted by (specificity, rule order) */
-		struct { uint16_t spec, idx; } m[16]; int nm=0;
+		static struct { uint16_t spec, idx; } m[64]; int nm=0;
 		for(uint32_t i=0;i<s_nrules;i++){
 			const c_idx *ix=&s_idx[i]; int hit=0;
 			if(ix->kind==K_TAG) hit = (ix->key==0 || ix->key==E->tag);
@@ -614,20 +818,34 @@ void kf_css_apply(const kf_css_elem *stk, int depth, const char *inl,
 			if(!hit) continue;
 			kf_psram_read(s_base + ix->idx*sizeof(c_rule), &r_scratch, sizeof r_scratch);
 			if(!rule_match(&r_scratch, stk, depth)) continue;
-			if(nm < 16){
+			if(nm < 64){
 				int j=nm++;                     /* insertion sort, stable in rule order */
 				while(j>0 && m[j-1].spec > r_scratch.spec){ m[j]=m[j-1]; j--; }
 				m[j].spec=r_scratch.spec; m[j].idx=ix->idx;
 			}
 		}
+		/* Normal declarations first, in cascade order. */
 		for(int i=0;i<nm;i++){
 			kf_psram_read(s_base + m[i].idx*sizeof(c_rule), &r_scratch, sizeof r_scratch);
-			for(int j=0;j<r_scratch.ndecl;j++) apply_decl(out, &r_scratch.d[j]);
+			for(int j=0;j<r_scratch.ndecl;j++) if(!(r_scratch.d[j].prop&CP_IMPORTANT)) apply_decl(out, &r_scratch.d[j]);
 		}
+		/* Inline normal beats stylesheet normal. Important rules are applied below. */
+		static c_decl inlds[MAX_DECLS]; int ninl=0;
+		if(inl && inl[0]){
+			ninl=parse_decls(inl,inlds,MAX_DECLS);
+			for(int i=0;i<ninl;i++) if(!(inlds[i].prop&CP_IMPORTANT)) apply_decl(out,&inlds[i]);
+		}
+		for(int i=0;i<nm;i++){
+			kf_psram_read(s_base + m[i].idx*sizeof(c_rule), &r_scratch, sizeof r_scratch);
+			for(int j=0;j<r_scratch.ndecl;j++) if(r_scratch.d[j].prop&CP_IMPORTANT) apply_decl(out,&r_scratch.d[j]);
+		}
+		for(int i=0;i<ninl;i++) if(inlds[i].prop&CP_IMPORTANT) apply_decl(out,&inlds[i]);
+		return;
 	}
-	if(inl && inl[0]){                          /* style="" beats everything */
+	if(inl && inl[0]){                          /* no sheet: inline still cascades */
 		static c_decl ds[MAX_DECLS];
 		int nds = parse_decls(inl, ds, MAX_DECLS);
-		for(int i=0;i<nds;i++) apply_decl(out, &ds[i]);
+		for(int pass=0;pass<2;pass++) for(int i=0;i<nds;i++)
+			if(!!(ds[i].prop&CP_IMPORTANT)==pass) apply_decl(out,&ds[i]);
 	}
 }

@@ -202,6 +202,11 @@ static lv_result_t decoder_open(lv_image_decoder_t * decoder, lv_image_decoder_d
     lv_cache_entry_t * entry = lv_image_decoder_add_to_cache(decoder, &search_key, decoded, NULL);
 
     if(entry == NULL) {
+        /* Cache rejected the entry (e.g. decoded image larger than the cache budget).
+         * The decode succeeded but nothing owns `decoded` on this path (decoder_close
+         * only destroys it when no_cache/cache-off), so free it here or every failed
+         * cache-add leaks the whole bitmap. */
+        lv_draw_buf_destroy(decoded);
         return LV_RESULT_INVALID;
     }
     dsc->cache_entry = entry;

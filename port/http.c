@@ -24,8 +24,8 @@
 #include "miniz_tinfl.h"           /* streaming DEFLATE (transparent gzip bodies) */
 
 #define HTTP_MAX_REDIRECTS 6
-#define HTTP_TIMEOUT_MS    25000u
-#define HTTP_STALL_MS      10000u
+#define HTTP_TIMEOUT_MS    90000u
+#define HTTP_STALL_MS      15000u
 
 /* ---- request target ---- */
 static char     s_host[128];
@@ -60,6 +60,9 @@ static int         s_sbody_len;
 /* ---- response parse ---- */
 static int       s_status;
 static int       s_chunked;
+static int       s_have_content_len;
+static uint32_t  s_content_len;            /* encoded entity length from HTTP headers */
+static uint32_t  s_entity_seen;             /* encoded bytes received (before gzip inflate) */
 static int       s_first_line;
 static char      s_location[512];
 static int       s_do_redirect;
@@ -127,6 +130,32 @@ static int parse_url(const char *url, char *scheme, int slen, char *host, int hl
 	return 1;
 }
 
+/* Collapse /./ and /../ after resolving a relative reference. Real sites use these
+   heavily in stylesheet and image URLs; leaving them verbatim breaks otherwise-valid
+   resources on stricter origin servers. Query text is preserved byte-for-byte. */
+static void normalize_url_path(char *url,int cap){
+	char src[768],dst[768],query[512];snprintf(src,sizeof src,"%s",url);query[0]=0;
+	char *scheme=strstr(src,"://");if(!scheme)return;
+	char *path=strchr(scheme+3,'/');if(!path)return;
+	char *q=strchr(path,'?');if(q){snprintf(query,sizeof query,"%s",q);*q=0;}
+	int prefix=(int)(path-src),pos=0;memcpy(dst,src,prefix);pos=prefix;dst[pos++]='/';
+	int root=pos;char *p=path+1;int trailing=path[strlen(path)-1]=='/';
+	while(*p){
+		while(*p=='/')p++;if(!*p)break;char *e=p;while(*e&&*e!='/')e++;int n=(int)(e-p);
+		if(n==1&&p[0]=='.'){}
+		else if(n==2&&p[0]=='.'&&p[1]=='.'){
+			while(pos>root&&dst[pos-1]!='/')pos--;if(pos>root)pos--;
+		}else{
+			if(pos>root&&pos<(int)sizeof dst-1)dst[pos++]='/';
+			for(int i=0;i<n&&pos<(int)sizeof dst-1;i++)dst[pos++]=p[i];
+		}
+		p=e;
+	}
+	if(trailing&&pos>root&&pos<(int)sizeof dst-1)dst[pos++]='/';
+	for(const char *x=query;*x&&pos<(int)sizeof dst-1;x++)dst[pos++]=*x;
+	dst[pos]=0;snprintf(url,cap,"%s",dst);
+}
+
 int kf_url_resolve(const char *base, const char *ref, char *out, int outsz){
 	if(!ref || !ref[0]) return 0;
 	while(*ref==' ') ref++;
@@ -139,7 +168,11 @@ int kf_url_resolve(const char *base, const char *ref, char *out, int outsz){
 		char hostport[160];
 		if(dflt) snprintf(hostport, sizeof hostport, "%s", bh);
 		else     snprintf(hostport, sizeof hostport, "%s:%u", bh, bport);
-		if(ref[0]=='/' && ref[1]=='/')        snprintf(out, outsz, "%s:%s", bs, ref);
+		if(ref[0]=='?'){
+			snprintf(out,outsz,"%s",base);char *oq=strchr(out,'?');if(oq)*oq=0;
+			int used=(int)strlen(out);snprintf(out+used,outsz-used,"%s",ref);
+		}
+		else if(ref[0]=='/' && ref[1]=='/')   snprintf(out, outsz, "%s:%s", bs, ref);
 		else if(ref[0]=='/')                  snprintf(out, outsz, "%s://%s%s", bs, hostport, ref);
 		else {
 			char dir[512]; snprintf(dir, sizeof dir, "%s", bp);
@@ -148,6 +181,7 @@ int kf_url_resolve(const char *base, const char *ref, char *out, int outsz){
 		}
 	}
 	char *frag = strchr(out, '#'); if(frag) *frag = 0;
+	normalize_url_path(out,outsz);
 	return out[0] ? 1 : 0;
 }
 
@@ -157,7 +191,9 @@ static void body_flush(void){
 	               s_body_len += s_stage_n; s_stage_n = 0; }
 }
 static void body_put(uint8_t b){
-	if(s_body_len + s_stage_n >= s_arena_cap) return;
+	/* Silently truncating made a large asset look like a never-ending valid transfer,
+	   then poisoned the caller's cache with an undecodable prefix. Fail immediately. */
+	if(s_body_len+s_stage_n>=s_arena_cap){if(s_state!=KF_HTTP_ERROR)fail("body too large");return;}
 	s_stage[s_stage_n++] = b;
 	if(s_stage_n == sizeof s_stage) body_flush();
 }
@@ -276,6 +312,10 @@ static void headers_done(void){
 			s_do_redirect = 1; s_phase = PH_DONE; return;
 		}
 	}
+	/* For an uncompressed response Content-Length is also the exact PSRAM demand.
+	   Reject it before downloading a megabyte we cannot store. Gzip is checked by
+	   body_put() against its expanded size instead. */
+	if(!s_gzip&&s_have_content_len&&s_content_len>s_arena_cap){fail("body too large");return;}
 	s_phase = s_chunked ? PH_CSIZE : PH_BODY_RAW;
 	s_chunk_rem = 0; s_line_n = 0;
 }
@@ -300,6 +340,11 @@ static void head_line(void){
 			const char *v = hdr_val(s_line);
 			if(strstr(v,"gzip")||strstr(v,"Gzip")||strstr(v,"GZIP")) s_gzip = 1;
 		}
+		else if(ci_prefix(s_line, "content-length:")){
+			const char *v = hdr_val(s_line);
+			s_content_len = (uint32_t)strtoul(v, NULL, 10);
+			s_have_content_len = 1;
+		}
 	}
 	s_line_n = 0;
 }
@@ -310,7 +355,7 @@ static void feed(uint8_t b){
 		else if(s_line_n < (int)sizeof s_line - 1) s_line[s_line_n++] = (char)b;
 		break;
 	case PH_BODY_RAW:
-		sink_put(b);
+		s_entity_seen++; sink_put(b);
 		break;
 	case PH_CSIZE:
 		if(b=='\n'){
@@ -322,7 +367,7 @@ static void feed(uint8_t b){
 		} else if(b!='\r' && s_line_n < (int)sizeof s_line - 1) s_line[s_line_n++]=(char)b;
 		break;
 	case PH_CDATA:
-		sink_put(b);
+		s_entity_seen++; sink_put(b);
 		if(--s_chunk_rem == 0) s_phase = PH_CAFTER;
 		break;
 	case PH_CAFTER:
@@ -430,13 +475,21 @@ static void http_close(void){
 	}
 }
 static void finish_ok(void){
+	/* Never bless a truncated response as DONE: callers persist DONE bodies in the
+	   CSS/image cache. One marginal transfer used to poison that URL indefinitely. */
+	if((s_have_content_len && s_entity_seen < s_content_len) ||
+	   (s_chunked && s_phase != PH_DONE)){
+		fail("truncated response");
+		http_close();
+		return;
+	}
 	body_finish();             /* flush the inflater tail, then the PSRAM stage */
 	if(s_state == KF_HTTP_RECEIVING) s_state = KF_HTTP_DONE;
 	http_close();
 }
 
 static void http_err_cb(void *arg, err_t err){ (void)arg; s_pcb = NULL;
-	if(s_body_len>0 && s_phase!=PH_HEADLINE){ if(s_state==KF_HTTP_RECEIVING) s_state=KF_HTTP_DONE; }
+	if(s_phase==PH_DONE && s_state==KF_HTTP_RECEIVING) finish_ok();
 	else if(s_state!=KF_HTTP_DONE){ char m[40]; snprintf(m,sizeof m,"conn err e=%d",(int)err); fail(m); }
 }
 static err_t http_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err){
@@ -508,7 +561,7 @@ static err_t http_connected_cb(void *arg, struct tcp_pcb *pcb, err_t err){
 }
 static void http_dns(const char *name, const ip_addr_t *ip, void *arg){
 	(void)name; (void)arg;
-	if(!ip){ fail("DNS failed"); return; }
+	if(!ip){ fail(kf_clock_khz() <= 270000u ? "DNS failed @250" : "DNS failed @400"); return; }
 	s_pcb = tcp_new_ip_type(IP_GET_TYPE(ip));
 	if(!s_pcb){ fail("no pcb (out of memory)"); return; }
 	tcp_arg(s_pcb, NULL);
@@ -532,6 +585,7 @@ static int start_request(const char *url){
 	http_close();
 	s_state = KF_HTTP_RESOLVING;
 	s_status = 0; s_chunked = 0; s_first_line = 1; s_location[0] = 0;
+	s_have_content_len = 0; s_content_len = 0; s_entity_seen = 0;
 	s_do_redirect = 0; s_phase = PH_HEADLINE; s_line_n = 0; s_chunk_rem = 0;
 	s_req_off = 0; s_req_sent = 0;
 	s_body_base = s_arena_base; s_body_len = 0; s_stage_n = 0;
@@ -539,6 +593,11 @@ static int start_request(const char *url){
 	gz_in_n = 0; gz_done = 0; gz_err = 0; gz_skip = 0;
 	s_err[0] = 0; s_t0 = s_tlast = now_ms();
 
+	/* DNS is a tiny UDP exchange and therefore an excellent canary for marginal
+	   CYW43 timing. Resolve at the proven-safe radio clock, then the owning app
+	   ramps back to 400 MHz as soon as this state advances to CONNECTING. This
+	   also covers redirects and every HTTP user, not just address-bar loads. */
+	kf_clock_eco();
 	ip_addr_t ip;
 	err_t e = dns_gethostbyname(s_host, &ip, http_dns, NULL);
 	if(e == ERR_OK)            http_dns(s_host, &ip, NULL);
@@ -570,14 +629,19 @@ void kf_http_poll(void){
 	if(s_do_redirect){
 		s_do_redirect = 0;
 		s_redirects++;
+		/* Browser semantics: POST becomes GET after 301/302/303; 307/308 explicitly
+		   preserve the method and body. This matters for ordinary form endpoints. */
+		if(s_post&&(s_status==301||s_status==302||s_status==303)){
+			s_post=0;s_xhdr=NULL;s_sbody=NULL;s_sbody_len=0;
+		}
 		start_request(s_redirect_url);
 		return;
 	}
 	if(s_state==KF_HTTP_RESOLVING || s_state==KF_HTTP_CONNECTING || s_state==KF_HTTP_RECEIVING){
 		uint32_t t = now_ms();
 		if(t - s_t0 > HTTP_TIMEOUT_MS || t - s_tlast > HTTP_STALL_MS){
-			if(s_body_len>0){ finish_ok(); }
-			else { fail("timeout"); http_close(); }
+			fail(s_body_len ? "transfer stalled" : "timeout");
+			http_close();
 		}
 	}
 }

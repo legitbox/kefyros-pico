@@ -63,7 +63,7 @@ static void launch_table(cnode *f,double s,double st){ g_return_screen=screen; c
 static lv_obj_t *status, *hist, *ta, *legend;
 
 #define HMAX 64
-static char  hbuf[HMAX][128];     /* recallable input history */
+static char (*hbuf)[128];          /* recall history exists only while Calculator is open */
 static int   hn = 0, hpos = -1;
 #define HIST_LINES_MAX 120
 
@@ -152,8 +152,10 @@ static int try_command(cnode *n){
 
 static void run_line(const char *text){
 	if(!*text) return;
-	if(hn<HMAX) strncpy(hbuf[hn++], text, sizeof hbuf[0]-1);
-	else { memmove(hbuf[0], hbuf[1], sizeof hbuf[0]*(HMAX-1)); strncpy(hbuf[HMAX-1], text, sizeof hbuf[0]-1); }
+	if(hbuf){
+		if(hn<HMAX) strncpy(hbuf[hn++], text, sizeof hbuf[0]-1);
+		else { memmove(hbuf[0], hbuf[1], sizeof hbuf[0]*(HMAX-1)); strncpy(hbuf[HMAX-1], text, sizeof hbuf[0]-1); }
+	}
 	hpos = -1;
 	echo_in(text);
 
@@ -291,8 +293,8 @@ static void scratch_key(uint8_t key, int mods){
 	if(key==DK_RIGHT){ lv_textarea_cursor_right(ta); return; }
 	if(key==DK_HOME){ lv_textarea_set_cursor_pos(ta, 0); return; }
 	if(key==DK_END){ lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); return; }
-	if(key==DK_UP){ if(hn){ if(hpos<0) hpos=hn-1; else if(hpos>0) hpos--; lv_textarea_set_text(ta, hbuf[hpos]); lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); } return; }
-	if(key==DK_DOWN){ if(hn && hpos>=0){ if(hpos<hn-1){ hpos++; lv_textarea_set_text(ta, hbuf[hpos]); } else { hpos=-1; lv_textarea_set_text(ta,""); } lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); } return; }
+	if(key==DK_UP){ if(hbuf&&hn){ if(hpos<0) hpos=hn-1; else if(hpos>0) hpos--; lv_textarea_set_text(ta, hbuf[hpos]); lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); } return; }
+	if(key==DK_DOWN){ if(hbuf&&hn && hpos>=0){ if(hpos<hn-1){ hpos++; lv_textarea_set_text(ta, hbuf[hpos]); } else { hpos=-1; lv_textarea_set_text(ta,""); } lv_textarea_set_cursor_pos(ta, LV_TEXTAREA_CURSOR_LAST); } return; }
 	if(key>=0x20 && key<0x7f && !(mods&MOD_CTRL)) lv_textarea_add_char(ta, key);
 }
 
@@ -609,7 +611,7 @@ static lv_obj_t *build_home(void){
 }
 static void home_key(uint8_t k, int m){
 	(void)m;
-	if(k==DK_ESC || k==DK_BREAK){ active=0; kf_grab_input(0); kf_clock_normal(); kf_back_to_launcher(); return; }
+	if(k==DK_ESC || k==DK_BREAK){ active=0;free(hbuf);hbuf=NULL;hn=0; kf_grab_input(0); kf_clock_normal(); kf_back_to_launcher(); return; }
 	if(k==DK_UP){   home_sel=(home_sel+NHITEMS-1)%NHITEMS; home_hl(); return; }
 	if(k==DK_DOWN){ home_sel=(home_sel+1)%NHITEMS; home_hl(); return; }
 	if(k==DK_ENTER) show_screen(HITEMS[home_sel].scr);
@@ -748,6 +750,7 @@ void calc_poll(void){
 void app_calc_open(void){
 	kf_clock_normal();            /* calc runs at the normal 400 MHz; only 3D render bumps to 500 */
 	calc_settings_load();         /* restore result mode + angle from the SD config */
+	free(hbuf);hbuf=(char(*)[128])calloc(HMAX,sizeof hbuf[0]);hn=0;
 	active = 1; hpos = -1; mode = CMODE_REPL;
 	home_sel = 0; form_scr = NULL;
 	show_screen(SCR_HOME);

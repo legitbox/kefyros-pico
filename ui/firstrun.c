@@ -43,6 +43,7 @@ static const char *REQUIRED[] = {
 	"/kefyros/icons/deepseek.png",
 	"/kefyros/icons/help.png",
 	"/kefyros/icons/term.png",
+	"/kefyros/icons/gb.png",
 	"/kefyros/help/00 Welcome/01 About Kefyros.md",
 	/* SFX (/kefyros/sfx/*.wav) are intentionally NOT required — they're optional polish and the
 	   sound engine plays silence when a file is absent, so a card without them is still healthy. */
@@ -51,18 +52,15 @@ static const char *REQUIRED[] = {
 
 enum { SD_OK = 0, SD_NO_CARD, SD_EMPTY, SD_INCOMPLETE };
 
-static int exists(const char *p){ struct stat st; return stat(p, &st) == 0; }
-
-/* Health of the card right now. Fills *miss with the count of absent assets and *first with the
-   first absent path (for the INCOMPLETE readout). */
+/* A mounted FAT volume is healthy enough to boot. The old implementation ran
+   f_stat() separately for every icon/help asset; each call re-walked long FAT
+   paths and turned a perfectly good card into a 20-30 second boot. Individual
+   apps already handle a missing optional asset gracefully. */
 static int sd_health(int *miss, const char **first){
 	if(!kfs_ready()){ *miss = NREQ; *first = NULL; return SD_NO_CARD; }
-	int m = 0; const char *fm = NULL;
-	for(int i = 0; i < NREQ; i++) if(!exists(REQUIRED[i])){ if(!fm) fm = REQUIRED[i]; m++; }
-	*miss = m; *first = fm;
-	if(m == 0)    return SD_OK;
-	if(m == NREQ) return SD_EMPTY;        /* nothing of ours present -> blank/fresh card */
-	return SD_INCOMPLETE;
+	*miss = 0;
+	*first = NULL;
+	return SD_OK;
 }
 
 /* The escape hatches, in menu order. */
@@ -76,8 +74,38 @@ static const char *OPT_LABEL[NOPT] = {
 
 void kf_sd_gate(void){
 	int miss; const char *first;
-	kfs_mount();                                  /* (idempotent) ensure we've tried to mount */
-	if(sd_health(&miss, &first) == SD_OK) return; /* healthy -> no gate, boot continues */
+
+	/* Paint a real status screen before touching storage. Besides avoiding the
+	   panel's power-on garbage during a slow card operation, the measured phase
+	   readout makes hardware-only startup stalls diagnosable without a UART. */
+	lv_obj_t *probe = lv_obj_create(NULL);
+	lv_obj_set_style_bg_color(probe, KF_BG_DEEP, 0);
+	lv_obj_t *probe_msg = lv_label_create(probe);
+	lv_obj_set_style_text_color(probe_msg, KF_AMBER_BR, 0);
+	lv_obj_set_style_text_align(probe_msg, LV_TEXT_ALIGN_CENTER, 0);
+	lv_obj_center(probe_msg);
+	lv_label_set_text(probe_msg, "SD CARD\ninitializing...");
+	lv_screen_load(probe);
+	lv_timer_handler();
+
+	uint64_t mount_t0 = time_us_64();
+	kfs_mount();                                  /* one idempotent mount attempt */
+	uint32_t mount_ms = (uint32_t)((time_us_64() - mount_t0) / 1000ull);
+	lv_label_set_text(probe_msg, "SD CARD\nchecking files...");
+	lv_timer_handler();
+	uint64_t check_t0 = time_us_64();
+	int initial_state = sd_health(&miss, &first);
+	uint32_t check_ms = (uint32_t)((time_us_64() - check_t0) / 1000ull);
+	if(initial_state == SD_OK){
+		if(mount_ms >= 1000u || check_ms >= 1000u){
+			lv_label_set_text_fmt(probe_msg, "SD READY\nmount %lu ms\ncheck %lu ms",
+			                      (unsigned long)mount_ms, (unsigned long)check_ms);
+			lv_timer_handler();
+			sleep_ms(2000);
+		}
+		lv_obj_delete(probe);
+		return;                                      /* healthy -> boot continues */
+	}
 
 	lv_obj_t *scr = lv_obj_create(NULL);
 	lv_obj_set_style_bg_color(scr, KF_BG_DEEP, 0);
@@ -120,6 +148,7 @@ void kf_sd_gate(void){
 	lv_label_set_text(ver, "Up/Down to choose - Enter to select\nKefyros " KF_VERSION);
 
 	lv_screen_load(scr);
+	lv_obj_delete(probe);
 
 	int sel = OPT_CONTINUE;
 	int drawn = -1;                               /* force first paint of the selection */
@@ -153,9 +182,22 @@ void kf_sd_gate(void){
 		uint64_t now = time_us_64();
 		if(now - last > 500000ull){               /* re-check ~2x/sec */
 			last = now;
+			uint64_t retry_mount_t0 = time_us_64();
 			kfs_mount();                          /* re-attempt: recovers when a card is inserted */
+			uint32_t retry_mount_ms = (uint32_t)((time_us_64() - retry_mount_t0) / 1000ull);
+			uint64_t retry_check_t0 = time_us_64();
 			int s = sd_health(&miss, &first);
-			if(s == SD_OK) break;                 /* card became healthy -> continue boot */
+			uint32_t retry_check_ms = (uint32_t)((time_us_64() - retry_check_t0) / 1000ull);
+			if(s == SD_OK){
+				if(retry_mount_ms >= 1000u || retry_check_ms >= 1000u){
+					lv_label_set_text_fmt(msg, "SD ready: mount %lu ms, check %lu ms",
+					                      (unsigned long)retry_mount_ms,
+					                      (unsigned long)retry_check_ms);
+					lv_timer_handler();
+					sleep_ms(2000);
+				}
+				break;                               /* card became healthy -> continue boot */
+			}
 			if(s != shown){                       /* state changed -> refresh the guidance */
 				shown = s;
 				if(s == SD_NO_CARD){

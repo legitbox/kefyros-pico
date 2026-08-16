@@ -5,8 +5,7 @@ set -e
 ROOT=/home/legitbox/kefyros-pico
 SDK="$ROOT/sdk"
 
-CC="$(grep -m1 '^CMAKE_C_COMPILER:FILEPATH=' "$ROOT/build/CMakeCache.txt" 2>/dev/null | cut -d= -f2)"
-[ -x "$CC" ] || CC="$(command -v arm-none-eabi-gcc || true)"
+CC="$(command -v arm-none-eabi-gcc || true)"
 [ -x "$CC" ] || CC=/usr/bin/arm-none-eabi-gcc
 PREFIX="${CC%gcc}"
 

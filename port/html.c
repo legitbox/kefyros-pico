@@ -16,6 +16,7 @@
 /* ===== arenas (PSRAM) ===== */
 static uint32_t ops_base, ops_cap, op_count;
 static uint32_t text_base, text_cap, text_brk;
+static uint8_t  emit_extra_lflags;
 
 void kf_html_set_arena(uint32_t ob, uint32_t oc, uint32_t tb_, uint32_t tc){
 	ops_base=ob; ops_cap=oc; text_base=tb_; text_cap=tc;
@@ -56,11 +57,12 @@ static int next_byte(void){
 static kf_css_elem  estk[ESTK];
 static kf_css_style sstk[ESTK];
 static uint8_t      eboxed[ESTK];   /* this element emitted a KF_OP_BOX */
+static uint16_t     echild[ESTK];   /* next element-child index per open parent */
 static int          es_n;
 static kf_css_style blk_style;
 static kf_css_style s_body_style;
 static int          collect_css;            /* pass A: feed <style>, collect <link>s */
-static char         csslinks[3][256];
+static char         csslinks[8][256];
 static int          ncsslinks;
 static uint32_t     last_base, last_len;    /* for kf_html_reparse() */
 
@@ -71,7 +73,9 @@ static char     tb[4096];   static int tbn;        /* current block text */
 static char     linkbuf[1024]; static int linkn;   /* current <a> text */
 static char     curhref[512];                      /* current <a> href */
 static char     s_title[128]; static int title_n;
-static int      in_title, in_head, in_pre, in_link;
+static int      in_title, in_head, in_pre, in_link, link_block;
+static int      inline_chain, inline_keep;
+static kf_css_style link_style;
 static int      pending_space;
 static int      cur_kind;
 static int      quote_depth;
@@ -80,12 +84,15 @@ static int      l_ordered[8], l_count[8], l_sp;
 
 static char     form_action[512];
 static int      in_form;
+static int      form_post;
 
 /* ===== op emission ===== */
 static void emit_styled(uint8_t kind, uint8_t depth, uint16_t index,
                  const char *text, int tlen, const char *href, int hlen,
                  const kf_css_style *st){
 	kf_html_op op; memset(&op, 0, sizeof op);
+	op.lflags = emit_extra_lflags;
+	op.opacity = 255;
 	op.kind = kind; op.depth = depth; op.index = index;
 	if(st){
 		if(st->flags & KF_CSS_F_HIDE) return;
@@ -102,6 +109,17 @@ static void emit_styled(uint8_t kind, uint8_t depth, uint16_t index,
 		op.radius   = st->radius;   op.pad_v    = st->pad_v;
 		op.xform    = st->xform;
 		op.line_sp  = st->line_sp;  op.let_sp   = st->let_sp;
+		op.pad_h    = st->pad_h;    op.gap      = st->gap;
+		op.opacity  = st->opacity;  op.flex_dir = st->flex_dir;
+		op.flex_wrap= st->flex_wrap; op.justify = st->justify; op.align=st->align;
+		op.grid_cols= st->grid_cols;
+		op.width=st->width; op.max_width=st->max_width;
+		op.width_unit=st->width_unit; op.max_width_unit=st->max_width_unit;
+		op.shadow_w=st->shadow_w; op.shadow_c=st->shadow_c;
+		op.font_id=st->font_id;
+		if(st->flags & KF_CSS_F_NOWRAP) op.lflags|=KF_LAY_NOWRAP;
+		if(st->flags & KF_CSS_F_CLIP)   op.lflags|=KF_LAY_CLIP;
+		if(st->flags & KF_CSS_F_MONO)   op.lflags|=KF_LAY_MONO;
 	}
 	if(text){
 		if(tlen < 0) tlen = (int)strlen(text);
@@ -133,12 +151,15 @@ static void flush_block(void){
 	pending_space = 0;
 	while(tbn > 0 && tb[tbn-1] == ' ') tbn--;
 	if(tbn > 0){
+		emit_extra_lflags = inline_chain ? KF_LAY_INLINE : 0;
 		uint16_t idx = (cur_kind==KF_OP_LI) ? li_index : 0;
 		uint8_t  dep = (cur_kind==KF_OP_LI) ? li_depth
 		             : (cur_kind==KF_OP_QUOTE ? (uint8_t)quote_depth : 0);
 		emit_styled((uint8_t)cur_kind, dep, idx, tb, tbn, NULL, 0, &blk_style);
+		emit_extra_lflags = 0;
 	}
 	tbn = 0;
+	if(!inline_keep) inline_chain=0;
 }
 
 /* ===== text accumulation (whitespace-collapsing) ===== */
@@ -224,6 +245,18 @@ static int ci_pfx(const char *s, const char *p){
 	while(*p){ char a=*s,b=*p; if(a>='A'&&a<='Z')a+=32; if(b>='A'&&b<='Z')b+=32; if(a!=b) return 0; s++; p++; }
 	return 1;
 }
+static void attr_entities(char *s){
+	char *r=s,*w=s;
+	while(*r){
+		if(!strncmp(r,"&amp;",5)){*w++='&';r+=5;}
+		else if(!strncmp(r,"&quot;",6)){*w++='"';r+=6;}
+		else if(!strncmp(r,"&apos;",6)){*w++='\'';r+=6;}
+		else if(!strncmp(r,"&lt;",4)){*w++='<';r+=4;}
+		else if(!strncmp(r,"&gt;",4)){*w++='>';r+=4;}
+		else *w++=*r++;
+	}
+	*w=0;
+}
 static int get_attr(const char *tag, const char *name, char *out, int cap){
 	int nl=(int)strlen(name); const char *p=tag;
 	while(*p){
@@ -235,12 +268,49 @@ static int get_attr(const char *tag, const char *name, char *out, int cap){
 				while(*q && ((qt && *q!=qt) || (!qt && *q!=' '&&*q!='\t'&&*q!='\n'&&*q!='>'))){
 					if(n<cap-1) out[n++]=*q; q++;
 				}
-				out[n]=0; return 1;
+				out[n]=0; attr_entities(out); return 1;
 			}
 		}
 		p++;
 	}
 	out[0]=0; return 0;
+}
+static int has_attr_name(const char *tag,const char *name){
+	int nl=(int)strlen(name); const char *p=tag;
+	while(*p){
+		if((p==tag||p[-1]==' '||p[-1]=='\t'||p[-1]=='\n') && ci_pfx(p,name)){
+			char c=p[nl]; if(c==0||c=='='||c==' '||c=='\t'||c=='\n'||c=='/') return 1;
+		}
+		p++;
+	}
+	return 0;
+}
+
+static int attr_ch(int c){
+	return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='-'||c=='_'||c==':';
+}
+/* Capture attribute-name presence for CSS [attr] selectors. Values remain in the
+   original tag buffer and are still fetched lazily through get_attr(). */
+static void collect_attrs(const char *tag, kf_css_elem *e){
+	const char *p=tag;
+	while(*p && *p!=' '&&*p!='\t'&&*p!='\n') p++;   /* element name */
+	while(*p){
+		while(*p==' '||*p=='\t'||*p=='\n'||*p=='\r'||*p=='/') p++;
+		if(!*p) break;
+		const char *st=p; while(attr_ch(*p)) p++;
+		if(p==st){ p++; continue; }
+		if(e->nattr<4) e->attr[e->nattr++]=kf_css_hash(st,(int)(p-st));
+		while(*p==' '||*p=='\t') p++;
+		if(*p=='='){
+			p++; while(*p==' '||*p=='\t')p++;
+			if(*p=='"'||*p=='\''){ char q=*p++; while(*p&&*p!=q)p++; if(*p)p++; }
+			else while(*p&&*p!=' '&&*p!='\t'&&*p!='\n')p++;
+		}
+	}
+}
+static int has_attr_hash(const kf_css_elem *e, uint32_t h){
+	for(int i=0;i<e->nattr;i++) if(e->attr[i]==h) return 1;
+	return 0;
 }
 
 /* ===== raw skip for <script>/<style> ===== */
@@ -303,6 +373,7 @@ static int want_box(const char *name, const kf_css_style *st, const kf_css_style
 	if(strcmp(name,"div")&&strcmp(name,"section")&&strcmp(name,"article")&&
 	   strcmp(name,"aside")&&strcmp(name,"nav")&&strcmp(name,"header")&&
 	   strcmp(name,"footer")&&strcmp(name,"main")&&strcmp(name,"figure")) return 0;
+	if(st->flags & KF_CSS_F_GRID) return KF_BOX_GRID;
 	if(st->flags & KF_CSS_F_FLEX) return KF_BOX_ROW;
 	if(st->border_w) return KF_BOX_CARD;
 	if((st->flags & KF_CSS_F_BG) &&
@@ -322,6 +393,9 @@ static void elem_open(const char *name, const char *tag){
 	kf_css_elem *e = &estk[es_n];
 	memset(e, 0, sizeof *e);
 	e->tag = th;
+	e->child_index = es_n>0 ? ++echild[es_n-1] : 1;
+	echild[es_n]=0;
+	collect_attrs(tag,e);
 	if(get_attr(tag,"id",idb,sizeof idb) && idb[0]) e->id_hash = kf_css_hash(idb,-1);
 	if(get_attr(tag,"class",clsb,sizeof clsb)){
 		char *p = clsb;
@@ -335,7 +409,10 @@ static void elem_open(const char *name, const char *tag){
 	int has_sty = get_attr(tag,"style",styb,sizeof styb);
 	kf_css_apply(estk, es_n+1, has_sty?styb:NULL,
 	             es_n>0 ? &sstk[es_n-1] : NULL, &sstk[es_n]);
+	if(has_attr_hash(e,kf_css_hash("hidden",-1))) sstk[es_n].flags|=KF_CSS_F_HIDE;
 	if(!strcmp(name,"center")) sstk[es_n].flags |= KF_CSS_F_CENTER;   /* legacy */
+	if(!strcmp(name,"pre")||!strcmp(name,"code")||!strcmp(name,"kbd")||!strcmp(name,"samp"))
+		sstk[es_n].flags|=KF_CSS_F_MONO;
 	eboxed[es_n] = 0;
 	int bk = want_box(name, &sstk[es_n], es_n>0 ? &sstk[es_n-1] : NULL);
 	if(bk){
@@ -344,7 +421,16 @@ static void elem_open(const char *name, const char *tag){
 		eboxed[es_n] = 1;
 	}
 	es_n++;
-	if(!strcmp(name,"body")) s_body_style = sstk[es_n-1];
+	if(!strcmp(name,"body")){
+		s_body_style = sstk[es_n-1];
+		/* The canvas represents the CSS viewport. A transparent body reveals the
+		   html/root background in a real browser, so carry that paint into the
+		   exported page style used by Spineko's canvas. */
+		if(es_n>=2 && !(s_body_style.flags&KF_CSS_F_BG) && (sstk[es_n-2].flags&KF_CSS_F_BG)){
+			s_body_style.flags |= KF_CSS_F_BG;
+			s_body_style.bg = sstk[es_n-2].bg;
+		}
+	}
 }
 static void elem_close(const char *name){
 	uint16_t th = kf_css_tag_hash(name);
@@ -357,12 +443,19 @@ static int is_void_tag(const char *n){
 	       !strcmp(n,"col")||!strcmp(n,"embed")||!strcmp(n,"source")||
 	       !strcmp(n,"track")||!strcmp(n,"wbr")||!strcmp(n,"param");
 }
+static int is_styled_void(const char *n){
+	return !strcmp(n,"img")||!strcmp(n,"input")||!strcmp(n,"hr")||!strcmp(n,"br");
+}
 
 /* ===== link helpers ===== */
 static void close_link(void){
 	while(linkn>0 && linkbuf[linkn-1]==' ') linkn--;
-	if(linkn>0 && curhref[0]) emit(KF_OP_LINK, 0, 0, linkbuf, linkn, curhref, -1);
-	in_link=0; linkn=0; pending_space=0;
+	if(linkn>0 && curhref[0]){
+		emit_extra_lflags=link_block ? 0 : KF_LAY_INLINE;
+		emit_styled(KF_OP_LINK,0,0,linkbuf,linkn,curhref,-1,&link_style);
+		emit_extra_lflags=0;
+	}
+	in_link=0; link_block=0; linkn=0; pending_space=0;
 }
 
 /* ===== tag dispatch ===== */
@@ -400,9 +493,12 @@ static void handle_tag(const char *tag){
 
 	/* CSS element stack around the block dispatch; the accumulated text always
 	   flushes with the OLD blk_style snapshot, then we re-snapshot from the top. */
+	int temp_void=0;
 	if(closing) elem_close(name);
 	else if(!is_void_tag(name)) elem_open(name, tag);
+	else if(is_styled_void(name)){ elem_open(name,tag); temp_void=1; }
 	handle_tag_dispatch(name, tag, closing);
+	if(temp_void && es_n>0) pop_elems(es_n-1);
 	if(es_n>0) blk_style = sstk[es_n-1];
 	else memset(&blk_style, 0, sizeof blk_style);
 }
@@ -415,7 +511,12 @@ static void handle_tag_dispatch(const char *name, const char *tag, int closing){
 		return;
 	}
 	if(NM("a")){
-		if(!closing){ flush_block(); get_attr(tag,"href",curhref,sizeof curhref); in_link=1; linkn=0; pending_space=0; }
+		if(!closing){
+			inline_chain=1; inline_keep=1; flush_block(); inline_keep=0;
+			get_attr(tag,"href",curhref,sizeof curhref); in_link=1; linkn=0; pending_space=0;
+			link_block = cur_kind==KF_OP_LI;       /* an anchor that is the LI content owns a row */
+			link_style=es_n>0?sstk[es_n-1]:blk_style;
+		}
 		else close_link();
 		return;
 	}
@@ -427,8 +528,13 @@ static void handle_tag_dispatch(const char *name, const char *tag, int closing){
 			snprintf(alt,sizeof alt,"%s",src);          /* no alt -> show the filename */
 			char *sl=strrchr(alt,'/'); if(sl) memmove(alt,sl+1,strlen(sl+1)+1);
 		}
-		/* href carries the src URL so the browser can fetch + decode the image. */
-		flush_block(); emit(KF_OP_IMG,0,0, alt[0]?alt:"image", -1, src[0]?src:NULL, -1);
+		/* href carries the src URL so the browser can fetch + decode the image.
+		   Images wrapped in anchors participate in the current inline row (the
+		   classic 88x31 button-bar pattern); standalone images remain blocks. */
+		flush_block();
+		emit_extra_lflags = in_link ? KF_LAY_INLINE : 0;
+		emit(KF_OP_IMG,0,0, alt[0]?alt:"image", -1, src[0]?src:NULL, -1);
+		emit_extra_lflags = 0;
 		return;
 	}
 	if(NM("br")){ flush_block(); return; }
@@ -463,7 +569,12 @@ static void handle_tag_dispatch(const char *name, const char *tag, int closing){
 	}
 	if(NM("form")){
 		flush_block();
-		if(!closing){ in_form=1; if(!get_attr(tag,"action",form_action,sizeof form_action)) form_action[0]=0; }
+		if(!closing){
+			static char method[12];
+			in_form=1; if(!get_attr(tag,"action",form_action,sizeof form_action)) form_action[0]=0;
+			form_post=get_attr(tag,"method",method,sizeof method) &&
+			          (method[0]=='p'||method[0]=='P');
+		}
 		else in_form=0;
 		return;
 	}
@@ -475,14 +586,21 @@ static void handle_tag_dispatch(const char *name, const char *tag, int closing){
 		get_attr(tag,"value",val,sizeof val);
 		get_attr(tag,"name",nm,sizeof nm);
 		flush_block();
-		if(!strcmp(ty,"hidden")) return;
 		if(!strcmp(ty,"submit")||!strcmp(ty,"button")||!strcmp(ty,"image"))
-			emit(KF_OP_SUBMIT,0,0, val[0]?val:"Submit", -1, form_action, -1);
-		else
-			emit(KF_OP_FIELD,0,0, val, -1, nm, -1);
+			emit(KF_OP_SUBMIT,0,form_post?KF_FORM_POST:0, val[0]?val:"Submit", -1, form_action, -1);
+		else {
+			uint16_t ft=KF_FIELD_TEXT;
+			if(!strcmp(ty,"password")) ft=KF_FIELD_PASSWORD;
+			else if(!strcmp(ty,"hidden")) ft=KF_FIELD_HIDDEN;
+			else if(!strcmp(ty,"checkbox")) ft=KF_FIELD_CHECKBOX;
+			else if(!strcmp(ty,"radio")) ft=KF_FIELD_RADIO;
+			if((ft==KF_FIELD_CHECKBOX||ft==KF_FIELD_RADIO) && !val[0]) snprintf(val,sizeof val,"on");
+			/* depth carries the initial checked state for checkbox/radio controls. */
+			emit(KF_OP_FIELD,has_attr_name(tag,"checked")?1:0,ft,val,-1,nm,-1);
+		}
 		return;
 	}
-	if(NM("button")){ if(!closing){ flush_block(); emit(KF_OP_SUBMIT,0,0,"Submit",-1,form_action,-1); } return; }
+	if(NM("button")){ if(!closing){ flush_block(); emit(KF_OP_SUBMIT,0,form_post?KF_FORM_POST:0,"Submit",-1,form_action,-1); } return; }
 
 	/* generic block-level containers -> just break the line */
 	if(NM("p")||NM("div")||NM("section")||NM("article")||NM("header")||NM("footer")||
@@ -524,10 +642,12 @@ static uint32_t do_parse(uint32_t body_base, uint32_t len){
 	r_base=body_base; r_len=len; r_pos=0; r_bufpos=0; r_buflen=0;
 	op_count=0; text_brk=0;
 	tbn=0; linkn=0; curhref[0]=0; title_n=0; s_title[0]=0;
-	in_title=in_head=in_pre=in_link=pending_space=0;
+	in_title=in_head=in_pre=in_link=link_block=pending_space=0;
+	inline_chain=inline_keep=0; emit_extra_lflags=0;
 	cur_kind=KF_OP_P; quote_depth=0; li_index=0; li_depth=0; l_sp=0;
-	in_form=0; form_action[0]=0;
+	in_form=0; form_post=0; form_action[0]=0;
 	es_n=0;
+	memset(echild,0,sizeof echild);
 	memset(&blk_style, 0, sizeof blk_style);
 	memset(&s_body_style, 0, sizeof s_body_style);
 

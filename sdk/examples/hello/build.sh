@@ -5,15 +5,13 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT=/home/legitbox/kefyros-pico
 SDK="$ROOT/sdk"
 
-# Resolve the same arm toolchain CMake used to build the firmware.
-CACHE="$ROOT/build/CMakeCache.txt"
-CC="$(grep -m1 '^CMAKE_C_COMPILER:FILEPATH=' "$CACHE" 2>/dev/null | cut -d= -f2)"
-[ -x "$CC" ] || CC="$(command -v arm-none-eabi-gcc || true)"
+# KAPI apps are independent of a particular firmware build.
+CC="$(command -v arm-none-eabi-gcc || true)"
 [ -x "$CC" ] || CC=/usr/bin/arm-none-eabi-gcc
 PREFIX="${CC%gcc}"        # e.g. /usr/bin/arm-none-eabi-
 echo "toolchain: $CC"
 
-LOAD_BASE=0x20060000
+LOAD_BASE=0x20074000
 CFLAGS="-mcpu=cortex-m33 -mthumb -Os -ffreestanding -fno-builtin -fno-exceptions \
         -ffunction-sections -fdata-sections -Wall -I$SDK"
 

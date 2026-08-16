@@ -6,10 +6,13 @@
 #include "../kefyros.h"
 #include "theme.h"
 #include "deskconf.h"
+#include "kapi.h"
 #include "lvgl/src/draw/lv_image_decoder_private.h"   /* lv_image_decoder_dsc_t fields */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 static lv_obj_t  *scr_home, *wp_img, *wp_dim, *lbl_hint, *cursor;
 static lv_group_t *grp_home;
@@ -19,16 +22,20 @@ static lv_group_t *app_group = NULL;   /* the CURRENT app's input group; freed o
 #define APP_NO_SLEEP 1     /* "always active": idle dims the backlight but never downclocks the
                               CPU to the 150 MHz sleep tier — for apps (music) whose realtime work
                               (audio playback) would break at sleep clocks. */
+#define APP_KEEP_AWAKE 2
 typedef struct {
 	const char *id;            /* also the SD icon filename: /kefyros/icons/<id>.png */
 	const char *label;
 	void (*open)(void);
 	int   def_slot;
 	int   flags;               /* APP_NO_SLEEP, ... (0 = ordinary) */
+	const char *kx_path;       /* non-NULL: SD-loaded KAPI executable */
+	const char *icon_path;     /* optional LVGL path from its manifest */
+	uint8_t perf;              /* 0 normal, 1 eco, 2 boost */
 } desk_app_t;
 
-static const desk_app_t dapps[] = {
-	{ "calc",       "Calc",        app_calc_open,        1 },
+static const desk_app_t builtin_apps[] = {
+	{ "calc",       "Calc",        app_calc_open,        1, APP_NO_SLEEP },
 	{ "files",      "Files",       app_files_open,       2 },
 	{ "wifi",       "WiFi",        app_wifi_open,        3 },
 	{ "settings",   "Settings",    app_settings_open,    4 },
@@ -40,18 +47,34 @@ static const desk_app_t dapps[] = {
 	{ "deepseek",   "DeepSeek",    app_deepseek_open,    10 },
 	{ "help",       "Help",        app_help_open,        11 },
 	{ "term",       "Terminal",    app_term_open,        12 },   /* SSH-2 terminal client */
-	/* The "KAPI Demo" tile was removed for release (a developer-only class-1 .kx loader
-	   test needing an /apps/demo/demo.kx rebuilt against each exact firmware ELF — too
-	   fragile for a distributable card). The loader itself lives on as kapi_run(path) in
-	   port/kapi.c for real .kx apps; add a tile with a small wrapper to bring it back. */
+	{ "gb",         "Game Boy",    app_gameboy_open,     13, APP_NO_SLEEP },  /* modal 59.7 Hz emulation */
+	{ "mem",        "Memory",      app_mem_open,         14 },   /* debug: heap census + leak log */
 };
+
+#define MAX_DESK_APPS 36
+#define BUILTIN_APPS ((int)(sizeof builtin_apps / sizeof builtin_apps[0]))
+#define MAX_SD_APPS  (MAX_DESK_APPS - BUILTIN_APPS)
+static desk_app_t dapps[MAX_DESK_APPS];
+static int napps;
+
+typedef struct { char id[33], label[49], kx[192], icon[192]; } sd_app_store_t;
+static sd_app_store_t *sd_apps[MAX_SD_APPS];
+static sd_app_store_t manifest_store;
+static int n_sd_apps;
 /* index into dapps of the app the user launched (or -1 = on the desktop). The idle timer
    consults dapps[s_cur_app].flags so a no-sleep app keeps its clock while idle. */
 static int s_cur_app = -1;
+static int s_idle_override = -1;
 static int kf_app_allows_sleep(void){
-	return s_cur_app < 0 || !(dapps[s_cur_app].flags & APP_NO_SLEEP);
+	if(s_idle_override >= 0) return s_idle_override == 0;
+	return s_cur_app < 0 || !(dapps[s_cur_app].flags & (APP_NO_SLEEP | APP_KEEP_AWAKE));
 }
-#define NAPPS  (int)(sizeof(dapps)/sizeof(dapps[0]))
+static int kf_app_keeps_awake(void){
+	if(s_idle_override >= 0) return s_idle_override == 2;
+	return s_cur_app >= 0 && (dapps[s_cur_app].flags & APP_KEEP_AWAKE);
+}
+void kf_app_idle_policy(int policy){ s_idle_override = (policy >= 0 && policy <= 2) ? policy : -1; }
+#define NAPPS  napps
 #define GCOLS  4
 #define GROWS  3
 #define NCELLS (GCOLS*GROWS)         /* cells per page (4x3) */
@@ -71,6 +94,92 @@ static int carrying = -1;         /* GLOBAL slot being moved, or -1 */
 
 /* global slot backing the current page's cell i */
 static int gslot(int i){ return page*NCELLS + i; }
+
+/* Minimal, bounded manifest reader. This is intentionally not a general JSON parser: app
+   manifests contain flat strings plus an integer ABI, and boot must stay within the 4 KiB
+   Core-0 stack. The input buffer is static and every copied field is length-bounded. */
+static char manifest_json[1536];
+static int manifest_string(const char *json, const char *key, char *out, size_t cap){
+	char needle[48];
+	if(!out || cap < 2 || snprintf(needle, sizeof needle, "\"%s\"", key) >= (int)sizeof needle) return 0;
+	const char *p = strstr(json, needle);
+	if(!p) return 0;
+	p += strlen(needle); while(*p==' ' || *p=='\t' || *p=='\r' || *p=='\n') p++;
+	if(*p++ != ':') return 0;
+	while(*p==' ' || *p=='\t' || *p=='\r' || *p=='\n') p++;
+	if(*p++ != '"') return 0;
+	size_t n = 0;
+	while(*p && *p != '"'){
+		if(*p == '\\') return 0;                 /* escaped names/paths are deliberately rejected */
+		if((unsigned char)*p < 0x20 || n + 1 >= cap) return 0;
+		out[n++] = *p++;
+	}
+	if(*p != '"') return 0;
+	out[n] = 0;
+	return n > 0;
+}
+static int manifest_int(const char *json, const char *key, int *out){
+	char needle[48];
+	if(snprintf(needle, sizeof needle, "\"%s\"", key) >= (int)sizeof needle) return 0;
+	const char *p = strstr(json, needle); if(!p) return 0;
+	p += strlen(needle); while(*p==' ' || *p=='\t' || *p=='\r' || *p=='\n') p++;
+	if(*p++ != ':') return 0;
+	while(*p==' ' || *p=='\t' || *p=='\r' || *p=='\n') p++;
+	char *end; long v = strtol(p, &end, 10); if(end == p) return 0;
+	*out = (int)v; return 1;
+}
+static int safe_component(const char *s, int allow_dot){
+	if(!s || !*s || !strcmp(s,".") || !strcmp(s,"..")) return 0;
+	for(; *s; s++) if(!( (*s>='a'&&*s<='z') || (*s>='A'&&*s<='Z') ||
+	                       (*s>='0'&&*s<='9') || *s=='_' || *s=='-' || (allow_dot && *s=='.') )) return 0;
+	return 1;
+}
+static int app_id_exists(const char *id){
+	for(int i=0;i<napps;i++) if(!strcmp(dapps[i].id,id)) return 1;
+	return 0;
+}
+static void scan_sd_apps(void){
+	memcpy(dapps, builtin_apps, sizeof builtin_apps);
+	napps = BUILTIN_APPS;
+	n_sd_apps = 0;
+	if(!kfs_ready()) return;
+	DIR *root = opendir("/apps"); if(!root) return;
+	struct dirent *de;
+	while(napps < MAX_DESK_APPS && (de = readdir(root))){
+		if(de->d_name[0]=='.' || !safe_component(de->d_name,0)) continue;
+		char dirpath[128], manpath[160]; struct stat st;
+		snprintf(dirpath,sizeof dirpath,"/apps/%s",de->d_name);
+		if(stat(dirpath,&st) || !S_ISDIR(st.st_mode)) continue;
+		snprintf(manpath,sizeof manpath,"%s/manifest.json",dirpath);
+		FILE *f=fopen(manpath,"rb"); if(!f) continue;
+		size_t nr=fread(manifest_json,1,sizeof manifest_json-1,f); fclose(f);
+		if(nr==0 || nr==sizeof manifest_json-1) continue;
+		manifest_json[nr]=0;
+		int abi=0; if(!manifest_int(manifest_json,"abi",&abi) || abi!=KAPI_ABI) continue;
+
+		sd_app_store_t *s=&manifest_store; memset(s,0,sizeof *s);
+		if(!manifest_string(manifest_json,"id",s->id,sizeof s->id)) snprintf(s->id,sizeof s->id,"%s",de->d_name);
+		if(!safe_component(s->id,0) || app_id_exists(s->id)) continue;
+		if(!manifest_string(manifest_json,"name",s->label,sizeof s->label)) snprintf(s->label,sizeof s->label,"%s",s->id);
+		char exec[64]; if(!manifest_string(manifest_json,"exec",exec,sizeof exec) || !safe_component(exec,1)) continue;
+		snprintf(s->kx,sizeof s->kx,"%s/%s",dirpath,exec);
+		if(stat(s->kx,&st) || !S_ISREG(st.st_mode)) continue;
+
+		char icon[64];
+		if(manifest_string(manifest_json,"icon",icon,sizeof icon) && safe_component(icon,1))
+			snprintf(s->icon,sizeof s->icon,"A:%s/%s",dirpath,icon);
+		char idle[24]="", perf[24]="";
+		manifest_string(manifest_json,"idle",idle,sizeof idle);
+		manifest_string(manifest_json,"perf",perf,sizeof perf);
+		int flags=!strcmp(idle,"keep_awake") ? APP_KEEP_AWAKE : !strcmp(idle,"keep_clock") ? APP_NO_SLEEP : 0;
+		uint8_t tier=!strcmp(perf,"eco") ? 1 : !strcmp(perf,"boost") ? 2 : 0;
+		sd_app_store_t *saved=malloc(sizeof *saved); if(!saved) break;
+		*saved=*s; sd_apps[n_sd_apps++]=saved;
+		dapps[napps++] = (desk_app_t){saved->id,saved->label,NULL,-1,flags,saved->kx,saved->icon[0]?saved->icon:NULL,tier};
+		printf("launcher: KAPI app %s -> %s\n",saved->id,saved->kx);
+	}
+	closedir(root);
+}
 
 /* fresh group, made active on the keypad indev — apps call this when they open.
    CRITICAL: free the previous app group first, or every screen/form that calls
@@ -255,6 +364,22 @@ void kf_wallpaper_show_raw(lv_obj_t *img, uint32_t off, int w, int h, const char
 	wp_apply_fit(img, w, h, fit);
 }
 
+/* The emulator temporarily owns the entire PSRAM chip. Detach all persistent
+   clients before its allocator reset so nobody can later dereference an old
+   offset. Each client lazily rebuilds its arena on the next open. */
+void kf_psram_clients_invalidate(void){
+	if(wp_img) lv_image_set_src(wp_img, NULL);
+	lv_image_cache_drop(&wp_dsc);
+	lv_image_cache_drop(&raw_dsc);
+	wp_region = raw_region = 0xFFFFFFFFu;
+	wp_valid = 0;
+	wp_path[0] = 0;
+	browser_psram_invalidate();
+	deepseek_psram_invalidate();
+	music_psram_invalidate();
+	wallpaper_psram_invalidate();
+}
+
 /* idle screen-off: after `screen_timeout` s of no keys, kill BOTH backlights and drop to the
    low-power sleep clock (150 MHz / 1.10 V); the next key restores them. Runs everywhere (not
    just the desktop). The clock is restored (kf_clock_wake) to whatever tier was active before
@@ -279,6 +404,7 @@ static void idle_timer(lv_timer_t *t){
 	int to = deskconf_get_int("screen_timeout", 60);   /* seconds; 0 = never */
 	if(to <= 0){ idle_wake(); return; }
 	uint32_t idle = lv_tick_get() - uart_last_activity();
+	if(kf_app_keeps_awake()){ idle_wake(); return; }
 	if(idle > (uint32_t)to*1000){
 		if(!s_idle_dimmed){
 			uint8_t z=0;
@@ -306,7 +432,8 @@ static void idle_timer(lv_timer_t *t){
    No card / missing icon -> hide the image so just the label shows. */
 static void set_icon(lv_obj_t *ic, int a){
 	char lvp[160];
-	snprintf(lvp, sizeof lvp, ICON_DIR "/%s.png", dapps[a].id);
+	if(dapps[a].icon_path) snprintf(lvp, sizeof lvp, "%s", dapps[a].icon_path);
+	else snprintf(lvp, sizeof lvp, ICON_DIR "/%s.png", dapps[a].id);
 	lv_image_header_t hdr;
 	if(kfs_ready() && lv_image_decoder_get_info(lvp, &hdr) == LV_RESULT_OK && hdr.w > 0){
 		lv_image_set_src(ic, lvp);
@@ -414,7 +541,18 @@ static void cell_click_cb(lv_event_t *e){          /* short ENTER: launch or dro
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
 	if(carrying >= 0){ drop_at(i); return; }
 	int a = slot_app[gslot(i)];
-	if(a >= 0 && dapps[a].open){ s_cur_app = a; kf_sfx_play("open"); dapps[a].open(); }
+	if(a < 0) return;
+	s_cur_app = a; s_idle_override = -1;
+	tb_app_open();                                   /* leak tracker: record open heap */
+	if(dapps[a].kx_path){
+		if(dapps[a].perf==1) kf_clock_eco(); else if(dapps[a].perf==2) kf_clock_boost(); else kf_clock_normal();
+		int rc=kapi_run(dapps[a].kx_path);
+		if(rc){
+			s_cur_app=-1;
+			lv_label_set_text_fmt(lbl_hint,"cannot launch %s  (KAPI %d)",dapps[a].label,rc);
+			lv_obj_remove_flag(lbl_hint,LV_OBJ_FLAG_HIDDEN);
+		}
+	} else if(dapps[a].open) dapps[a].open();
 }
 static void cell_long_cb(lv_event_t *e){           /* long ENTER: pick up */
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
@@ -460,6 +598,7 @@ static void on_home_unload(lv_event_t *e){ (void)e; if(wp_img) lv_image_set_src(
 
 void launcher_init(void){
 	deskconf_load();
+	scan_sd_apps();
 	scr_home = lv_obj_create(NULL);
 	lv_obj_set_style_pad_all(scr_home, 0, 0);
 	lv_obj_clear_flag(scr_home, LV_OBJ_FLAG_SCROLLABLE);
@@ -557,7 +696,7 @@ void launcher_init(void){
    group pointer for the rest of this dispatch. */
 static void del_group_cb(void *g){ lv_group_delete((lv_group_t*)g); }
 
-void kf_back_to_launcher(void){ kf_sfx_play("back"); launcher_show(); }
+void kf_back_to_launcher(void){ launcher_show(); }
 
 void launcher_show(void){
 	/* whatever app screen is active is about to be abandoned — capture it so we
@@ -565,6 +704,8 @@ void launcher_show(void){
 	lv_obj_t *prev = lv_screen_active();
 
 	s_cur_app = -1;                /* back on the desktop — idle may sleep again */
+	s_idle_override = -1;
+	tb_app_close();                /* leak tracker: Δ appears in the top bar */
 	kf_grab_input(0);
 	if(carrying >= 0){ carrying = -1; render_page(); lv_obj_add_flag(lbl_hint, LV_OBJ_FLAG_HIDDEN); }
 	/* a sub-app (the chooser) may have changed the wallpaper / dim choice */

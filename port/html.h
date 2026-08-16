@@ -22,10 +22,12 @@ enum {
 	KF_OP_BOX,     /* open a container; op.index = KF_BOX_*; style = the container's */
 	KF_OP_END      /* close the innermost container */
 };
+enum { KF_FIELD_TEXT=0, KF_FIELD_PASSWORD, KF_FIELD_HIDDEN, KF_FIELD_CHECKBOX, KF_FIELD_RADIO };
+#define KF_FORM_POST 1u
 /* KF_OP_BOX kinds (in op.index) */
 enum { KF_BOX_CARD=1,  /* bordered / own-background block -> padded card */
        KF_BOX_ROW,     /* display:flex -> horizontal wrap row (nav chips) */
-       KF_BOX_TABLE, KF_BOX_TR, KF_BOX_TD };
+       KF_BOX_TABLE, KF_BOX_TR, KF_BOX_TD, KF_BOX_GRID };
 
 /* per-op CSS style bits (op.sflags) */
 #define KF_ST_FG       0x01   /* op.fg valid */
@@ -36,6 +38,11 @@ enum { KF_BOX_CARD=1,  /* bordered / own-background block -> padded card */
 #define KF_ST_RIGHT    0x20
 #define KF_ST_BIG      0x40   /* render with the big font */
 #define KF_ST_NOBULLET 0x80   /* LI: no bullet/number prefix */
+
+#define KF_LAY_NOWRAP 0x01
+#define KF_LAY_CLIP   0x02
+#define KF_LAY_INLINE 0x04   /* text/link run participates in one wrapped inline row */
+#define KF_LAY_MONO   0x08
 
 typedef struct {
 	uint8_t  kind;
@@ -53,6 +60,20 @@ typedef struct {
 	uint8_t  xform;        /* text-transform: 0 none, 1 upper, 2 lower */
 	int8_t   line_sp;      /* extra line spacing px */
 	int8_t   let_sp;       /* letter-spacing px */
+	uint8_t  pad_h;        /* horizontal padding */
+	uint8_t  gap;          /* flex/grid gap */
+	uint8_t  opacity;      /* 0..255 */
+	uint8_t  flex_dir;     /* row/column/reverse */
+	uint8_t  flex_wrap;
+	uint8_t  justify;
+	uint8_t  align;
+	uint8_t  grid_cols;
+	uint16_t width, max_width;
+	uint8_t  width_unit, max_width_unit;
+	uint8_t  shadow_w;
+	uint8_t  lflags;       /* KF_LAY_* */
+	uint16_t shadow_c;
+	uint8_t  font_id;      /* downloaded @font-face slot, 0 = built-in */
 } kf_html_op;
 
 /* Configure the two PSRAM regions the parser writes into. */

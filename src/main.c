@@ -37,7 +37,6 @@ int main(void){
 	kf_theme_init(disp);       /* install the amber CRT theme (flat inputs!)   */
 	multicore_launch_core1(disp_core1_main);   /* start the LCD flush pump     */
 
-	kfs_mount();               /* mount SD at "/" — non-fatal if it fails      */
 	kbd_init();                /* keyboard / STM32 link (uart1 + PING)         */
 	kf_audio_init();           /* PWM audio (GP26/27) + DMA — idle until played */
 	kf_psram_init();           /* 8 MB PSRAM (PIO SPI) — probe + self-test     */
@@ -54,25 +53,13 @@ int main(void){
 	launcher_init();           /* build + show the app launcher (loads config)  */
 	topbar_init();             /* persistent OS top bar (mem/clock/battery/wifi) */
 
-	/* Boot WiFi auto-connect: if any network is remembered, bring the radio up at the WiFi-safe
-	   eco clock (cold boot is already ~250 MHz) and kick off a scan-then-strongest-first campaign.
-	   We stay at eco until it resolves (the JOIN needs <=270 MHz), then ramp to 400 below; the cyw43
-	   bus divider is retuned on that switch so the joined link survives the bump and rides 400.
-	   Nothing saved -> skip the radio and ramp immediately.
-	   NOTE: bring-up + association at 400 HANG cyw43_arch_init (~270 MHz silicon ceiling, confirmed),
-	   and 200 was tried as the default but the LVGL UI paints in visible bands there (CPU-bound), so
-	   400 is the default and the eco dip wraps the join only. */
-	int wifi_boot = kf_net_has_saved();
-	if(wifi_boot){
-		kf_clock_eco();
-		kf_net_init();
-		kf_net_autoconnect();
-	}
+	/* Keep CYW43 lazy so boot never waits on a radio firmware upload or association.
+	   WiFi/browser/chat/terminal apps initialize at the safe eco tier when needed;
+	   connected apps may then return to 400 MHz because kf_net_reclock() holds the
+	   live gSPI state machine at its independent 31.25 MHz rate. */
+	kf_clock_normal();
 
-	kf_sfx_play("boot");       /* startup chime from /kefyros/sfx/boot.wav (silent if absent) */
-
-	/* ramp to the smooth 400 MHz UI once the boot WiFi campaign resolves (or right away if none) */
-	int ramped = 0;
+	/* (boot sfx removed: the sfx audio-ring lifecycle leaked heap per app session) */
 
 	for(;;){
 		uart_poll();           /* drain keyboard RX, push key events           */
@@ -84,9 +71,8 @@ int main(void){
 		deepseek_poll();       /* DeepSeek chat keys + request pump (no-op idle) */
 		kapi_poll();           /* KAPI class-1 app: keys + per-frame callback (no-op idle) */
 		term_poll();           /* Term SSH session pump (no-op; modal loop owns the session) */
-		sfx_poll();            /* pump an in-flight UI sound effect (no-op idle)         */
+		gameboy_poll();        /* GB/GBC picker + modal emulation loop (no-op idle) */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
-		if(!ramped && !kf_net_autoconnect_active()){ kf_clock_normal(); ramped = 1; }
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);
 	}

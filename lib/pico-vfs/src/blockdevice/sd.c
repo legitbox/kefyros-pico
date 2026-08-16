@@ -35,7 +35,19 @@ typedef struct {
 } blockdevice_sd_config_t;
 
 #ifndef CONF_SD_CMD_TIMEOUT
-#define CONF_SD_CMD_TIMEOUT                 5000   /*!< Timeout in ms for response */
+#define CONF_SD_CMD_TIMEOUT                  500   /*!< Normal command-ready timeout in ms */
+#endif
+
+#ifndef CONF_SD_WRITE_TIMEOUT
+#define CONF_SD_WRITE_TIMEOUT               5000   /*!< Flash program busy timeout in ms */
+#endif
+
+#ifndef CONF_SD_INIT_READY_TIMEOUT
+#define CONF_SD_INIT_READY_TIMEOUT           250   /*!< Fail fast before card initialization */
+#endif
+
+#ifndef CONF_SD_INIT_TIMEOUT
+#define CONF_SD_INIT_TIMEOUT                1000   /*!< ACMD41 power-up timeout in ms */
 #endif
 
 #ifndef CONF_SD_CMD0_IDLE_STATE_RETRIES
@@ -148,6 +160,10 @@ static const char DEVICE_NAME[] = "sd";
 static const size_t block_size = 512;
 static const uint8_t SPI_FILL_CHAR = 0xFF;
 
+#ifndef CONF_SD_GPIO_DRIVE_STRENGTH
+#define CONF_SD_GPIO_DRIVE_STRENGTH GPIO_DRIVE_STRENGTH_4MA
+#endif
+
 static const uint8_t CRC7_TABLE[256] = {
     0x00, 0x09, 0x12, 0x1B, 0x24, 0x2D, 0x36, 0x3F,
     0x48, 0x41, 0x5A, 0x53, 0x6C, 0x65, 0x7E, 0x77,
@@ -251,33 +267,50 @@ static void _spi_wait(void *_config, size_t count) {
 static void _spi_init(void *_config) {
     blockdevice_sd_config_t *config = _config;
 
-    gpio_set_function(config->mosi, GPIO_FUNC_SPI);
-    gpio_set_function(config->miso, GPIO_FUNC_SPI);
-    gpio_set_function(config->sclk, GPIO_FUNC_SPI);
+    /* Keep the card deselected before any SPI pin starts toggling. gpio_init()
+     * clears the output latch, so write the high level before enabling output;
+     * the old order briefly asserted CS at every cold boot. */
     gpio_init(config->cs);
+    gpio_put(config->cs, 1);
     gpio_set_dir(config->cs, GPIO_OUT);
-    gpio_pull_up(config->miso);
-    gpio_set_drive_strength(config->mosi, 1);
-    gpio_set_drive_strength(config->sclk, 1);
+    gpio_pull_up(config->cs);
+
     spi_init(config->spi_inst, CONF_SD_INIT_FREQUENCY);
     spi_set_format(config->spi_inst, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 
-    gpio_put(config->cs, 1);
-    bool old_cs = gpio_get(config->cs);
+    gpio_set_function(config->mosi, GPIO_FUNC_SPI);
+    gpio_set_function(config->miso, GPIO_FUNC_SPI);
+    gpio_set_function(config->sclk, GPIO_FUNC_SPI);
+    gpio_pull_up(config->miso);
+    gpio_set_drive_strength(config->mosi, CONF_SD_GPIO_DRIVE_STRENGTH);
+    gpio_set_drive_strength(config->sclk, CONF_SD_GPIO_DRIVE_STRENGTH);
+    gpio_set_drive_strength(config->cs, CONF_SD_GPIO_DRIVE_STRENGTH);
+    gpio_set_slew_rate(config->mosi, GPIO_SLEW_RATE_SLOW);
+    gpio_set_slew_rate(config->sclk, GPIO_SLEW_RATE_SLOW);
+    gpio_set_slew_rate(config->cs, GPIO_SLEW_RATE_SLOW);
+    gpio_set_input_hysteresis_enabled(config->miso, true);
+
+    /* Allow the PicoCalc ALDO1/card rail to settle, then supply at least 74
+     * clocks with CS and MOSI high before issuing CMD0. */
+    sleep_ms(2);
     _spi_wait(config, 10);
-    gpio_put(config->cs, old_cs);
 }
 
 static void _preclock_then_select(void *_config) {
     blockdevice_sd_config_t *config = _config;
     spi_write_read_blocking(config->spi_inst, &SPI_FILL_CHAR, NULL, sizeof(SPI_FILL_CHAR));
     gpio_put(config->cs, 0);
+    /* Give the card one byte time after CS falls to enable DO, matching the
+     * proven PicoCalc/PicoMite select sequence. */
+    spi_write_read_blocking(config->spi_inst, &SPI_FILL_CHAR, NULL, sizeof(SPI_FILL_CHAR));
 }
 
 static void _postclock_then_deselect(void *_config) {
     blockdevice_sd_config_t *config = _config;
-    spi_write_read_blocking(config->spi_inst, &SPI_FILL_CHAR, NULL, sizeof(SPI_FILL_CHAR));
     gpio_put(config->cs, 1);
+    /* Clock once after deselect so MISO is released before another device or
+     * the next transaction uses the bus. */
+    spi_write_read_blocking(config->spi_inst, &SPI_FILL_CHAR, NULL, sizeof(SPI_FILL_CHAR));
 }
 
 static inline void debug_if(int condition, const char *format, ...) {
@@ -374,8 +407,14 @@ static int _cmd(void *_config, int cmd, uint32_t arg, bool is_acmd, uint32_t *re
     _preclock_then_select(config);
     // No need to wait for card to be ready when sending the stop command
     if (CMD12_STOP_TRANSMISSION != cmd) {
-        if (false == _wait_ready(config, SD_COMMAND_TIMEOUT)) {
+        uint32_t ready_timeout = config->is_initialized
+                               ? SD_COMMAND_TIMEOUT
+                               : CONF_SD_INIT_READY_TIMEOUT;
+        if (false == _wait_ready(config, ready_timeout)) {
             debug_if(SD_DBG, "Card not ready yet \n");
+            _postclock_then_deselect(config);
+            if (resp != NULL) *resp = R1_NO_RESPONSE;
+            return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
         }
     }
 
@@ -385,8 +424,11 @@ static int _cmd(void *_config, int cmd, uint32_t arg, bool is_acmd, uint32_t *re
         if (is_acmd) {
             response = _cmd_spi(config, CMD55_APP_CMD, 0x0);
             // Wait for card to be ready after CMD55
-            if (false == _wait_ready(config, SD_COMMAND_TIMEOUT)) {
+            if (false == _wait_ready(config, CONF_SD_INIT_READY_TIMEOUT)) {
                 debug_if(SD_DBG, "Card not ready yet \n");
+                _postclock_then_deselect(config);
+                if (resp != NULL) *resp = R1_NO_RESPONSE;
+                return SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
             }
         }
 
@@ -558,7 +600,7 @@ static int init_card(void *_config) {
      * "0" indicates completion of initialization. The host repeatedly issues ACMD41 until
      * this bit is set to "0".
      */
-    absolute_time_t timeout = make_timeout_time_ms(SD_COMMAND_TIMEOUT);
+    absolute_time_t timeout = make_timeout_time_ms(CONF_SD_INIT_TIMEOUT);
     do {
         status = _cmd(config, ACMD41_SD_SEND_OP_COND, arg, 1, &response);
     } while ((response & R1_IDLE_STATE) && (0 < absolute_time_diff_us(get_absolute_time(), timeout)));
@@ -567,7 +609,7 @@ static int init_card(void *_config) {
     if ((BD_ERROR_OK != status) || (0x00 != response)) {
         config->card_type = CARD_UNKNOWN;
         debug_if(SD_DBG, "Timeout waiting for card\n");
-        return status;
+        return status != BD_ERROR_OK ? status : SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
     }
 
     if (SDCARD_V2 == config->card_type) {
@@ -586,12 +628,11 @@ static int init_card(void *_config) {
         debug_if(SD_DBG, "Card Initialized: Version 1.x Card\n");
     }
 
-    if (!config->enable_crc) {
-        // Disable CRC
-        status = _cmd(config, CMD59_CRC_ON_OFF, config->enable_crc, 0x0, &response);
-    } else {
-        status = _cmd(config, CMD59_CRC_ON_OFF, 0, 0x0, &response);
-    }
+    /* Leave the card in the same CRC mode the host will use for data blocks.
+     * The previous true branch sent 0 here, disabling card CRC while the host
+     * continued validating it. */
+    status = _cmd(config, CMD59_CRC_ON_OFF, config->enable_crc ? 1u : 0u,
+                  0x0, &response);
     return status;
 }
 
@@ -717,17 +758,30 @@ static int init(blockdevice_t *device) {
     blockdevice_sd_config_t *config = device->config;
     mutex_enter_blocking(&config->_mutex);
 
+    /* blockdevice_sd_create() initializes eagerly, while FatFs calls
+     * disk_initialize() again from f_mount(opt=1). Resetting an already-live
+     * card here is both unnecessary and, on some cards, leaves MISO busy long
+     * enough to stall the entire Kefyros boot. Treat init as idempotent. */
+    if (config->is_initialized) {
+        device->is_initialized = true;
+        mutex_exit(&config->_mutex);
+        return BD_ERROR_OK;
+    }
+
+    /* Publish neither flag until every identification step has succeeded. */
+    config->is_initialized = false;
+    device->is_initialized = false;
+
     int err = init_card(config);
-    config->is_initialized = (err == BD_ERROR_OK);
-    if (!config->is_initialized) {
+    if (err != BD_ERROR_OK) {
         debug_if(SD_DBG, "Fail to initialize card\n");
         mutex_exit(&config->_mutex);
         return err;
     }
-    debug_if(SD_DBG, "init card = %d\n", config->is_initialized);
     config->total_sectors = _sd_sectors(config);
     // CMD9 failed
     if (0 == config->total_sectors) {
+        config->is_initialized = false;
         mutex_exit(&config->_mutex);
         return BD_ERROR_DEVICE_ERROR;
     }
@@ -735,6 +789,7 @@ static int init(blockdevice_t *device) {
     // Set block length to 512 (CMD16)
     if (_cmd(config, CMD16_SET_BLOCKLEN, config->block_size, 0, NULL) != 0) {
         debug_if(SD_DBG, "Set %" PRIu32 "-byte block timed out\n", config->block_size);
+        config->is_initialized = false;
         mutex_exit(&config->_mutex);
         return BD_ERROR_DEVICE_ERROR;
     }
@@ -742,11 +797,14 @@ static int init(blockdevice_t *device) {
     // Set SCK for data transfer
     err = _freq(config);
     if (err) {
+        config->is_initialized = false;
         mutex_exit(&config->_mutex);
         return err;
     }
 
+    config->is_initialized = true;
     device->is_initialized = true;
+    debug_if(SD_DBG, "init card = %d\n", config->is_initialized);
     mutex_exit(&config->_mutex);
     return BD_ERROR_OK;
 }
@@ -764,6 +822,8 @@ static bool is_valid_program(blockdevice_t *device, bd_size_t addr, bd_size_t si
 }
 
 static int deinit(blockdevice_t *device) {
+    blockdevice_sd_config_t *config = device->config;
+    config->is_initialized = false;
     device->is_initialized = false;
     return 0;
 }
@@ -827,8 +887,10 @@ static int read(blockdevice_t *device, const void *_buffer, bd_size_t addr, bd_s
         addr = addr / config->block_size;
     }
 
-    // Write command ro receive data
-    if (block_count > 1) {
+    bool multi = block_count > 1;
+
+    // Write command to receive data
+    if (multi) {
         status = _cmd(config, CMD18_READ_MULTIPLE_BLOCK, addr, 0, NULL);
     } else {
         status = _cmd(config, CMD17_READ_SINGLE_BLOCK, addr, 0, NULL);
@@ -847,12 +909,19 @@ static int read(blockdevice_t *device, const void *_buffer, bd_size_t addr, bd_s
         buffer += config->block_size;
         --block_count;
     }
-    _postclock_then_deselect(config);
-
-    // Send CMD12(0x00000000) to stop the transmission for multi-block transfer
-    if (size > config->block_size) {
-        status = _cmd(config, CMD12_STOP_TRANSMISSION, 0x0, 0, NULL);
+    /* CMD12 must terminate a multi-block stream while the card is still
+     * selected. The old code deselected first and then started a new command
+     * transaction, which can leave the card streaming and make the next FAT
+     * read sit in five-second busy waits. */
+    if (multi) {
+        uint8_t stop_response = _cmd_spi(config, CMD12_STOP_TRANSMISSION, 0x0);
+        if (stop_response == R1_NO_RESPONSE || (stop_response & R1_RESPONSE_RECV)) {
+            status = SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
+        } else if (!_wait_ready(config, SD_COMMAND_TIMEOUT)) {
+            status = SD_BLOCK_DEVICE_ERROR_NO_RESPONSE;
+        }
     }
+    _postclock_then_deselect(config);
 
     mutex_exit(&config->_mutex);
     return status;
@@ -883,7 +952,7 @@ static uint8_t _write(void *_config, const uint8_t *buffer, uint8_t token, uint3
     response = _spi_write(config, SPI_FILL_CHAR);
 
     // Wait for last block to be written
-    if (false == _wait_ready(config, SD_COMMAND_TIMEOUT)) {
+    if (false == _wait_ready(config, CONF_SD_WRITE_TIMEOUT)) {
         debug_if(SD_DBG, "Card not ready yet \n");
     }
 

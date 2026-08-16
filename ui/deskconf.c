@@ -12,17 +12,17 @@
                            accumulated dead keys from renamed/archived apps), so new keys like
                            slot.term / slot.demo were silently dropped and their icon moves never
                            persisted. 96 is comfortable headroom over the realistic live-key count. */
-#define VAL_MAX  128    /* per-value buffer. Was 256, which at KV_MAX entries dominated .bss for no
-                           reason — every real value (paths, WPA passphrase ≤63, api key ~35) fits
-                           in <128. Shrinking this keeps the bigger table CHEAPER than the old 48×256
-                           (avoids stealing boot heap from the WiFi stack + icon PNG decodes). */
+#define VAL_MAX  128
 #define CONF_DIR  KF_ROOT       /* "/kefyros" */
 #define CONF_PATH KF_CONFIG     /* "/kefyros/config.txt" */
 
-static struct { char k[40]; char v[VAL_MAX]; } kv[KV_MAX];
+/* Keep only pointer pairs in .bss and allocate the strings at their real lengths.
+   The old 96 x (40+128) table permanently burned 16 KB even on a fresh install. */
+static struct { char *k,*v; } kv[KV_MAX];
 static int nkv = 0;
 
 void deskconf_load(void){
+	for(int i=0;i<nkv;i++){free(kv[i].k);free(kv[i].v);kv[i].k=kv[i].v=NULL;}
 	nkv = 0;
 	FILE *f = fopen(CONF_PATH, "r");
 	if(!f) return;
@@ -33,9 +33,11 @@ void deskconf_load(void){
 		*eq = 0;
 		char *v = eq + 1;
 		char *nl = strpbrk(v, "\r\n"); if(nl) *nl = 0;
-		snprintf(kv[nkv].k, sizeof kv[nkv].k, "%s", line);
-		snprintf(kv[nkv].v, sizeof kv[nkv].v, "%s", v);
-		nkv++;
+		if(strlen(line)>39)line[39]=0;
+		if(strlen(v)>=VAL_MAX)v[VAL_MAX-1]=0;
+		char *kcopy=strdup(line),*vcopy=strdup(v);
+		if(kcopy&&vcopy){kv[nkv].k=kcopy;kv[nkv].v=vcopy;nkv++;}
+		else{free(kcopy);free(vcopy);}
 	}
 	fclose(f);
 }
@@ -68,10 +70,16 @@ void deskconf_set(const char *key, const char *val){
 	if(i < nkv && !strcmp(kv[i].v, val)) return;   /* value unchanged: skip the no-op write */
 	if(i == nkv){
 		if(nkv >= KV_MAX) return;
-		nkv++;
-		snprintf(kv[i].k, sizeof kv[i].k, "%s", key);
+		char kb[40];snprintf(kb,sizeof kb,"%s",key);
+		char vb[VAL_MAX];snprintf(vb,sizeof vb,"%s",val);
+		char *kc=strdup(kb),*vc=strdup(vb);
+		if(!kc||!vc){free(kc);free(vc);return;}
+		kv[i].k=kc;kv[i].v=vc;nkv++;
+	} else {
+		char vb[VAL_MAX];snprintf(vb,sizeof vb,"%s",val);
+		char *vc=strdup(vb);if(!vc)return;
+		free(kv[i].v);kv[i].v=vc;
 	}
-	snprintf(kv[i].v, sizeof kv[i].v, "%s", val);
 	deskconf_save();
 }
 

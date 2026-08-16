@@ -29,9 +29,12 @@
 #define AUDIO_L_PIN 27                             /* PWM slice 5 ch B -> left  */
 #define AUDIO_SLICE 5u
 #define DBUF        256                            /* stereo frames per ping-pong half */
-#define RING_N      8192                           /* stereo-frame ring (~186 ms @44.1k:
-                                                      deep enough to ride out a cover-art
-                                                      JPEG decode without an underrun) */
+#define RING_N      4096                           /* stereo-frame ring (~93 ms @44.1k:
+                                                      deep enough to ride out SD jitter, but
+                                                      only 16 KB of heap while playing — 8192
+                                                      (32 KB) made playback malloc-fail on a
+                                                      heap already holding music's JP font +
+                                                      cover thumb (stuck play button, no sound) */
 
 /* runtime carrier resolution (chosen from clk_sys at start). bits in [11..13]. */
 static uint32_t pwm_top   = 4095;                  /* (1<<bits)-1 */
@@ -46,6 +49,7 @@ static uint32_t pwm_bits  = 12;
    plotter's full-screen canvas) the contiguous room it needs. */
 static uint32_t pp[2][DBUF];
 static uint32_t *ring;                               /* RING_N frames; NULL when idle */
+static uint32_t ring_n = RING_N;                     /* active power-of-two capacity */
 static volatile uint32_t r_w = 0, r_r = 0;          /* free-running; count = r_w - r_r */
 static int dch = -1, dtimer = -1;
 static volatile int cur = 0;
@@ -92,7 +96,7 @@ static inline uint32_t ring_count(void){ return r_w - r_r; }
 /* refill a ping-pong half from the ring (IRQ context); silence on underrun */
 static void fill(uint32_t *b){
 	for(int i = 0; i < DBUF; i++){
-		if(ring && r_r != r_w){ b[i] = ring[r_r & (RING_N-1)]; r_r++; }
+		if(ring && r_r != r_w){ b[i] = ring[r_r & (ring_n-1u)]; r_r++; }
 		else b[i] = SILENCE();
 	}
 }
@@ -175,10 +179,17 @@ void kf_audio_idle_unpark(void){
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 }
 
-void kf_audio_start(int hz){
+int kf_audio_start_buffered(int hz, int ring_frames){
 	if(hz < 8000) hz = 8000; else if(hz > 48000) hz = 48000;
 	if(running){ dma_channel_abort(dch); running = 0; }
-	if(!ring){ ring = malloc(sizeof(uint32_t) * RING_N); if(!ring) return; }  /* no RAM -> stay silent */
+	if(ring_frames < 1024) ring_frames = 1024;
+	if(ring_frames > RING_N) ring_frames = RING_N;
+	/* Keep masking cheap and unambiguous: round down to a supported power of two. */
+	uint32_t cap = 1024;
+	while((cap << 1) <= (uint32_t)ring_frames) cap <<= 1;
+	if(ring && ring_n != cap){ free(ring); ring = NULL; }
+	ring_n = cap;
+	if(!ring){ ring = malloc(sizeof(uint32_t) * ring_n); if(!ring) return 0; }
 	r_w = r_r = 0;
 	ns_reset();
 	pick_resolution();
@@ -196,7 +207,10 @@ void kf_audio_start(int hz){
 	dma_channel_set_read_addr(dch, pp[0], false);
 	dma_channel_set_trans_count(dch, DBUF, true);   /* go */
 	running = 1;
+	return 1;
 }
+
+void kf_audio_start(int hz){ (void)kf_audio_start_buffered(hz, RING_N); }
 
 void kf_audio_stop(void){
 	if(!running) return;
@@ -214,7 +228,7 @@ void kf_audio_stop(void){
 }
 
 int  kf_audio_running(void){ return running; }
-int  kf_audio_space(void){ return ring ? (int)(RING_N - (r_w - r_r)) : 0; }
+int  kf_audio_space(void){ return ring ? (int)(ring_n - (r_w - r_r)) : 0; }
 int  kf_audio_buffered(void){ return ring ? (int)(r_w - r_r) : 0; }   /* frames queued but unplayed */
 
 /* drop buffered audio + reset the shaper (used right after a seek so the new
@@ -227,10 +241,10 @@ void kf_audio_flush(void){ r_w = r_r = 0; ns_reset(); }
 int kf_audio_write_s32(const int32_t *st, int frames){
 	if(!ring) return 0;
 	int w = 0;
-	while(w < frames && ring_count() < RING_N){
+	while(w < frames && ring_count() < ring_n){
 		uint32_t a = duty_s32(1, st[2*w+1]);        /* right */
 		uint32_t b = duty_s32(0, st[2*w]);          /* left  */
-		ring[r_w & (RING_N-1)] = a | (b << 16);
+		ring[r_w & (ring_n-1u)] = a | (b << 16);
 		r_w++; w++;
 	}
 	return w;
@@ -241,10 +255,10 @@ int kf_audio_write_s32(const int32_t *st, int frames){
 int kf_audio_write(const int16_t *st, int frames){
 	if(!ring) return 0;
 	int w = 0;
-	while(w < frames && ring_count() < RING_N){
+	while(w < frames && ring_count() < ring_n){
 		uint32_t a = duty_s32(1, (int32_t)st[2*w+1] << 16);
 		uint32_t b = duty_s32(0, (int32_t)st[2*w]   << 16);
-		ring[r_w & (RING_N-1)] = a | (b << 16);
+		ring[r_w & (ring_n-1u)] = a | (b << 16);
 		r_w++; w++;
 	}
 	return w;

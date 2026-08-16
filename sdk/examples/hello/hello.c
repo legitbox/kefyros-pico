@@ -18,16 +18,18 @@ int app_main(const kapi *k){
     int w, h;
     k->gfx->screen_size(&w, &h);
 
-    C = k->gfx->canvas(0, 0, w, h);
+    /* A live RGB565 canvas consumes 2 bytes/pixel. Keep this tiny demo inside the
+       app arena; full-screen animation should use gfx->view_* strip streaming. */
+    C = k->gfx->canvas(10, 26, w - 20, 96);
+    if(!C){ k->sys->log("hello.kx: canvas allocation failed"); return -1; }
     k->gfx->clear(C, 0x0000);
-    k->gfx->fill (C, 12, 20, w - 24, 44, 0xF420);          /* amber banner            */
+    k->gfx->fill (C, 2, 2, w - 24, 36, 0xF420);            /* amber banner            */
 
     kf_font big = k->txt->open("mono", 20);
     kf_font reg = k->txt->open("mono", 13);
-    k->txt->draw(C, big, 22, 30, "hello.kx", 0x0000);       /* dark text on amber      */
-    k->txt->draw(C, reg, 16, 86, "first class-1 app on KAPI", 0xFFFF);
-    k->txt->draw(C, reg, 16, 110, "loaded from /apps/hello", 0xCE59);
-    k->txt->draw(C, reg, 16, 150, "ESC to quit", 0xFFFF);
+    k->txt->draw(C, big, 12, 8, "hello.kx", 0x0000);         /* dark text on amber      */
+    k->txt->draw(C, reg, 6, 50, "first-class SD app - ESC quits", 0xFFFF);
+    k->txt->draw(C, reg, 6, 70, "no firmware reflash required", 0xCE59);
     k->gfx->present(C);
 
     k->sys->on_key(on_key, 0);

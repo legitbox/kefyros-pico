@@ -45,6 +45,8 @@ static char ds_model[40];
 /* ---- PSRAM response arena (alloc once, reuse) ---- */
 static uint32_t ds_arena = 0xFFFFFFFFu;
 
+void deepseek_psram_invalidate(void){ ds_arena = 0xFFFFFFFFu; }
+
 /* ---- conversation (in memory) ---- */
 #define MSG_MAX 64
 typedef struct { char role; char *text; } msg_t;   /* role 'U' user / 'A' assistant */
@@ -52,14 +54,26 @@ static msg_t msgs[MSG_MAX];
 static int   nmsg;
 static char  cur_path[600];                         /* chat file backing this conversation */
 
-/* ---- request buffers ---- */
-static char ds_req[12*1024];
+/* ---- request/extractor scratch ----
+   These used to consume ~19 KB of SRAM for the entire OS lifetime, including while
+   the browser needed the heap. Allocate one slab only while DeepSeek is active. */
+#define DS_REQ_CAP     (12*1024)
+#define DS_CONTENT_CAP 4096
+#define DS_REASON_CAP  3072
+#define DS_ERR_CAP      256
+#define DS_WORK_CAP    (DS_REQ_CAP+DS_CONTENT_CAP+DS_REASON_CAP+DS_ERR_CAP)
+static char *ds_work;
+#define ds_req     (ds_work)
+#define g_content  (ds_work+DS_REQ_CAP)
+#define g_reason   (g_content+DS_CONTENT_CAP)
+#define g_err      (g_reason+DS_REASON_CAP)
 static char ds_hdr[400];
 
-/* ---- extractor outputs ---- */
-static char g_content[4096];
-static char g_reason[3072];
-static char g_err[256];
+static int ensure_work(void){
+	if(!ds_work)ds_work=(char*)malloc(DS_WORK_CAP);
+	if(ds_work)ds_work[0]=0;
+	return ds_work!=NULL;
+}
 
 /* ---- UI state ---- */
 static lv_obj_t  *scr_list, *list_w, *key_box;
@@ -208,7 +222,7 @@ static int jesc(char *buf, int n, int cap, const char *s){
 }
 
 static int build_req_json(void){
-	int cap = (int)sizeof ds_req;
+	int cap = DS_REQ_CAP;
 	int n = snprintf(ds_req, cap,
 		"{\"model\":\"%s\",\"thinking\":{\"type\":\"enabled\"},\"stream\":false,"
 		"\"messages\":[{\"role\":\"system\",\"content\":\"", ds_model);
@@ -310,9 +324,9 @@ static void ds_extract(uint32_t base, uint32_t len){
 				instr=1;
 				if(expectval){
 					reading_val=1; valesc=0; capturing=0;
-					if(!strcmp(pend,"content")){ capturing=1; cap_begin(g_content,sizeof g_content); }
-					else if(!strcmp(pend,"reasoning_content")){ capturing=1; cap_begin(g_reason,sizeof g_reason); }
-					else if(!strcmp(pend,"message") && g_content[0]==0){ capturing=1; cap_begin(g_err,sizeof g_err); }
+					if(!strcmp(pend,"content")){ capturing=1; cap_begin(g_content,DS_CONTENT_CAP); }
+					else if(!strcmp(pend,"reasoning_content")){ capturing=1; cap_begin(g_reason,DS_REASON_CAP); }
+					else if(!strcmp(pend,"message") && g_content[0]==0){ capturing=1; cap_begin(g_err,DS_ERR_CAP); }
 					expectval=havekey=0;
 				} else { reading_key=1; keylen=0; esc=0; havekey=0; }
 			} else if(c==':'){
@@ -382,6 +396,7 @@ static void send_current(void){
 	if(!ds_key[0]){ set_status("No API key - go back & open the 'API key' row to set it"); return; }
 	if(kf_net_state() != KF_NET_ONLINE){ set_status("WiFi offline - connect in WiFi app"); return; }
 	if(!ensure_arena()){ set_status("no PSRAM arena"); return; }
+	if(!ensure_work()){ set_status("not enough RAM for request"); return; }
 
 	add_msg('U', t);
 	add_bubble('U', t);
@@ -470,6 +485,7 @@ static void on_scr_del(lv_event_t *e){
 			kf_http_abort();
 			kf_grab_input(0);
 			free_msgs(); free_names();
+			free(ds_work);ds_work=NULL;
 			kf_clock_normal();
 		}
 	}

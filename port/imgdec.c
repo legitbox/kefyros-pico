@@ -7,6 +7,7 @@
 #include "imgdec.h"
 
 #include "src/libs/tjpgd/tjpgd.h"          /* JPEG (LVGL's bundled tjpgd) */
+#include "src/libs/gif/gifdec.h"           /* GIF first-frame decode */
 #include "miniz_tinfl.h"                    /* streaming DEFLATE inflate */
 
 /* nanosvg: header-only, instantiate the implementations here. No file I/O. */
@@ -28,9 +29,23 @@ static inline uint16_t rgb565(int r, int g, int b){
 	return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
+/* Small displays do not benefit from a bitmap that consumes the whole SRAM heap.
+   Increase the integer subsampling step until both the geometry and caller's byte
+   budget fit. This is deliberately shared by JPEG/PNG/GIF so every decoder has the
+   same hard peak-output bound. */
+static int fit_step(uint32_t w, uint32_t h, int max_w, int max_h, uint32_t max_out,int out_bpp){
+	int sw=(int)((w+(uint32_t)max_w-1u)/(uint32_t)max_w);
+	int sh=(int)((h+(uint32_t)max_h-1u)/(uint32_t)max_h);
+	int step=sw>sh?sw:sh; if(step<1)step=1;
+	while(max_out && ((uint64_t)(w/(uint32_t)step)*(h/(uint32_t)step)*(uint32_t)out_bpp > max_out)) step++;
+	return step;
+}
+
 int kf_img_sniff(const uint8_t *s, int n){
 	if(n >= 3 && s[0]==0xFF && s[1]==0xD8 && s[2]==0xFF) return 'j';
 	if(n >= 8 && s[0]==0x89 && s[1]=='P' && s[2]=='N' && s[3]=='G') return 'p';
+	if(n >= 6 && !memcmp(s,"GIF87a",6)) return 'g';
+	if(n >= 6 && !memcmp(s,"GIF89a",6)) return 'g';
 	/* SVG: leading '<' (after optional BOM/space) with "<svg" or "<?xml" nearby. */
 	for(int i=0;i<n;i++){ if(s[i]==' '||s[i]=='\t'||s[i]=='\r'||s[i]=='\n'||s[i]==0xEF||s[i]==0xBB||s[i]==0xBF) continue;
 		if(s[i]=='<'){
@@ -39,6 +54,44 @@ int kf_img_sniff(const uint8_t *s, int n){
 		break;
 	}
 	return 0;
+}
+
+/* ============================================================ GIF =====
+   Classic sites depend heavily on tiny 88x31 GIF buttons. Decode the first
+   composited frame through LVGL's gifdec, then immediately release the source
+   and decoder workspace. Animation can come later; rendering frame zero is a
+   much better degradation than a filename placeholder. */
+static int decode_gif(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t max_out, uint32_t reserve,
+                      uint16_t **out, uint8_t **oa, int *ow, int *oh){
+	if(len < 14 || len > 512u*1024u) return 0;
+	uint8_t hd[10]; kf_psram_read(base, hd, sizeof hd);
+	uint32_t W=(uint32_t)hd[6]|((uint32_t)hd[7]<<8);
+	uint32_t H=(uint32_t)hd[8]|((uint32_t)hd[9]<<8);
+	if(!W||!H||W>2048||H>2048) return 0;
+	int step=fit_step(W,H,max_w,max_h,max_out,3);
+	int w=(int)(W/step), h=(int)(H/step); if(w<1||h<1)return 0;
+	uint32_t outbytes=(uint32_t)w*h*2,abytes=(uint32_t)w*h;
+	uint64_t need=(uint64_t)reserve+len+(uint64_t)W*H*5u+outbytes+abytes+8192u;
+	if(need > UINT32_MAX || heap_free() < (uint32_t)need) return 0;
+	uint8_t *raw=(uint8_t*)malloc(len); if(!raw)return 0;
+	kf_psram_read(base,raw,len);
+	gd_GIF *gif=gd_open_gif_data(raw);
+	if(!gif){free(raw);return 0;}
+	int ok=gd_get_frame(gif)>0;
+	uint16_t *pix=ok?(uint16_t*)malloc(outbytes):NULL;
+	uint8_t *alpha=ok?(uint8_t*)malloc(abytes):NULL;
+	if(!pix||!alpha)ok=0;
+	if(ok){
+		gd_render_frame(gif,gif->canvas);
+		for(int y=0;y<h;y++)for(int x=0;x<w;x++){
+			uint32_t si=((uint32_t)y*step*W+(uint32_t)x*step)*4u;
+			int b=gif->canvas[si],g=gif->canvas[si+1],r=gif->canvas[si+2],a=gif->canvas[si+3];
+			pix[y*w+x]=rgb565(r,g,b);alpha[y*w+x]=(uint8_t)a;
+		}
+	}
+	gd_close_gif(gif); free(raw);
+	if(!ok){free(pix);free(alpha);return 0;}
+	*out=pix;*oa=alpha;*ow=w;*oh=h;return 1;
 }
 
 /* ============================================================ JPEG (tjpgd) ===== */
@@ -66,21 +119,20 @@ static int jpg_out(JDEC *jd, void *bitmap, JRECT *rect){
 	}
 	return 1;
 }
-static int decode_jpeg(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t reserve,
-                       uint16_t **out, int *ow, int *oh){
+static int decode_jpeg(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t max_out, uint32_t reserve,
+                       uint16_t **out, uint8_t **oa, int *ow, int *oh){
 	static uint8_t pool[4096];
 	psrc s = { base, 0, len };
 	JDEC jd;
 	if(jd_prepare(&jd, jpg_in, pool, sizeof pool, &s) != JDR_OK) return 0;
-	int sw = (jd.width + max_w - 1)/max_w, sh = (jd.height + max_h - 1)/max_h;
-	int step = sw > sh ? sw : sh; if(step < 1) step = 1;
+	int step = fit_step(jd.width,jd.height,max_w,max_h,max_out,2);
 	int w = jd.width/step, h = jd.height/step; if(w<1||h<1) return 0;
 	uint32_t bytes = (uint32_t)w*h*2;
 	if(heap_free() < reserve + bytes) return 0;
 	uint16_t *pix = (uint16_t*)malloc(bytes); if(!pix) return 0;
 	j_dst = pix; j_step = step; j_w = w; j_h = h;
 	if(jd_decomp(&jd, jpg_out, 0) != JDR_OK){ free(pix); return 0; }
-	*out = pix; *ow = w; *oh = h; return 1;
+	*out = pix; *oa=NULL; *ow = w; *oh = h; return 1;
 }
 
 /* ============================================================ PNG (streaming) ===== */
@@ -122,8 +174,8 @@ static int paeth(int a, int b, int c){
 	int p = a + b - c, pa = abs(p-a), pb = abs(p-b), pc = abs(p-c);
 	if(pa<=pb && pa<=pc) return a; if(pb<=pc) return b; return c;
 }
-static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t reserve,
-                      uint16_t **out, int *ow, int *oh){
+static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t max_out, uint32_t reserve,
+                      uint16_t **out, uint8_t **oa, int *ow, int *oh){
 	uint8_t ih[33];
 	if(len < 33) return 0;
 	kf_psram_read(base, ih, 33);             /* 8 sig + IHDR chunk (len+type+13 data) */
@@ -154,15 +206,15 @@ static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_
 		if(paln == 0) return 0;
 	}
 
-	int step = ( (int)((W+max_w-1)/max_w) > (int)((H+max_h-1)/max_h) )
-	         ? (int)((W+max_w-1)/max_w) : (int)((H+max_h-1)/max_h);
-	if(step < 1) step = 1;
+	int has_alpha=(colortype==4||colortype==6);
+	int step = fit_step(W,H,max_w,max_h,max_out,has_alpha?3:2);
 	int w = (int)(W/step), h = (int)(H/step); if(w<1||h<1) return 0;
 
 	uint32_t stride = W*ch;                  /* defiltered bytes per scanline */
 	uint32_t outbytes = (uint32_t)w*h*2;
+	uint32_t alphabytes = has_alpha?(uint32_t)w*h:0;
 	/* RAM budget: 32 KB inflate window + input staging + 2 scanlines + output. */
-	if(heap_free() < reserve + outbytes + (uint32_t)stride*2 + TINFL_LZ_DICT_SIZE + 8192 + 4096)
+	if(heap_free() < reserve + outbytes + alphabytes + (uint32_t)stride*2 + TINFL_LZ_DICT_SIZE + 8192 + 4096)
 		return 0;
 
 	uint8_t  *dict = (uint8_t*)malloc(TINFL_LZ_DICT_SIZE);
@@ -170,8 +222,9 @@ static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_
 	uint8_t  *cur  = (uint8_t*)malloc(stride);
 	uint8_t  *prev = (uint8_t*)malloc(stride);
 	uint16_t *pix  = (uint16_t*)malloc(outbytes);
+	uint8_t  *alpha= has_alpha?(uint8_t*)malloc(alphabytes):NULL;
 	tinfl_decompressor *dec = (tinfl_decompressor*)malloc(sizeof(tinfl_decompressor));
-	int ok = (dict && inbuf && cur && prev && pix && dec);
+	int ok = (dict && inbuf && cur && prev && pix && dec && (!has_alpha||alpha));
 	if(ok){
 		memset(prev, 0, stride);
 		tinfl_init(dec);
@@ -219,21 +272,18 @@ static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_
 						if(ty < h){
 							for(int tx = 0; tx < w; tx++){
 								uint32_t x = (uint32_t)tx*step;
-								int r8,g8,b8;
+								int r8,g8,b8,a8=255;
 								switch(colortype){
 									case 0: { int g=cur[x]; r8=g8=b8=g; } break;
-									case 4: { int g=cur[x*2], a=cur[x*2+1];     /* gray+alpha over white */
-									          int v=(g*a + 255*(255-a))/255; r8=g8=b8=v; } break;
+									case 4: { int g=cur[x*2];r8=g8=b8=g;a8=cur[x*2+1]; } break;
 									case 2: { r8=cur[x*3]; g8=cur[x*3+1]; b8=cur[x*3+2]; } break;
-									case 6: { int a=cur[x*4+3];                  /* RGBA over white */
-									          r8=(cur[x*4]  *a + 255*(255-a))/255;
-									          g8=(cur[x*4+1]*a + 255*(255-a))/255;
-									          b8=(cur[x*4+2]*a + 255*(255-a))/255; } break;
+									case 6: { r8=cur[x*4];g8=cur[x*4+1];b8=cur[x*4+2];a8=cur[x*4+3]; } break;
 									case 3: { int idx=cur[x]; if(idx>=paln) idx=0;
 									          r8=pal[idx*3]; g8=pal[idx*3+1]; b8=pal[idx*3+2]; } break;
 									default: r8=g8=b8=0; break;
 								}
 								pix[ty*w + tx] = rgb565(r8,g8,b8);
+								if(alpha)alpha[ty*w+tx]=(uint8_t)a8;
 							}
 						}
 					}
@@ -250,13 +300,13 @@ static int decode_png(uint32_t base, uint32_t len, int max_w, int max_h, uint32_
 		if(fail || row < H) ok = 0;
 	}
 	free(dict); free(inbuf); free(cur); free(prev); free(dec);
-	if(!ok){ free(pix); return 0; }
-	*out = pix; *ow = w; *oh = h; return 1;
+	if(!ok){ free(pix);free(alpha); return 0; }
+	*out = pix;*oa=alpha; *ow = w; *oh = h; return 1;
 }
 
 /* ============================================================ SVG (nanosvg) ===== */
-static int decode_svg(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t reserve,
-                      uint16_t **out, int *ow, int *oh){
+static int decode_svg(uint32_t base, uint32_t len, int max_w, int max_h, uint32_t max_out, uint32_t reserve,
+                      uint16_t **out, uint8_t **oa, int *ow, int *oh){
 	if(len == 0 || len > 512u*1024) return 0;                 /* sane text-size cap */
 	if(heap_free() < reserve + len + 32768) return 0;          /* room for the text copy + parse */
 	char *txt = (char*)malloc(len + 1);
@@ -270,39 +320,44 @@ static int decode_svg(uint32_t base, uint32_t len, int max_w, int max_h, uint32_
 	float scale = sx < sy ? sx : sy; if(scale > 1.0f) scale = 1.0f;
 	int w = (int)(img->width*scale + 0.5f), h = (int)(img->height*scale + 0.5f);
 	if(w < 1) w = 1; if(h < 1) h = 1;
+	if(max_out){
+		int extra=1;
+		while((uint64_t)(w/extra)*(h/extra)*3u > max_out) extra++;
+		if(extra>1){ scale/=(float)extra; w/=extra; h/=extra; if(w<1)w=1;if(h<1)h=1; }
+	}
 
-	uint32_t rgba_bytes = (uint32_t)w*h*4, outbytes = (uint32_t)w*h*2;
-	if(heap_free() < reserve + rgba_bytes + outbytes + 16384){ nsvgDelete(img); return 0; }
+	uint32_t rgba_bytes = (uint32_t)w*h*4, outbytes = (uint32_t)w*h*2,alphabytes=(uint32_t)w*h;
+	if(heap_free() < reserve + rgba_bytes + outbytes + alphabytes + 16384){ nsvgDelete(img); return 0; }
 	uint8_t  *rgba = (uint8_t*)malloc(rgba_bytes);
 	uint16_t *pix  = (uint16_t*)malloc(outbytes);
+	uint8_t  *alpha= (uint8_t*)malloc(alphabytes);
 	NSVGrasterizer *rast = nsvgCreateRasterizer();
-	int ok = (rgba && pix && rast);
+	int ok = (rgba && pix && alpha && rast);
 	if(ok){
 		memset(rgba, 0, rgba_bytes);
 		nsvgRasterize(rast, img, 0, 0, scale, rgba, w, h, w*4);
 		for(int i = 0; i < w*h; i++){
-			int a = rgba[i*4+3];                              /* composite over white page bg */
-			int r = (rgba[i*4+0]*a + 255*(255-a))/255;
-			int g = (rgba[i*4+1]*a + 255*(255-a))/255;
-			int b = (rgba[i*4+2]*a + 255*(255-a))/255;
-			pix[i] = rgb565(r,g,b);
+			pix[i] = rgb565(rgba[i*4],rgba[i*4+1],rgba[i*4+2]);
+			alpha[i]=rgba[i*4+3];
 		}
 	}
 	if(rast) nsvgDeleteRasterizer(rast);
 	free(rgba); nsvgDelete(img);
-	if(!ok){ free(pix); return 0; }
-	*out = pix; *ow = w; *oh = h; return 1;
+	if(!ok){ free(pix);free(alpha); return 0; }
+	*out = pix;*oa=alpha; *ow = w; *oh = h; return 1;
 }
 
 /* ============================================================ dispatch ===== */
 int kf_img_decode(uint32_t base, uint32_t len, int max_w, int max_h,
-                  uint32_t reserve, uint16_t **out, int *ow, int *oh){
+                  uint32_t max_out, uint32_t reserve, uint16_t **out,uint8_t **alpha, int *ow, int *oh){
 	uint8_t sig[8]; if(len < 8) return 0;
+	*alpha=NULL;
 	kf_psram_read(base, sig, 8);
 	switch(kf_img_sniff(sig, 8)){
-		case 'j': return decode_jpeg(base, len, max_w, max_h, reserve, out, ow, oh);
-		case 'p': return decode_png (base, len, max_w, max_h, reserve, out, ow, oh);
-		case 's': return decode_svg (base, len, max_w, max_h, reserve, out, ow, oh);
+		case 'j': return decode_jpeg(base, len, max_w, max_h, max_out, reserve, out,alpha,ow,oh);
+		case 'p': return decode_png (base, len, max_w, max_h, max_out, reserve, out,alpha,ow,oh);
+		case 'g': return decode_gif (base, len, max_w, max_h, max_out, reserve, out,alpha,ow,oh);
+		case 's': return decode_svg (base, len, max_w, max_h, max_out, reserve, out,alpha,ow,oh);
 		default:  return 0;
 	}
 }

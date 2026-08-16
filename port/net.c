@@ -1,7 +1,7 @@
 // port/net.c — WiFi / networking for Kefyros (Pico 2 W, CYW43 + lwIP poll mode).
 //
-// Single STA, single connection at a time. The radio is brought up once at boot
-// (kf_net_init); kf_net_poll() is called every superloop tick to pump the CYW43
+// Single STA, single connection at a time. The radio is brought up lazily by the first
+// network app (kf_net_init); kf_net_poll() is called every superloop tick to pump the CYW43
 // async context (which also drives lwIP timeouts in NO_SYS poll mode) and to run a
 // small reconnect watchdog. Credentials are remembered in deskconf (config.txt on
 // the SD card) so kf_net_autoconnect() can reconnect on the next boot.
@@ -13,6 +13,7 @@
 #include "pico/stdlib.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/clocks.h"
+#include "hardware/pio.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/tcp.h"
@@ -46,6 +47,12 @@ static char           s_ip[16] = "0.0.0.0";
 static uint32_t       s_last_attempt_ms = 0;   /* for the reconnect backoff */
 static uint32_t       s_attempts = 0;
 
+/* The SDK's dynamic-divider setter only changes the value copied into the PIO
+   state machine when CYW43 first claims it. Remember that state machine so later
+   clk_sys changes can retune the live bus too. */
+static PIO            s_cyw_pio = NULL;
+static uint           s_cyw_sm = 0;
+
 /* --- scan state --- */
 static kf_scan_cb     s_scan_cb = NULL;
 static char           s_seen[24][33];          /* dedupe ring for one scan pass */
@@ -63,14 +70,41 @@ static uint32_t s_camp_ms = 0;                 /* current attempt's start time *
 
 static uint32_t now_ms(void){ return (uint32_t)(time_us_64() / 1000u); }
 
-/* Set the cyw43 PIO gSPI bus divider for the CURRENT clk_sys, targeting the proven ~28 MHz
-   window. bus = clk_sys / (2*div). 400 MHz -> div 7 (~28.6 MHz), 250 -> div 4 (~31), 150 -> div 3.
-   Must be re-applied on EVERY clk_sys change (see kf_net_reclock), or the bus runs at the old
-   ratio after a clock switch (e.g. ~50 MHz at 400 with the eco-era div) and a live link drops. */
+/* Match the proven Pico W/Pico 2 W gSPI rate exactly: 31.25 MHz. The SDK's default
+   is clk_sys/(2*2), i.e. 31.25 MHz on a 125 MHz Pico W and 37.5 MHz on a stock
+   150 MHz Pico 2 W. At our 250 MHz radio tier divider 4 gives the conservative
+   31.25 MHz timing that the default spi_gap01_sample0 PIO program expects.
+
+   Use the fractional divider at other clock tiers rather than rounding divider 4
+   up to 5: 25 MHz was marginal with that high-speed sampling program, causing a
+   train of 500 ms CYW43 ioctl timeouts that looked like a 20-30 second app hang. */
+#define KF_CYW43_BUS_HZ 31250000u
 static void set_bus_div(void){
-	uint32_t div = (clock_get_hz(clk_sys) + (2u * 28000000u) - 1u) / (2u * 28000000u);  /* ceil: never under-divide (>28MHz bus is out of spec) */
-	if(div < 2u) div = 2u;
-	cyw43_set_pio_clkdiv_int_frac8(div, 0);
+	uint64_t denom = 2ull * KF_CYW43_BUS_HZ;
+	uint32_t div256 = (uint32_t)(((uint64_t)clock_get_hz(clk_sys) * 256u + denom / 2u) / denom);
+	if(div256 < 2u * 256u) div256 = 2u * 256u;
+	uint32_t div_int = div256 >> 8;
+	uint8_t div_frac8 = (uint8_t)div256;
+
+	/* Used by cyw43_spi_init() when the bus has not been claimed yet. */
+	cyw43_set_pio_clkdiv_int_frac8(div_int, div_frac8);
+	/* The SDK setter does not touch an already-running SM, so do that explicitly. */
+	if(s_cyw_pio) pio_sm_set_clkdiv_int_frac8(s_cyw_pio, s_cyw_sm, div_int, div_frac8);
+}
+
+static void remember_cyw43_sm(const uint32_t claimed_before[NUM_PIOS]){
+	for(uint i=0; i<NUM_PIOS; ++i){
+		PIO pio = pio_get_instance(i);
+		uint32_t claimed_now = 0;
+		for(uint sm=0; sm<NUM_PIO_STATE_MACHINES; ++sm)
+			if(pio_sm_is_claimed(pio, sm)) claimed_now |= 1u << sm;
+		uint32_t added = claimed_now & ~claimed_before[i];
+		if(added){
+			s_cyw_pio = pio;
+			s_cyw_sm = (uint)__builtin_ctz(added);
+			return;
+		}
+	}
 }
 
 /* ===== remembered-network store (deskconf slots, MRU order) ===== */
@@ -137,6 +171,18 @@ static void update_ip(void){
 	else   snprintf(s_ip, sizeof s_ip, "0.0.0.0");
 }
 
+/* DHCP commonly supplies just one DNS server (usually the router). Keep that
+   resolver in slot 0, but populate an otherwise-empty slot 1 with a direct
+   fallback. lwIP automatically advances to the next configured server after
+   the primary exhausts its retries. If DHCP supplied no resolver at all, make
+   the fallback primary as well. */
+static void ensure_dns_fallback(void){
+	ip_addr_t fallback;
+	IP_ADDR4(&fallback, 1, 1, 1, 1);             /* Cloudflare DNS */
+	if(ip_addr_isany_val(*dns_getserver(0))) dns_setserver(0, &fallback);
+	if(ip_addr_isany_val(*dns_getserver(1))) dns_setserver(1, &fallback);
+}
+
 /* (re)issue the async join to the current target. Leaves any prior association first
    so each attempt starts from a clean slate (no half-finished handshake confusing the
    chip). */
@@ -170,9 +216,19 @@ static void sta_up(void){
 
 void kf_net_init(void){
 	if(s_present) return;            /* idempotent — safe to call lazily/repeatedly */
-	/* Set the cyw43 PIO bus divider for the CURRENT clk_sys, targeting ~28 MHz (the
-	   proven window for wifi_on's handshake). Dynamic so WiFi works at any clock we
-	   bring it up at; kf_net_reclock() re-applies it whenever the OS changes clk_sys. */
+	/* cyw43_arch_init() claims and configures the PIO state machine internally.
+	   Snapshot claims BEFORE that call so remember_cyw43_sm() can identify the
+	   newly-added live SM. Taking this snapshot after init silently found nothing:
+	   later 250->400 MHz reclocks updated only the SDK's value for a future init,
+	   leaving the running gSPI bus at ~62.5 MHz and corrupting ordinary traffic
+	   (most visibly DNS) while the firmware still reported LINK_UP. */
+	uint32_t claimed_before[NUM_PIOS];
+	for(uint i=0; i<NUM_PIOS; ++i){
+		claimed_before[i] = 0;
+		for(uint sm=0; sm<NUM_PIO_STATE_MACHINES; ++sm)
+			if(pio_sm_is_claimed(pio_get_instance(i), sm)) claimed_before[i] |= 1u << sm;
+	}
+	/* Set the divider before cyw43 claims/configures its PIO state machine. */
 	set_bus_div();
 	/* IMPORTANT: bring the radio up only at a WiFi-safe clock (<=~270 MHz). cyw43's
 	   STA bring-up (wifi_on's ioctl handshake) STALLS ~60s then fails above the ceiling
@@ -182,8 +238,11 @@ void kf_net_init(void){
 		s_present = 0; s_state = KF_NET_OFF; return;
 	}
 	sta_up();
+	remember_cyw43_sm(claimed_before);
+	set_bus_div();                    /* apply to the now-live SM as well */
 	s_present = 1;
 	s_state = KF_NET_OFF;
+	tb_net_up();                      /* RAM bar: bucket the radio stack's heap usage */
 }
 
 int kf_net_present(void){ return s_present; }
@@ -306,6 +365,11 @@ void kf_time_apply_locale(void){
 }
 
 int kf_time_synced(void){ return s_time_ok; }
+
+uint32_t kf_time_unix(void){
+	if(!s_time_ok) return 0;
+	return (uint32_t)(s_time_base_utc + (time_t)((time_us_64() - s_time_base_us) / 1000000ull));
+}
 
 int kf_time_local(struct tm *out){
 	if(!s_time_ok) return 0;
@@ -451,6 +515,7 @@ void kf_net_poll(void){
 		if(s_state != KF_NET_ONLINE){ s_state = KF_NET_ONLINE; s_attempts = 0; s_badauth = 0; }
 		if(s_camp == CAMP_SCAN || s_camp == CAMP_TRY) s_camp = CAMP_DONE;   /* campaign won */
 		update_ip();
+		ensure_dns_fallback();          /* preserve DHCP DNS, add 1.1.1.1 if a slot is empty */
 		sntp_begin();                  /* start time sync once we're online */
 		bench_tick();
 		return;
@@ -497,6 +562,7 @@ const char *kf_net_state_str(void){
 
 const char *kf_net_ip(void){ return s_ip; }
 const char *kf_net_ssid(void){ return s_ssid; }
+int kf_net_rssi(void){ int32_t r=0; return s_present && cyw43_wifi_get_rssi(&cyw43_state,&r)==0 ? (int)r : 0; }
 
 /* --- scan --- */
 static int scan_result(void *env, const cyw43_ev_scan_result_t *r){

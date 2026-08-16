@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define KAPI_ABI    1
-#define KAPI_MINOR  1     /* minor 1: appended k_math (kernel libm) to the root table */
+#define KAPI_MINOR  2     /* managed UI, HTTP/device/SSH services */
 
 /* ===== scalar types ===== */
 typedef uint16_t kf_color;      /* RGB565, panel-native                              */
@@ -33,6 +33,7 @@ typedef struct kf_tls_s*    kf_tls;
 typedef struct kf_file_s*   kf_file;
 typedef struct kf_dir_s*    kf_dir;
 typedef struct kf_view_s*   kf_view;   /* windowed direct-blit content viewport       */
+typedef struct kf_ssh_s*    kf_ssh;
 typedef struct kui_obj_s*   kui_obj;   /* Layer-1 widget                              */
 typedef uint32_t            kf_mem;    /* PSRAM block handle (0 = invalid)            */
 
@@ -233,14 +234,63 @@ struct k_ui {
   void (*set_text)(kui_obj, const char*); const char* (*get_text)(kui_obj);
   void (*msgbox)(const char* title, const char* msg);
   kf_canvas (*canvas)(kui_obj, int w, int h);      /* bridge to k_gfx for custom drawing   */
+  /* appended in minor 2: enough layout/state/event control for first-class apps */
+  void (*destroy)(kui_obj);
+  void (*set_pos)(kui_obj, int x, int y); void (*set_size)(kui_obj, int w, int h);
+  void (*align)(kui_obj, int align, int xoff, int yoff);
+  void (*flex)(kui_obj, int flow, int gap); void (*grow)(kui_obj, int amount);
+  void (*hidden)(kui_obj, int yes); void (*enabled)(kui_obj, int yes);
+  void (*set_value)(kui_obj, int); int (*get_value)(kui_obj);
+  void (*focus)(kui_obj);
+  void (*on_change)(kui_obj, void (*)(void*), void*);
+  void (*set_colors)(kui_obj, kf_color fg, kf_color bg);
+  void (*set_font)(kui_obj, int px);
 };
+
+enum { KUI_ALIGN_CENTER, KUI_ALIGN_TOP_LEFT, KUI_ALIGN_TOP_MID, KUI_ALIGN_TOP_RIGHT,
+       KUI_ALIGN_LEFT_MID, KUI_ALIGN_RIGHT_MID, KUI_ALIGN_BOTTOM_LEFT,
+       KUI_ALIGN_BOTTOM_MID, KUI_ALIGN_BOTTOM_RIGHT };
+enum { KUI_FLEX_NONE, KUI_FLEX_ROW, KUI_FLEX_COLUMN, KUI_FLEX_ROW_WRAP, KUI_FLEX_COLUMN_WRAP };
 
 struct k_http {
   void* (*get)(const char* url); void* (*post)(const char* url, const void*, int);
   int (*poll)(void* req, void* buf, int n); void (*free)(void* req);
+  /* appended in minor 2 */
+  void* (*post_headers)(const char* url, const char* headers, const void*, int);
+  int (*status)(void* req); const char* (*error)(void* req); const char* (*final_url)(void* req);
 };
 
+enum { KDOC_TEXT=0, KDOC_MARKDOWN=1, KDOC_HTML=2 };
 struct k_doc { void (*render)(kf_canvas, const char* markup, int fmt); };
+
+/* Kernel-owned hardware/configuration services used by SD-hosted system apps. */
+struct k_device {
+  const char* (*cfg_get)(const char* key, const char* def);
+  int (*cfg_get_int)(const char* key, int def);
+  void (*cfg_set)(const char* key, const char* value);
+  void (*cfg_set_int)(const char* key, int value);
+  kf_err (*set_backlight)(int lcd_0_9, int keyboard_0_3);
+  kf_err (*wifi_scan)(void (*found)(void*, const char* ssid, int rssi, int secure), void* ud);
+  int (*wifi_scan_active)(void);
+  kf_err (*wifi_connect)(const char* ssid, const char* password);
+  void (*wifi_forget)(void);
+  const char* (*wifi_ssid)(void); int (*wifi_state)(void);
+  void (*sfx_play)(const char* id);
+  void (*power)(int action); /* 0 shutdown, 1 reboot, 2 BOOTSEL */
+};
+
+/* High-level SSH service: keeps Monocypher and the SSH state machine kernel-side. */
+struct k_ssh {
+  kf_ssh (*connect)(const char* host, int port, const char* user, const char* password,
+                    const uint8_t* ed25519_seed_or_null,
+                    void (*on_data)(void*, const uint8_t*, int),
+                    void (*on_state)(void*, int state, const char* detail),
+                    int (*check_hostkey)(void*, const uint8_t pub[32], const char* fingerprint),
+                    void* ud);
+  int (*poll)(kf_ssh); int (*send)(kf_ssh, const void*, int);
+  void (*resize)(kf_ssh, int cols, int rows);
+  int (*state)(kf_ssh); const char* (*error)(kf_ssh); void (*close)(kf_ssh);
+};
 
 /* ===================================================================== */
 /* Root table + entry point                                              */
@@ -266,6 +316,9 @@ typedef struct kapi {
   const struct k_doc  *doc;
   /* ---- appended at minor 1 (after doc, so minor-0 offsets are unchanged) ---- */
   const struct k_math *math;   /* C math library (kernel libm) — never NULL on minor>=1 */
+  /* ---- appended at minor 2 ---- */
+  const struct k_device *device;
+  const struct k_ssh *ssh;
 } kapi;
 
 /* The app's entry point. Return value is the exit code. */

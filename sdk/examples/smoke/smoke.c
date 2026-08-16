@@ -20,7 +20,7 @@ int app_main(const kapi *k){
     kapi_rt_init(k);                       /* arm the stdlib before any malloc/printf/math */
 
     int w, h; k->gfx->screen_size(&w, &h);
-    /* Small canvas (must fit the 64 KB arena's free space — a full-screen 320x320 = 200 KB
+    /* Small canvas (must fit the 96 KB arena's free space — a full-screen 320x320 = 200 KB
        can't be carved and the heap fallback fails while the launcher is resident). */
     int cw = w, ch = 96;                          /* 320x96x2 = 60 KB, fits the arena */
     C = k->gfx->canvas(0, 28, cw, ch);            /* just below the topbar */

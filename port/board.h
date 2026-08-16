@@ -22,6 +22,17 @@
 #define KF_SD_CS          17
 #define KF_SD_DET         22      /* card-detect (active low) */
 
+/* The PicoCalc powers the SD socket from ALDO1. Identification must run at
+   <=400 kHz; the driver enforces that independently of this post-init transfer
+   rate. Both modules use the normal 24 MHz SD-SPI data clock. */
+#if defined(PIMORONI_PICO_PLUS2_W_RP2350)
+#define KF_SD_SPI_HZ      24000000u
+#define KF_SD_USE_CRC     0
+#else
+#define KF_SD_SPI_HZ      24000000u
+#define KF_SD_USE_CRC     0
+#endif
+
 /* ---- Keyboard: STM32 southbridge on uart1 (jcsmith UART_PICO_INTERFACE) ----
    Stock PicoCalc V2.0: STM32 PC10(TX)->Pico GP9, PC11(RX)<-Pico GP8 => host uart1. */
 #define KF_KBD_UART       uart1
@@ -62,5 +73,9 @@
 #define KF_SYS_KHZ        250000      /* cold-boot clock; warm-ramps to the normal 400 MHz */
 #define KF_VREG_MV        1200        /* VREG_VOLTAGE_1_20 (boot rail; raised to 1.30/1.35 to ramp) */
 
+#if defined(PIMORONI_PICO_PLUS2_W_RP2350)
+#define KF_BOARD_NAME     "PicoCalc / Pimoroni Pico Plus 2 W"
+#else
 #define KF_BOARD_NAME     "PicoCalc / Pico 2 W"
+#endif
 #endif

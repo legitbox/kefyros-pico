@@ -36,11 +36,13 @@ SD       = "/mnt/e/kefyros"
 WALLS    = os.path.join(SD, "wallpapers")
 ICONS    = os.path.join(SD, "icons")
 NOTES    = os.path.join(SD, "notes")
+GBROMS   = os.path.join(SD, "roms", "gb")
+GBSAVES  = os.path.join(SD, "saves", "gb")
 DL       = "/mnt/c/Users/Matas/Downloads"
 LVGLIMG  = "/home/legitbox/kefyros-pico/lib/lvgl/scripts/LVGLImage.py"
 TMP      = "/tmp/kf_stage"
 
-for d in (WALLS, ICONS, NOTES, TMP):
+for d in (WALLS, ICONS, NOTES, GBROMS, GBSAVES, TMP):
     os.makedirs(d, exist_ok=True)
 
 # ---- wallpapers: aspect-preserving 'contain' fit into 320x320, then RGB565 .bin ----
@@ -68,6 +70,7 @@ ICON_MAP = {
     "settings": "settings.png", "appearance": "wallpaper.png",
     "editor": "editor.png", "electronics": "resistor.png",
     "music": "music.png",     # FLAC player tile (recursively indexes /kefyros/music)
+    "gb": "gb.png",           # Game Boy / Game Boy Color emulator
 }
 import shutil
 for appid, fn in ICON_MAP.items():

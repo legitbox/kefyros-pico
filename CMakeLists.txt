@@ -27,6 +27,15 @@ file(GLOB UI_SRC  ${CMAKE_CURRENT_LIST_DIR}/ui/*.c)
 # port/tls.c actually pulls in.
 file(GLOB_RECURSE BEARSSL_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/lib/bearssl/src/*.c)
 
+# The Pimoroni Pico Plus 2 W has an onboard APS6404 on RP2350 QMI window 1.
+# Use that memory-mapped bus there; stock Pico 2 W builds keep using the
+# PicoCalc mainboard's GPIO/PIO PSRAM.
+if(PICO_BOARD STREQUAL "pimoroni_pico_plus2_w_rp2350")
+    set(KF_PSRAM_SRC port/psram_qmi.c)
+else()
+    set(KF_PSRAM_SRC port/psram.c)
+endif()
+
 add_executable(kefyros
     src/main.c
     port/disp.c
@@ -38,7 +47,7 @@ add_executable(kefyros
     port/sys.c
     port/fault.c
     port/audio.c
-    port/psram.c
+    ${KF_PSRAM_SRC}
     port/net.c
     port/http.c
     port/html.c
@@ -53,21 +62,51 @@ add_executable(kefyros
     port/imgdec.c
     port/kapi.c                    # KAPI class-1 app loader + vtable glue
     lib/miniz/miniz_tinfl.c        # streaming DEFLATE inflate for the PNG decoder
+	lib/peanut-gbc/minigb_apu.c     # GB/GBC APU (Peanut frontend, MIT)
     ${APP_SRC}
     ${UI_SRC}
     ${LVGL_SRC}
     ${BEARSSL_SRC}
 )
 
+# Reserve the top 48 KiB of SRAM at a stable address for SD-loaded KAPI apps.
+# The SDK's default linker map lets the heap grow to 0x20080000; shortening its
+# RAM region to 464 KiB moves __HeapLimit to 0x20074000 and leaves
+# [0x20074000,0x20080000) exclusively for the loader.  g_kapi_arena is an
+# absolute linker symbol, so a .kx remains loadable after unrelated firmware
+# changes instead of needing to be relinked against every kefyros.elf.
+#
+# 48 KiB (NOT 96/64): a 96 KiB arena left only ~101 KB of kernel heap (missing
+# launcher icons, Spineko "..." low-memory page, empty Music library); even at
+# 64 KiB the built-ins stayed marginal — calc's 3D grapher (~80 KB transient)
+# OOM'd on a clean boot and any browser session starved music/calc. 48 KiB
+# restores ~147 KB of kernel heap (3D graph fits, ~37 KB music headroom, the
+# browser's 48 KB render floor has real margin) while every shipped .kx still
+# fits (largest: calc REPL 22.5 KB, 2x headroom). If full calc/music KAPI ports
+# (81-83 KiB) ever land, they replace the built-ins and the arena can grow again.
+set(KF_KAPI_MEMMAP "${CMAKE_CURRENT_BINARY_DIR}/memmap_kapi.ld")
+file(READ "${PICO_SDK_PATH}/src/rp2_common/pico_crt0/rp2350/memmap_default.ld" KF_MEMMAP_TEXT)
+string(REPLACE
+    "RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 512k"
+    "RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 464k"
+    KF_MEMMAP_TEXT "${KF_MEMMAP_TEXT}")
+string(REPLACE
+    "ENTRY(_entry_point)"
+    "g_kapi_arena = 0x20074000;\ng_kapi_arena_end = 0x20080000;\n\nENTRY(_entry_point)"
+    KF_MEMMAP_TEXT "${KF_MEMMAP_TEXT}")
+string(FIND "${KF_MEMMAP_TEXT}" "RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 464k" KF_KAPI_RAM_FOUND)
+string(FIND "${KF_MEMMAP_TEXT}" "g_kapi_arena = 0x20074000" KF_KAPI_SYMBOL_FOUND)
+if(KF_KAPI_RAM_FOUND EQUAL -1 OR KF_KAPI_SYMBOL_FOUND EQUAL -1)
+    message(FATAL_ERROR "RP2350 SDK memmap changed; refusing to build with an unreserved KAPI arena")
+endif()
+file(WRITE "${KF_KAPI_MEMMAP}" "${KF_MEMMAP_TEXT}")
+pico_set_linker_script(kefyros "${KF_KAPI_MEMMAP}")
+
 target_compile_definitions(kefyros PRIVATE
     LV_CONF_INCLUDE_SIMPLE
-    # CYW43 PIO-SPI bus clock divider. The SDK default (INT=2) targets ~125-150 MHz
-    # clk_sys (~37 MHz bus). We run clk_sys at 450 MHz, so scale the divider up to keep
-    # the wireless bus near ~28 MHz (450/(2*8)) — calm enough that radio bring-up at
-    # boot stays clean (the radio still won't ASSOCIATE above ~300 MHz, but this keeps
-    # init from choking/hanging). Bus = clk_sys/(2*div). DYNAMIC so port/net.c can pick the
-    # divider at bring-up for whatever clock we're at (targets ~28 MHz, the proven window;
-    # too-slow a bus made wifi_on fail). Lets WiFi work at 150 or 400 without recompiling.
+    # CYW43 PIO-SPI bus clock divider. DYNAMIC lets port/net.c hold the gSPI bus at the
+    # known-good Pico W rate (31.25 MHz) at every clk_sys tier, including by updating
+    # the live PIO state machine after the SDK has claimed it.
     CYW43_PIO_CLOCK_DIV_DYNAMIC=1
     # CYW43 read-sample timing: spi_gap010_sample1 (latest sample) BROKE bring-up at
     # 400 MHz (itf never came up) — the default spi_gap01_sample0 reads reliably, so
@@ -82,6 +121,8 @@ target_compile_definitions(kefyros PRIVATE
     # gracefully (skip the image / amber assert) rather than hard-faulting mid-decode
     # on a fragmented heap — which is exactly what crashed while scrolling Wikipedia.
     PICO_MALLOC_PANIC=0
+	MINIGB_APU_AUDIO_FORMAT_S16SYS=1
+	AUDIO_SAMPLE_RATE=32768
     # Keep clk_peri attached to clk_sys when we overclock. The SDK default parks clk_peri
     # on the 48 MHz USB PLL after set_sys_clock_khz(), which HARD-CAPS every SPI at 24 MHz
     # (clk_peri/2) — the LCD was stuck at 24 MHz no matter what we requested. With this on,

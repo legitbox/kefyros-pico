@@ -40,8 +40,12 @@
 /* Fonts: Monocraft (generated, ui/lv_font_monocraft_*.c) is the whole UI.
    Montserrat 14 kept only as a safety fallback. Terminal uses font8x8 directly. */
 #define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_CUSTOM_DECLARE  LV_FONT_DECLARE(lv_font_plex_mono_13) LV_FONT_DECLARE(lv_font_plex_mono_20)
 #define LV_FONT_DEFAULT &lv_font_plex_mono_13
+#define LV_USE_TINY_TTF 1
+#define LV_TINY_TTF_FILE_SUPPORT 1
+#define LV_TINY_TTF_CACHE_GLYPH_CNT 12  /* SD-backed faces: tiny bounded glyph LRU */
 
 /* Keep the default theme; no demos/examples. */
 #define LV_USE_DEMO_WIDGETS 0
@@ -57,6 +61,8 @@
 #define LV_USE_TJPGD        1     /* baseline JPEG (tiny decoder) */
 #define LV_USE_LODEPNG      1     /* PNG (self-contained, no libpng/zlib) */
 #define LV_USE_BMP          1
+#define LV_USE_GIF          1     /* gifdec also backs Spineko's bounded first-frame decoder */
+#define LV_GIF_CACHE_DECODE_DATA 0
 #define LV_USE_FS_POSIX     1
 #define LV_FS_POSIX_LETTER  'A'
 #define LV_FS_POSIX_PATH    ""

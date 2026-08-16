@@ -4,13 +4,13 @@
  * there are zero load-time relocations. All kernel access is through the `kapi*` pointer
  * passed to app_main() at runtime — the app links NO kernel symbols.
  *
- * ARENA base/length are PROVISIONAL (top 128 KB of the 512 KB RAM region); they must match
- * the kernel's reserved arena once the loader lands. mkkx records the base in the .kx header.
+ * ABI 1 reserves the top 48 KiB of RP2350 SRAM at a stable address. This is part of the
+ * executable ABI: compatible apps do not move when the firmware is rebuilt.
  */
 ENTRY(app_main)
 
 MEMORY {
-  ARENA (rwx) : ORIGIN = 0x20060000, LENGTH = 128K
+  ARENA (rwx) : ORIGIN = 0x20074000, LENGTH = 48K
 }
 
 SECTIONS {

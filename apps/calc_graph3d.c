@@ -22,7 +22,8 @@
 extern char font8x8_basic[128][8];
 #define GW 320
 #define GH KF_CONTENT_H          /* fit under the persistent OS top bar */
-#define NG 26
+#define NG 24                     /* 24x24 grid: arena ~47 KB (26x26 was ~55 KB and OOM'd on
+                                     the 147 KB heap with the form screen still resident) */
 #define NQ ((NG-1)*(NG-1))
 #define RGB(r,g,b) (uint16_t)((((r)&0xf8)<<8)|(((g)&0xfc)<<3)|((b)>>3))
 #define STRIP_H 40

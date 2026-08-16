@@ -4,7 +4,7 @@
  * OS only through the passed `const kapi *k`. It links NOTHING from the kernel,
  * calls NO libc (no math, no malloc) — everything is fixed-point + static arrays.
  *
- * It is WINDOWED: it owns a single 256x176 canvas that the kernel composites
+ * It is WINDOWED: it owns a single 192x144 canvas that the kernel composites
  * BELOW its live topbar (clock/battery/wifi). So while these scenes animate, the
  * OS clock above keeps ticking — proof the kernel stays alive under us.
  *
@@ -14,7 +14,7 @@
  *   3 COPPER     — Amiga-style raster bars sliding on sine paths.
  *   4 SCROLLER   — big-font greetz scrolling horizontally with a sine wobble.
  *
- * Static RAM budget is dominated by the canvas (90 KB, kernel-owned) plus our own
+ * Static RAM budget is dominated by the canvas (54 KB, kernel-owned) plus our own
  * little buffers: a 256-entry sin table, the half-res plasma line buffer, and the
  * star array. Total app-side static data is well under 4 KB (see tally at EOF).
  */
@@ -30,7 +30,7 @@ static kf_canvas   CV;              /* our live windowed canvas           */
 static kf_font     F_HUD;           /* mono 13 — HUD line + labels        */
 static kf_font     F_BIG;           /* mono 20 — scroller text            */
 
-#define CW   192                    /* canvas width  (RGB565, carved from the 64 KB arena) */
+#define CW   192                    /* canvas width  (RGB565, carved from the 96 KB arena) */
 #define CH   144                    /* canvas height (192*144*2 = 55 KB)  */
 #define HW   (CW/2)                 /* half-res width  = 128              */
 #define HH   ((CH-12)/2)            /* half-res height (leave HUD row)    */
@@ -346,7 +346,7 @@ int app_main(const kapi *k){
 
     build_sin();                                /* freestanding trig table  */
 
-    /* Centre the 256x176 canvas horizontally, just under the 24px topbar.  */
+    /* Centre the 192x144 canvas horizontally, just under the 24px topbar.  */
     int sw, sh;
     k->gfx->screen_size(&sw, &sh);
     int cx = (sw - CW) / 2; if(cx < 0) cx = 0;
@@ -373,7 +373,7 @@ int app_main(const kapi *k){
 }
 
 /* ----------------------------------------------------------------------
- * App-side static RAM tally (excludes the kernel-owned 90 KB canvas):
+ * App-side static RAM tally (excludes the kernel-owned 54 KB canvas):
  *   SIN[256]      int16   =  512 B
  *   plasma_row    256xu16 =  512 B
  *   stars[256]    6 B each= 1536 B
@@ -381,6 +381,6 @@ int app_main(const kapi *k){
  *   scalars/ptrs           <  64 B
  *   --------------------------------
  *   total .data/.bss      ~ 3.1 KB   (well under any sane budget)
- * The 90 KB RGB565 canvas (256*176*2) is the kernel's compositor buffer,
+ * The 54 KB RGB565 canvas (192*144*2) is the kernel's compositor buffer,
  * the documented ceiling, and is NOT double-allocated by us.
  * -------------------------------------------------------------------- */

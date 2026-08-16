@@ -40,7 +40,9 @@
 #define VIS_ROWS    11             /* visible wheel rows (odd; center is the slit) */
 #define ROW_CENTER  (VIS_ROWS/2)
 #define LEFTW       150            /* left wheel column width */
-#define THUMB       120            /* cover thumbnail max edge (px) */
+#define THUMB       96             /* cover thumbnail max edge (px); 120 cost ~29 KB heap
+                                      per open — 96 (~18 KB) keeps the decode peak low enough
+                                      for the dr_flac + audio-ring mallocs to coexist */
 #define CHUNK       512            /* PCM frames per decode pump step */
 
 /* one library entry; stored in PSRAM as a flat array of these. */
@@ -67,6 +69,12 @@ static int       g_built;                 /* index built this boot */
 static uint32_t  g_idx_base = 0xFFFFFFFFu; /* PSRAM base of the rec array */
 static int       g_n;                     /* number of tracks */
 static int       g_full;                  /* hit MAX_TRACKS */
+
+void music_psram_invalidate(void){
+	g_idx_base = 0xFFFFFFFFu;
+	g_built = 0;
+	g_n = g_full = 0;
+}
 static uint16_t  g_sorted[MAX_TRACKS];    /* display order -> rec index */
 static uint16_t  g_order[MAX_TRACKS];     /* play order (display positions) */
 static int       g_order_pos;             /* cursor in g_order */

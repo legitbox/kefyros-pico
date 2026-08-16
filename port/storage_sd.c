@@ -35,6 +35,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"       // MHZ (used by blockdevice/sd.h CONF_SD_TRX_FREQUENCY)
 
@@ -45,15 +46,14 @@
 #include "filesystem/fat.h"        // filesystem_fat_create
 #include "filesystem/vfs.h"        // fs_mount
 
-// Steady-state SPI clock for SD transfers. blockdevice/sd.h defines
-// CONF_SD_TRX_FREQUENCY = 24 MHz; that is conservative and well within the SD
-// SPI-mode 25 MHz ceiling. The driver self-throttles to <=400 kHz during the
-// init handshake regardless of this value.
-#define KFS_SD_HZ   CONF_SD_TRX_FREQUENCY
+// Steady-state SPI clock and CRC policy are target-specific in board.h. The
+// driver self-throttles to <=400 kHz during the init handshake regardless.
+#define KFS_SD_HZ   KF_SD_SPI_HZ
 
 static int   mounted = 0;
 static blockdevice_t *sd_bd = NULL;
 static filesystem_t  *fat_fs = NULL;
+static int card_was_absent = 1;
 
 // mkdir that tolerates an already-existing directory.
 static int ensure_dir(const char *path) {
@@ -75,9 +75,26 @@ int kfs_mount(void) {
     gpio_pull_up(KF_SD_DET);
     if (gpio_get(KF_SD_DET)) {
         printf("kfs: no card (DET high)\n");
+        card_was_absent = 1;
         mounted = 0;
         return -1;
     }
+
+    /* On cold boot and hot insertion, keep CS inactive while the mechanical
+     * contacts and the card's internal power-on reset settle. Without this,
+     * the 2 Hz gate retries can repeatedly catch a half-seated card. */
+    gpio_init(KF_SD_CS);
+    gpio_put(KF_SD_CS, 1);
+    gpio_set_dir(KF_SD_CS, GPIO_OUT);
+    gpio_pull_up(KF_SD_CS);
+    if (card_was_absent) {
+        sleep_ms(100);
+        if (gpio_get(KF_SD_DET)) {
+            mounted = 0;
+            return -1;
+        }
+    }
+    card_was_absent = 0;
 
     // Create the SD-SPI block device on spi0 with the PicoCalc SD pins.
     // Arg order is (spi, mosi/TX, miso/RX, sck, cs, hz, enable_crc).
@@ -87,7 +104,7 @@ int kfs_mount(void) {
                                   KF_SD_SCK,
                                   KF_SD_CS,
                                   KFS_SD_HZ,
-                                  false);       // CRC off (speed; matches examples)
+                                  KF_SD_USE_CRC != 0);
     if (sd_bd == NULL) {
         printf("kfs: blockdevice_sd_create failed\n");
         mounted = 0;

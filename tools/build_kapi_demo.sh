@@ -1,23 +1,21 @@
 #!/bin/bash
-# Build a class-1 .kx linked at the CURRENT kernel's arena address.
-# Run AFTER build.sh (needs build/kefyros.elf). Usage: build_kapi_demo.sh <appdir>
+# Build a class-1 .kx linked at KAPI ABI 1's stable arena address.
+# No firmware build or reflash is required. Usage: build_kapi_demo.sh <appdir>
 set -e
 ROOT=/home/legitbox/kefyros-pico
 SDK="$ROOT/sdk"
 APP="${1:-$SDK/examples/demo}"
 NAME="$(basename "$APP")"
 
-CC="$(grep -m1 '^CMAKE_C_COMPILER:FILEPATH=' "$ROOT/build/CMakeCache.txt" | cut -d= -f2)"
-[ -x "$CC" ] || CC=/usr/bin/arm-none-eabi-gcc
+CC=/usr/bin/arm-none-eabi-gcc
 PREFIX="${CC%gcc}"
 
-ARENA="$("${PREFIX}nm" "$ROOT/build/kefyros.elf" | awk '$3=="g_kapi_arena"{print "0x"$1; exit}')"
-[ -n "$ARENA" ] || { echo "ERROR: g_kapi_arena not found in kefyros.elf"; exit 1; }
-echo "kernel arena base: $ARENA"
+ARENA=0x20074000
+echo "stable KAPI arena base: $ARENA"
 
 cat > /tmp/kapi_app.ld <<EOF
 ENTRY(app_main)
-MEMORY { ARENA (rwx) : ORIGIN = $ARENA, LENGTH = 64K }
+MEMORY { ARENA (rwx) : ORIGIN = $ARENA, LENGTH = 48K }
 SECTIONS {
   . = ORIGIN(ARENA);
   .text : { KEEP(*(.text.app_main)) *(.text*) *(.rodata*) } > ARENA

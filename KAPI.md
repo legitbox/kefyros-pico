@@ -22,16 +22,39 @@ stock widgets — so KAPI is split into two layers and serves two execution prof
 The GB emulator touches *zero* of Layer 1. Files touches almost nothing *but* Layer 1.
 Same API, opposite ends.
 
-**What migrates:** almost all non-essential apps become class-1 KAPI bundles on SD —
-**including the calculator** (which must port at ~0% performance loss, §7.2). Class-0 stays
-minimal: the kernel, the launcher, and the **system-config apps that hold the privileges
-class-1 apps are denied** (Settings, WiFi — §7.1), plus a recovery Files for when `/apps`
-is broken.
+**What migrates:** the complete app suite becomes KAPI bundles on SD, **including Calculator,
+Settings and WiFi**. Class 0 retains only the kernel/drivers, launcher, recovery UI and stable
+services. System apps configure hardware through `k_device`; they do not link drivers or touch
+registers directly.
 
 > **Design note:** KAPI invents no capabilities — it draws a stable vtable around
 > kernel facilities that already exist (`kf_audio_*`, `disp_pause_core1`,
 > `define_region_spi`/`spi_write_fast`/`spi_set_baudrate`, `kf_clock_*`, `imgdec`,
 > `kf_net_poll`, `uart_pop_key`, the PSRAM block store). See the conformance matrix (§12).
+
+### 0.1 Parity is the ship gate
+
+Loading from SD is not a migration by itself. A KAPI app replaces its built-in version only
+after the same user-visible app passes all of these on hardware:
+
+1. Same screens, controls, key-up/key-down behavior, topbar integration and error reporting.
+2. Same render rate and compute performance at the same clock tier (target: no measurable
+   regression; Calculator graphs are the first reference workload).
+3. Same filesystem, network, TLS, image, PSRAM and audio features; no stub-backed substitute.
+4. Same screen-off, `keep_clock`/`keep_awake`, exit/cleanup and low-memory behavior.
+5. The `.kx` can be replaced on the SD card without rebuilding or reflashing the kernel.
+
+**Current implementation status (2026-08-04): service-complete enough to begin full ports,
+not yet hardware parity-certified.** ABI 1 minor 2 provides a stable 48 KiB arena, managed UI,
+HTTP, document rendering, sockets/DNS/TLS, image codecs, app-scoped PSRAM, audio/tone, clipped
+canvas/direct-panel views, filesystem, math, system information, WiFi/config/backlight/power
+device services, manifest discovery and lifecycle cleanup. Firmware and SDK conformance apps
+build. Remaining ship gates are on-device service tests, full-app ports and side-by-side parity;
+flash-scratch staging remains capability-disabled and TLS retains the kernel's existing trust
+limitations. The small `sdk/examples/calc` REPL remains a toolchain test, not a replacement.
+
+This rule also determines implementation order: close shared service gaps first, port one app
+without cutting features, compare it to the built-in, and only then remove the built-in source.
 
 ## 1. The two execution profiles
 
@@ -126,6 +149,9 @@ typedef struct kapi {
   const struct k_ui   *ui;    /* widget toolkit (amber theme)                       */
   const struct k_http *http;  /* convenience GET/POST over TLS                       */
   const struct k_doc  *doc;   /* markdown/HTML -> canvas                             */
+  const struct k_math *math;  /* minor 1: kernel libm                                */
+  const struct k_device *device; /* minor 2: mediated system-app services             */
+  const struct k_ssh *ssh;    /* minor 2: kernel SSH/crypto service                  */
 } kapi;
 
 int app_main(const kapi *k);   /* entry; return value is exit code                  */
@@ -332,19 +358,41 @@ struct k_ui {
   void (*msgbox)(const char* title, const char* msg);
   /* a kui_obj canvas bridges to k_gfx for custom drawing inside a managed app */
   kf_canvas (*canvas)(kui_obj, int w, int h);
+  /* minor 2 append: lifecycle, geometry, layout, state, focus, events and styling */
+  void (*destroy)(kui_obj);
+  void (*set_pos)(kui_obj,int,int); void (*set_size)(kui_obj,int,int);
+  void (*align)(kui_obj,int,int,int); void (*flex)(kui_obj,int,int); void (*grow)(kui_obj,int);
+  void (*hidden)(kui_obj,int); void (*enabled)(kui_obj,int);
+  void (*set_value)(kui_obj,int); int (*get_value)(kui_obj); void (*focus)(kui_obj);
+  void (*on_change)(kui_obj,void(*)(void*),void*);
+  void (*set_colors)(kui_obj,kf_color,kf_color); void (*set_font)(kui_obj,int);
 };
 ```
 
 ### k_http — convenience over k_tls
 ```c
 struct k_http { void* (*get)(const char* url); void* (*post)(const char* url, const void*, int);
-                int (*poll)(void* req, void* buf, int n); void (*free)(void* req); };
+                int (*poll)(void* req, void* buf, int n); void (*free)(void* req);
+                void* (*post_headers)(const char*,const char*,const void*,int);
+                int (*status)(void*); const char* (*error)(void*); const char* (*final_url)(void*); };
 ```
 
 ### k_doc — markdown/HTML renderer (Spineko uses it; bingus ignores it)
 ```c
 struct k_doc { void (*render)(kf_canvas, const char* markup, int fmt); };
 ```
+
+### k_device — mediated services for SD-hosted system apps (minor 2)
+
+`k_device` exposes persisted desktop configuration, LCD/keyboard backlights, WiFi
+scan/join/forget, system sounds, and shutdown/reboot/BOOTSEL. Drivers and registers remain
+kernel-owned; Settings, WiFi and Wallpaper no longer need to be compiled into the firmware.
+
+### k_ssh — kernel SSH/crypto service (minor 2)
+
+Term keeps its VT/UI app-side but uses the kernel's existing SSH-2 and Monocypher implementation
+through a high-level nonblocking session handle. This avoids spending most of the app arena on a
+second crypto implementation and preserves host-key callbacks, password/key auth, resize and data I/O.
 
 ---
 
@@ -358,18 +406,20 @@ struct k_doc { void (*render)(kf_canvas, const char* markup, int fmt); };
 - **Errors:** check the documented sentinel; pull detail from `sys->last_error()/err_str()`.
 - **Capabilities:** never call a cap-gated module without checking `sys->caps()` first.
 
-## 7.1 Privilege model — apps consume, they don't configure
+## 7.1 Hardware ownership and system apps
 
-A hard line: **class-1 apps use resources and observe state; they never configure the
-system.** System configuration is a class-0 privilege, exercised only through the
-built-in Settings / WiFi apps.
+SD apps never own hardware drivers or raw registers. Ordinary apps consume KAPI services;
+Settings/WiFi/Wallpaper-class apps use the mediated `k_device` table for persisted config,
+backlights, network management, system sounds and power actions. This keeps those apps
+replaceable from SD without making driver ABI or register layout public.
 
-| Apps MAY (consume / read / request) | Apps MAY NOT (system config — class-0 only) |
+| Apps MAY (through KAPI) | Apps MAY NOT (driver/kernel internals) |
 |---|---|
-| open sockets, TLS, fetch | scan / join / forget WiFi networks |
-| read battery %, charge, online, RSSI, IP | set brightness, set volume |
-| read brightness/volume *levels* | keyboard backlight / any "BIOS"-level control |
-| **request** a perf tier (`sys->perf`, arbitrated) | set the system clock / timezone, power off/reboot |
+| open sockets, TLS, fetch | direct CYW43/lwIP ownership |
+| read battery %, charge, online, RSSI, IP | raw STM32/register access |
+| system apps: scan/join/forget through `k_device` | bypass KAPI hardware arbitration |
+| system apps: persisted config/backlights/power through `k_device` | link kernel driver symbols |
+| **request** a perf tier (`sys->perf`, arbitrated) | set PLL/QMI clocks or voltage directly |
 | play audio, draw, read input, read/write their own files | touch another app's files / GPIO / raw registers |
 
 `sys->perf` is the one "control"-looking call, and it's deliberately *not* configuration:
@@ -485,9 +535,13 @@ codec (`k_img`), perf/clock (`sys->perf`), the own-loop pump (`sys->pump`), audi
 
 1. **FLAC/codec libs:** ship as Layer-1 kernel services or as static SDK libs the app
    bundles? (size/sharing vs version freedom.)
-2. **Arena size vs PSRAM/PIC** (from the loader spec) — fixed-arena bytes to reserve.
+2. **Apps above 48 KiB:** split optional codecs into kernel services or add a safe overlay/XIP
+   format without turning ordinary app replacement into firmware reflashing.
 
-**Resolved:** windowed perf → live composited canvas + optional direct-SPI turbo, ~0% loss
-(§7.2, §gfx); privilege boundary → apps consume/observe/request, never configure (§7.1);
+**Resolved:** stable app arena → 48 KiB at `0x20074000` (96/64 KiB arenas starved the built-ins'
+kernel heap — missing launcher icons, Spineko "..." low-memory page, empty Music library, calc 3D
+OOM; 48 KiB keeps every shipped .kx with 2x headroom); windowed perf → live composited
+canvas + optional direct-SPI turbo, ~0% loss (§7.2, §gfx); hardware ownership → mediated
+KAPI device services rather than app-linked drivers (§7.1);
 performance modes → arbitrated tier requests + per-app idle policy (§7.3); audio input →
 none (no mic/ADC on this hardware), Morse RX keys off the keyboard.

@@ -18,7 +18,10 @@ extern "C" {
 #include "blockdevice/blockdevice.h"
 
 
-#define CONF_SD_INIT_FREQUENCY    (10 * 1000 * 1000)
+/* SD SPI mode requires the identification sequence to run at no more than
+ * 400 kHz until ACMD41 completes. 10 MHz happened to work on some cards but
+ * makes cold boot dependent on card and board signal margins. */
+#define CONF_SD_INIT_FREQUENCY    (100 * 1000)
 #define CONF_SD_TRX_FREQUENCY     (24 * MHZ)
 
 /*! \brief Create SD card block device with SPI

@@ -89,7 +89,7 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
     }
     /* Version */
     f_gif_read(gif_base, sigver, 3);
-    if(memcmp(sigver, "89a", 3) != 0) {
+    if(memcmp(sigver, "89a", 3) != 0 && memcmp(sigver, "87a", 3) != 0) {
         LV_LOG_WARN("invalid version");
         goto fail;
     }

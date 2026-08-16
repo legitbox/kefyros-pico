@@ -87,6 +87,10 @@ static int   ed_offx, ed_offy;           /* thumbnail top-left on screen        
    thumbnail; g_out the baked 320x320 result. The big (~4 MB) decode scratch is transient,
    allocated/freed inside wc_render. ~400 KB permanent. */
 static uint32_t g_thumb = 0xFFFFFFFFu, g_out = 0xFFFFFFFFu;
+
+void wallpaper_psram_invalidate(void){
+	g_thumb = g_out = 0xFFFFFFFFu;
+}
 static int g_ensure(void){
 	if(!kf_psram_size()) return 0;
 	if(g_thumb == 0xFFFFFFFFu) g_thumb = kf_psram_alloc((uint32_t)ED_OUT * ED_OUT * 2);

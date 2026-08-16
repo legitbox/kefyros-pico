@@ -7,6 +7,10 @@
 #include "lvgl/lvgl.h"
 #include "port/board.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* ===== display (port/disp.c) ===== */
 #define LCD_W 320
 #define LCD_H 320
@@ -21,6 +25,13 @@ lv_display_t *disp_init(void);     /* lcd_init() + lv_display + flush_cb (core1 
 #define KF_CONTENT_H (LCD_H - KF_TOPBAR_H)
 void topbar_init(void);                  /* build the bar once (after launcher_init) */
 void kf_inset_top(lv_obj_t *scr);        /* pad an app screen's content below the bar */
+/* RAM-bar bucketing (leak hunting aid): launcher calls open/close around each app
+   session; net.c calls tb_net_up() on the radio stack's first bring-up. The top bar
+   renders a stacked bar: amber=OS base, green=radio stack, purple=current app,
+   gray=unbucketed/leaked heap. */
+void tb_app_open(void);
+void tb_app_close(void);
+void tb_net_up(void);
 
 /* ===== tick (port/tick.c) ===== */
 void tick_init(void);              /* lv_tick_set_cb -> time_us_64()/1000 */
@@ -108,6 +119,7 @@ uint32_t kf_psram_bus_hz(void);                       /* current QPI SCK in Hz (
 uint32_t kf_psram_brk(void);                          /* allocator high-water; [brk,size) is free */
 void     kf_psram_read(uint32_t addr, void *buf, uint32_t n);
 void     kf_psram_write(uint32_t addr, const void *buf, uint32_t n);
+void    *kf_psram_map(uint32_t addr, uint32_t n);          /* QMI boards: direct pointer; PIO: NULL */
 uint32_t kf_psram_alloc(uint32_t n);                  /* bump-allocate a blob; 0xFFFFFFFF if full */
 void     kf_psram_reset_alloc(void);
 void     kf_psram_free_to(uint32_t addr);             /* LIFO free back to an alloc mark */
@@ -131,6 +143,7 @@ uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
    resolution samples (write_s32) to keep 24-bit FLAC intact. */
 void kf_audio_init(void);                 /* set up PWM slice 5 + DMA (call once at boot) */
 void kf_audio_start(int hz);              /* begin playback at sample rate hz (<=48000) */
+int  kf_audio_start_buffered(int hz, int ring_frames); /* power-of-two 1024..8192; 1 on success */
 void kf_audio_stop(void);                 /* stop + silence */
 void kf_audio_clock_change_begin(void);   /* tristate speaker pins across a clk_sys change (anti-pop) */
 void kf_audio_clock_change_end(void);     /* restore speaker pins after the clock settles */
@@ -158,6 +171,7 @@ kf_net_state_t kf_net_state(void);
 const char    *kf_net_state_str(void);    /* "off"/"connecting"/"online"/"failed" */
 const char    *kf_net_ip(void);           /* dotted IPv4, "0.0.0.0" until online */
 const char    *kf_net_ssid(void);         /* current/last target SSID ("" if none) */
+int            kf_net_rssi(void);         /* current RSSI dBm, or 0 when unavailable */
 void           kf_net_connect(const char *ssid, const char *pass);  /* async; persists creds */
 void           kf_net_forget(void);       /* disconnect + clear saved creds */
 void           kf_net_autoconnect(void);  /* scan + join the strongest saved network (call at boot, at eco) */
@@ -176,6 +190,7 @@ uint32_t       kf_net_bench_kbps(void);           /* result KB/s (valid at state
 uint32_t       kf_net_bench_bytes(void);          /* bytes received so far */
 /* wall-clock time, synced via SNTP when online (EET/EEST locale). */
 int            kf_time_synced(void);              /* 1 once SNTP has set the time */
+uint32_t       kf_time_unix(void);                /* current UTC epoch, or 0 if unsynced */
 struct tm;
 int            kf_time_local(struct tm *out);     /* fill broken-down LOCAL time; 0 if unsynced */
 void           kf_time_apply_locale(void);        /* re-derive local time after a tz/DST change in Settings */
@@ -199,6 +214,7 @@ void        kf_power_menu(void);
 void        kf_wallpaper_init(void);   /* register the PSRAM streaming wallpaper decoder */
 void        kf_wallpaper_apply(lv_obj_t *img, const char *src, const char *fit);
 void        kf_wallpaper_show_raw(lv_obj_t *img, uint32_t psram_off, int w, int h, const char *fit);
+void        kf_psram_clients_invalidate(void); /* detach every long-lived PSRAM allocation */
 
 /* apps kept on the PDA (terminal/web dropped; wifi is a stub tile) */
 void app_calc_open(void);
@@ -214,7 +230,15 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 int  kapi_run(const char *path); /* KAPI: load + run a class-1 .kx by path (no desktop tile in release) */
+void kf_app_idle_policy(int policy); /* 0 normal, 1 keep clock, 2 keep awake; KAPI/launcher arbitration */
 void app_term_open(void);    /* Term: SSH-2 terminal client (full-screen VT100) */
+void app_gameboy_open(void); /* Game Boy / Game Boy Color emulator */
+void app_mem_open(void);     /* Memory monitor: heap census + per-session leak log */
+
+/* topbar leak-tracker API (see ui/topbar.c) — used by the Memory monitor app */
+void tb_mem_snapshot(char *out, int cap);
+int  tb_session_count(void);
+int  tb_session_get(int i, uint32_t *open_used, uint32_t *close_used);
 
 /* pumped every main-loop tick; no-op unless that app grabs raw keys */
 void editor_poll(void);
@@ -225,5 +249,16 @@ void browser_poll(void);     /* Spineko: keys + HTTP redirects/timeouts */
 void deepseek_poll(void);    /* DeepSeek chat: grabbed keys + HTTP request pump */
 void kapi_poll(void);        /* KAPI: drive the loaded class-1 app (no-op unless one runs) */
 void term_poll(void);        /* Term: SSH session pump (no-op; modal loop owns the session) */
+void gameboy_poll(void);     /* GB/GBC picker + modal emulation loop */
+
+/* Internal participants in kf_psram_clients_invalidate(). Apps should not call these. */
+void browser_psram_invalidate(void);
+void deepseek_psram_invalidate(void);
+void music_psram_invalidate(void);
+void wallpaper_psram_invalidate(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

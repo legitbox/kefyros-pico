@@ -1,26 +1,24 @@
 #!/bin/bash
 # build_calc_kx.sh — build the calc compute-core milestone .kx.
 # Compiles the 7 UNMODIFIED calc compute files from apps/ + the calc_app.c entry, links
-# libkapi at the live kernel arena, packs sdk/examples/calc/calc.kx.
+# libkapi at the stable ABI-1 arena, packs sdk/examples/calc/calc.kx.
 set -e
 ROOT=/home/legitbox/kefyros-pico
 SDK="$ROOT/sdk"
 APP="$SDK/examples/calc"
 NAME=calc
 
-CC="$(grep -m1 '^CMAKE_C_COMPILER:FILEPATH=' "$ROOT/build/CMakeCache.txt" | cut -d= -f2)"
-[ -x "$CC" ] || CC=/usr/bin/arm-none-eabi-gcc
+CC=/usr/bin/arm-none-eabi-gcc
 PREFIX="${CC%gcc}"
 
-ARENA="$("${PREFIX}nm" "$ROOT/build/kefyros.elf" | awk '$3=="g_kapi_arena"{print "0x"$1; exit}')"
-[ -n "$ARENA" ] || { echo "ERROR: g_kapi_arena not found"; exit 1; }
-echo "kernel arena base: $ARENA"
+ARENA=0x20074000
+echo "stable KAPI arena base: $ARENA"
 
 bash "$ROOT/tools/build_libkapi.sh"
 
 cat > /tmp/kapi_app.ld <<EOF
 ENTRY(app_main)
-MEMORY { ARENA (rwx) : ORIGIN = $ARENA, LENGTH = 256K }
+MEMORY { ARENA (rwx) : ORIGIN = $ARENA, LENGTH = 48K }
 SECTIONS {
   . = ORIGIN(ARENA);
   .text : { KEEP(*(.text.app_main)) *(.text*) *(.rodata*) } > ARENA

@@ -38,6 +38,9 @@
 #include "hardware/vreg.h"
 #include "hardware/spi.h"
 #include "hardware/uart.h"
+#include "hardware/sync.h"
+#include "hardware/structs/qmi.h"
+#include "hardware/regs/addressmap.h"
 
 #include "port/board.h"
 #include "port/clock.h"
@@ -55,32 +58,29 @@ extern void kf_audio_clock_change_end(void);
  * is safe for the W25Q-class parts these boards ship with. */
 #define KF_QSPI_MAX_HZ   90000000u
 
-/* QMI window-0 read-timing register, raw access (XIP_QMI_BASE=0x400d0000,
- * QMI_M0_TIMING at +0x0c). Done raw so this TU doesn't need the RP2350 struct
- * header on its include path. CLKDIV=bits[7:0], RXDELAY=bits[10:8]. */
-#define KF_QMI_M0_TIMING    (*(volatile uint32_t *)(0x400d0000u + 0x0cu))
-#define KF_QMI_CLKDIV_BITS  0x000000ffu
-#define KF_QMI_RXDELAY_BITS 0x00000700u
-
-/* Clamp the QMI window-0 (XIP read) clock divider so the flash never runs
- * faster than KF_QSPI_MAX_HZ for the current clk_sys. The divider is an even
- * integer in [2..N]; div==1 (full speed) is avoided on purpose. */
-static void qmi_set_flash_div(uint32_t sys_hz){
+/* Prepare QMI window 0 for the highest clk_sys we will use. RP2350 supports odd
+ * divisors. Crucially, the divider must be increased BEFORE clk_sys is raised;
+ * the datasheet also requires a fenced dummy memory access after the write.
+ * Run from SRAM with interrupts masked so no XIP code can execute in the timing
+ * transition. Preserve boot2's board-qualified RXDELAY instead of replacing it
+ * with one hard-coded value for two different flash/bus layouts. */
+static void __no_inline_not_in_flash_func(qmi_prepare_flash_div)(uint32_t sys_hz){
 	uint32_t div = (sys_hz + KF_QSPI_MAX_HZ - 1) / KF_QSPI_MAX_HZ;   /* ceil */
 	if(div < 2) div = 2;
-	if(div & 1u) div++;                 /* QMI CLKDIV wants an even value */
 	if(div > 255) div = 255;
 
-	/* RXDELAY: at higher clk_sys the round-trip sample point shifts; one extra
-	 * delay stage keeps read data aligned. Conservative and divider-agnostic. */
-	uint32_t rxdelay = 1;
-
-	/* read-modify-write the CLKDIV + RXDELAY fields. We only ever SLOW flash down
-	 * here, so the next XIP fetch under the new (valid) timing is safe. */
-	uint32_t v = KF_QMI_M0_TIMING;
-	v &= ~(KF_QMI_CLKDIV_BITS | KF_QMI_RXDELAY_BITS);
-	v |= (div & 0xffu) | ((rxdelay & 0x7u) << 8);
-	KF_QMI_M0_TIMING = v;
+	uint32_t irq = save_and_disable_interrupts();
+	uint32_t v = qmi_hw->m[0].timing;
+	v &= ~QMI_M0_TIMING_CLKDIV_BITS;
+	v |= div << QMI_M0_TIMING_CLKDIV_LSB;
+	qmi_hw->m[0].timing = v;
+	__compiler_memory_barrier();
+	/* The uncached alias guarantees a real QMI transaction rather than a cache hit. */
+	volatile uint32_t dummy = *(volatile const uint32_t *)XIP_NOCACHE_NOALLOC_BASE;
+	(void)dummy;
+	__dsb();
+	__isb();
+	restore_interrupts(irq);
 }
 
 void clock_init(void){
@@ -90,17 +90,17 @@ void clock_init(void){
 	vreg_set_voltage(VREG_VOLTAGE_1_20);
 	sleep_ms(2);                         /* let the regulator settle */
 
-	/* 2) Bring up the 250 MHz default. set_sys_clock_khz(.., false) returns false rather
+	/* 2) Slow XIP for the 420 MHz peak BEFORE changing clk_sys. /5 gives 30 MHz at
+	 *    reset, 50 MHz at cold init, 80 MHz normal and 84 MHz boost. */
+	qmi_prepare_flash_div(420000000u);
+
+	/* 3) Bring up the 250 MHz default. set_sys_clock_khz(.., false) returns false rather
 	 *    than faulting if it can't hit the rate. */
 	if(set_sys_clock_khz(KF_SYS_KHZ, false)){
-		/* Size the QMI flash divider for the PEAK clock we'll ever switch to (420 MHz via
-		 * kf_clock_boost) — clock_apply() deliberately never retunes flash timing, so the
-		 * boot divider must stay valid at every tier. /6 -> 70 MHz @420, 66 @400, 41 @250:
-		 * all under the 90 MHz cap. (420 and 400 both round to the same /6 divider.) */
-		qmi_set_flash_div(420000000u);
+		/* Divider is already valid for every runtime tier. */
 	} else {
-		/* 3) Fallback: 150 MHz is the RP2350's happy default — boots with the
-		 *    stock 1.10 V rail and stock flash divider, so no QMI retune needed.
+		/* 4) Fallback: 150 MHz is the RP2350's happy default. The pre-sized /5
+		 *    flash divider is conservative here as well.
 		 *    Pass required=true so a failure here is a real (rare) hard fault. */
 		set_sys_clock_khz(150000, true);
 	}
@@ -126,9 +126,9 @@ static uint32_t s_lcd_hz   = LCD_SPI_SPEED;   /* panel SPI target; reclock honou
 
 static void reclock_peripherals(void){
 	spi_set_baudrate(KF_LCD_SPI, s_lcd_hz);     /* LCD — honour the cranked panel clock  */
-	spi_set_baudrate(KF_SD_SPI,  24000000u);    /* SD   (CONF_SD_TRX_FREQUENCY)*/
+	spi_set_baudrate(KF_SD_SPI,  KF_SD_SPI_HZ); /* SD target is board-specific */
 	uart_set_baudrate(KF_KBD_UART, KF_KBD_BAUD);
-	kf_psram_reclock();                          /* PSRAM PIO bus back to ~18 MHz */
+	kf_psram_reclock();                          /* re-derive the active PSRAM bus timing */
 	kf_net_reclock();                            /* cyw43 gSPI bus back to ~28 MHz (keeps a live
 	                                                link alive across a clk_sys change) */
 }
