@@ -437,6 +437,9 @@ static int file_open(filesystem_t *fs, fs_file_t *file, const char *path, int fl
 
     if (res != FR_OK) {
         debug_if(FFS_DBG, "f_open('w') failed: %d\n", res);
+        /* VFS frees the outer fs_file_t on failure; no file_close follows. */
+        free(fat_file);
+        file->context = NULL;
         return fat_error_remap(res);
     }
     return 0;
