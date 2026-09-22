@@ -47,6 +47,7 @@ add_executable(kefyros
     port/sys.c
     port/fault.c
     port/audio.c
+    port/bt_audio.c
     ${KF_PSRAM_SRC}
     port/net.c
     port/http.c
@@ -171,6 +172,9 @@ target_link_libraries(kefyros PRIVATE
     filesystem_vfs
     # --- WiFi: CYW43 radio + lwIP (poll mode). TLS via vendored BearSSL (lib/bearssl). ---
     pico_cyw43_arch_lwip_poll
+    pico_btstack_classic
+    pico_btstack_cyw43
+    pico_btstack_sbc_encoder
     pico_lwip_sntp        # SNTP time sync
     pico_rand             # RP2350 hardware TRNG -> BearSSL entropy seed
 )

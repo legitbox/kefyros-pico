@@ -23,6 +23,7 @@
 #include <stdint.h>
 
 #include "pico/multicore.h"
+#include "pico/flash.h"
 #include "pico/stdlib.h"
 #include "hardware/sync.h"   /* __wfe / __sev / __dmb barrier + event intrinsics */
 
@@ -131,6 +132,7 @@ lv_display_t *disp_init(void)
 /* Core 1 entry: drain the flush mailbox forever. */
 void disp_core1_main(void)
 {
+    flash_safe_execute_core_init(); /* BTstack link-key writes may park this core */
     for (;;) {
         /* Clock-switch pause: ack and hold here (idle, never mid-blit) until released. */
         if (s_pause_req) {

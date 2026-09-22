@@ -23,6 +23,7 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "pico/mutex.h"
 #include <stdlib.h>
 
 #define AUDIO_R_PIN 26                             /* PWM slice 5 ch A -> right */
@@ -53,6 +54,10 @@ static volatile uint32_t r_w = 0, r_r = 0;          /* free-running; count = r_w
 static int dch = -1, dtimer = -1;
 static volatile int cur = 0;
 static volatile int running = 0;
+static volatile int bt_route = 0;
+static int sample_rate = 44100;
+static uint64_t bt_phase;
+static mutex_t audio_writer_lock;
 
 /* ---- per-channel 2nd-order noise shaper + TPDF dither state (ch0=L, ch1=R) ---- */
 static int32_t  ns_e1[2], ns_e2[2];                 /* error feedback (full-scale domain) */
@@ -113,6 +118,7 @@ static void dma_isr(void){
 }
 
 void kf_audio_init(void){
+	mutex_init(&audio_writer_lock);
 	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_PWM);
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 	pwm_config c = pwm_get_default_config();
@@ -157,6 +163,7 @@ void kf_audio_clock_change_begin(void){
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_L_PIN, GPIO_IN);
 }
 void kf_audio_clock_change_end(void){
+	if(bt_route) return;
 	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_PWM);   /* slice keeps running; pin resumes at 50% */
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 }
@@ -174,13 +181,28 @@ void kf_audio_idle_park(void){
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_SIO); gpio_set_dir(AUDIO_L_PIN, GPIO_IN);
 }
 void kf_audio_idle_unpark(void){
+	if(bt_route) return;
 	gpio_set_function(AUDIO_R_PIN, GPIO_FUNC_PWM);
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 }
 
-static int audio_start_buffered(int hz, int ring_frames, uint32_t *external){
+static void start_pwm_dma(int hz){
 	kf_audio_idle_unpark();
 	pwm_set_enabled(AUDIO_SLICE, true);
+	pick_resolution();
+	uint32_t sysclk = clock_get_hz(clk_sys);
+	uint32_t X = (uint32_t)(((uint64_t)65535 * hz) / sysclk);
+	if(X < 1) X = 1; else if(X > 65535) X = 65535;
+	uint32_t Y = (uint32_t)(((uint64_t)X * sysclk + hz/2) / hz);
+	if(Y < 1) Y = 1; else if(Y > 65535) Y = 65535;
+	dma_timer_set_fraction(dtimer, (uint16_t)X, (uint16_t)Y);
+	fill(pp[0]); fill(pp[1]);
+	cur = 0;
+	dma_channel_set_read_addr(dch, pp[0], false);
+	dma_channel_set_trans_count(dch, DBUF, true);
+}
+
+static int audio_start_buffered(int hz, int ring_frames, uint32_t *external){
 	if(hz < 8000) hz = 8000; else if(hz > 48000) hz = 48000;
 	if(running){ dma_channel_abort(dch); running = 0; }
 	if(ring_frames < 1024) ring_frames = 1024;
@@ -202,21 +224,13 @@ static int audio_start_buffered(int hz, int ring_frames, uint32_t *external){
 		ring_owned = 1;
 	}
 	r_w = r_r = 0;
+	bt_phase = 0;
+	sample_rate = hz;
 	ns_reset();
-	pick_resolution();
-
-	/* DMA pacing timer DREQ = clk_sys * X/Y; pick X/Y (16-bit) closest to hz/clk. */
-	uint32_t sysclk = clock_get_hz(clk_sys);
-	uint32_t X = (uint32_t)(((uint64_t)65535 * hz) / sysclk);
-	if(X < 1) X = 1; else if(X > 65535) X = 65535;
-	uint32_t Y = (uint32_t)(((uint64_t)X * sysclk + hz/2) / hz);
-	if(Y < 1) Y = 1; else if(Y > 65535) Y = 65535;
-	dma_timer_set_fraction(dtimer, (uint16_t)X, (uint16_t)Y);
-
-	fill(pp[0]); fill(pp[1]);                        /* prime (silence; ring empty) */
-	cur = 0;
-	dma_channel_set_read_addr(dch, pp[0], false);
-	dma_channel_set_trans_count(dch, DBUF, true);   /* go */
+	if(bt_route){
+		pwm_set_enabled(AUDIO_SLICE, false);
+		kf_audio_idle_park();
+	} else start_pwm_dma(hz);
 	running = 1;
 	return 1;
 }
@@ -232,6 +246,7 @@ void kf_audio_start(int hz){ (void)kf_audio_start_buffered(hz, RING_N); }
 
 void kf_audio_stop(void){
 	if(!running) return;
+	mutex_enter_blocking(&audio_writer_lock);
 	/* mask DMA_IRQ_1 at the NVIC so dma_isr can't preempt us mid-free and touch
 	   `ring` after it's freed; the channel is aborted and the pending flag cleared
 	   before we re-enable, so no stale completion restarts playback. */
@@ -244,6 +259,7 @@ void kf_audio_stop(void){
 	ring = NULL; ring_owned = 0;
 	dma_hw->ints1 = 1u << dch;                   /* clear any pending completion */
 	irq_set_enabled(DMA_IRQ_1, true);
+	mutex_exit(&audio_writer_lock);
 }
 
 int  kf_audio_running(void){ return running; }
@@ -252,20 +268,75 @@ int  kf_audio_buffered(void){ return ring ? (int)(r_w - r_r) : 0; }   /* frames 
 
 /* drop buffered audio + reset the shaper (used right after a seek so the new
    position is heard immediately; DMA keeps running and plays silence until refilled). */
-void kf_audio_flush(void){ r_w = r_r = 0; ns_reset(); }
+void kf_audio_flush(void){
+	mutex_enter_blocking(&audio_writer_lock);
+	r_w = r_r = 0; bt_phase = 0; ns_reset();
+	mutex_exit(&audio_writer_lock);
+}
+
+/* The public producer API remains stable. The ring changes representation only
+   when the sink changes: PWM duty for local output, packed signed PCM for A2DP. */
+void kf_audio_set_bt_route(int enabled){
+	enabled = !!enabled;
+	if(bt_route == enabled) return;
+	mutex_enter_blocking(&audio_writer_lock);
+	irq_set_enabled(DMA_IRQ_1, false);
+	dma_channel_abort(dch);
+	dma_hw->ints1 = 1u << dch;
+	bt_route = enabled;
+	r_w = r_r = 0; bt_phase = 0; ns_reset();
+	if(enabled){
+		pwm_hw->slice[AUDIO_SLICE].cc = SILENCE();
+		pwm_set_enabled(AUDIO_SLICE, false);
+		kf_audio_idle_park();
+	} else if(running) start_pwm_dma(sample_rate);
+	else kf_audio_idle_unpark();
+	irq_set_enabled(DMA_IRQ_1, true);
+	mutex_exit(&audio_writer_lock);
+}
+
+int kf_audio_bt_route(void){ return bt_route; }
+
+/* Pull stereo PCM for the Bluetooth encoder. A phase accumulator resamples
+   arbitrary app rates to the headset's 44.1/48 kHz rate without changing game
+   timing. Silence is emitted on underrun; no stale samples are replayed. */
+int kf_audio_bt_read(int16_t *out, int frames, int out_rate){
+	if(!bt_route || !running || !ring || out_rate <= 0) return 0;
+	uint64_t step = ((uint64_t)(uint32_t)sample_rate << 32) / (uint32_t)out_rate;
+	for(int i=0; i<frames; ++i){
+		if(r_w - r_r < 2){ out[2*i] = out[2*i+1] = 0; continue; }
+		__dmb();
+		uint32_t a = ring[r_r & (ring_n-1u)];
+		uint32_t b = ring[(r_r+1u) & (ring_n-1u)];
+		uint32_t frac = (uint32_t)(bt_phase >> 16);
+		int32_t al = (int16_t)a, ar = (int16_t)(a >> 16);
+		int32_t bl = (int16_t)b, br = (int16_t)(b >> 16);
+		out[2*i] = (int16_t)(al + (((int64_t)(bl-al) * frac) >> 16));
+		out[2*i+1] = (int16_t)(ar + (((int64_t)(br-ar) * frac) >> 16));
+		bt_phase += step;
+		uint32_t advance = (uint32_t)(bt_phase >> 32);
+		bt_phase &= 0xffffffffu;
+		r_r += advance;
+	}
+	return frames;
+}
 
 /* push interleaved full-scale stereo frames (L,R,L,R; 32-bit, left-justified for the
    source bit depth as dr_flac's s32 output is). Returns frames accepted (< frames if
    the ring is full). ch A = GP26 = right = st[2i+1]; ch B = GP27 = left = st[2i]. */
 int kf_audio_write_s32(const int32_t *st, int frames){
 	if(!ring) return 0;
+	mutex_enter_blocking(&audio_writer_lock);
 	int w = 0;
 	while(w < frames && ring_count() < ring_n){
-		uint32_t a = duty_s32(1, st[2*w+1]);        /* right */
-		uint32_t b = duty_s32(0, st[2*w]);          /* left  */
-		ring[r_w & (ring_n-1u)] = a | (b << 16);
+		uint32_t packed;
+		if(bt_route) packed = (uint16_t)(st[2*w] >> 16) | ((uint32_t)(uint16_t)(st[2*w+1] >> 16) << 16);
+		else packed = duty_s32(1, st[2*w+1]) | (duty_s32(0, st[2*w]) << 16);
+		ring[r_w & (ring_n-1u)] = packed;
+		__dmb();
 		r_w++; w++;
 	}
+	mutex_exit(&audio_writer_lock);
 	return w;
 }
 
@@ -273,12 +344,16 @@ int kf_audio_write_s32(const int32_t *st, int frames){
    the same shaper so even 16-bit sources get dithered down cleanly. */
 int kf_audio_write(const int16_t *st, int frames){
 	if(!ring) return 0;
+	mutex_enter_blocking(&audio_writer_lock);
 	int w = 0;
 	while(w < frames && ring_count() < ring_n){
-		uint32_t a = duty_s32(1, (int32_t)st[2*w+1] << 16);
-		uint32_t b = duty_s32(0, (int32_t)st[2*w]   << 16);
-		ring[r_w & (ring_n-1u)] = a | (b << 16);
+		uint32_t packed;
+		if(bt_route) packed = (uint16_t)st[2*w] | ((uint32_t)(uint16_t)st[2*w+1] << 16);
+		else packed = duty_s32(1, (int32_t)st[2*w+1] << 16) | (duty_s32(0, (int32_t)st[2*w] << 16) << 16);
+		ring[r_w & (ring_n-1u)] = packed;
+		__dmb();
 		r_w++; w++;
 	}
+	mutex_exit(&audio_writer_lock);
 	return w;
 }

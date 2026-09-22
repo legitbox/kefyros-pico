@@ -161,6 +161,9 @@ void kf_sfx_play(const char *name);
 void sfx_poll(void);                       /* pump an in-flight effect; call every main loop */
 int  kf_audio_write_s32(const int32_t *stereo, int frames); /* full-scale L,R; frames accepted */
 int  kf_audio_write(const int16_t *stereo, int frames);     /* legacy 16-bit L,R; frames accepted */
+void kf_audio_set_bt_route(int enabled); /* OS sink selection; keeps producer API stable */
+int  kf_audio_bt_route(void);
+int  kf_audio_bt_read(int16_t *stereo, int frames, int out_rate); /* A2DP backend only */
 
 /* ===== WiFi / networking (port/net.c) — CYW43 + lwIP (poll mode) ===== */
 typedef enum { KF_NET_OFF=0, KF_NET_CONNECTING, KF_NET_ONLINE, KF_NET_FAILED } kf_net_state_t;
@@ -226,6 +229,7 @@ void app_files_open(void);
 void app_settings_open(void);
 void app_wallpaper_open(void);
 void app_wifi_open(void);    /* WiFi manager: status, scan, connect, forget */
+void app_bluetooth_open(void); /* manual Bluetooth audio manager */
 void app_music_open(void);   /* FLAC player (recursively indexes /kefyros/music) */
 void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */

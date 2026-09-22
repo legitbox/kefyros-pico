@@ -24,6 +24,7 @@
 #include "kefyros.h"
 #include "port/disp.h"
 #include "port/clock.h"
+#include "port/bt_audio.h"
 #include "ui/theme.h"
 
 int main(void){
@@ -73,6 +74,7 @@ int main(void){
 		term_poll();           /* Term SSH session pump (no-op; modal loop owns the session) */
 		gameboy_poll();        /* GB/GBC picker + modal emulation loop (no-op idle) */
 		kf_net_poll();         /* pump CYW43 + lwIP + reconnect watchdog       */
+		kf_bt_poll();          /* persist a newly paired device outside callbacks */
 		lv_timer_handler();    /* render + dispatch LVGL timers                */
 		sleep_ms(2);
 	}

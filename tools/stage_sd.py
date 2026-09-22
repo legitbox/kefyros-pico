@@ -71,10 +71,12 @@ ICON_MAP = {
     "editor": "editor.png", "electronics": "resistor.png",
     "music": "music.png",     # FLAC player tile (recursively indexes /kefyros/music)
     "gb": "gb.png",           # Game Boy / Game Boy Color emulator
+    "bluetooth": "bt.png",   # Bluetooth audio manager (kept in repo)
 }
 import shutil
 for appid, fn in ICON_MAP.items():
-    src = os.path.join(DL, fn)
+    src = (os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "bluetooth.png")
+           if appid == "bluetooth" else os.path.join(DL, fn))
     if not os.path.exists(src):
         sys.stderr.write("MISSING icon %s\n" % src); continue
     shutil.copyfile(src, os.path.join(ICONS, appid + ".png"))

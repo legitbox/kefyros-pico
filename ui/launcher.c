@@ -7,6 +7,7 @@
 #include "theme.h"
 #include "deskconf.h"
 #include "kapi.h"
+#include "../port/bt_audio.h"
 #include "lvgl/src/draw/lv_image_decoder_private.h"   /* lv_image_decoder_dsc_t fields */
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,7 @@ static const desk_app_t builtin_apps[] = {
 	{ "gb",         "Game Boy",    app_gameboy_open,     13, APP_NO_SLEEP },  /* modal 59.7 Hz emulation */
 	{ "planetx3",   "Planet X3",   app_planetx3_open,    14, APP_NO_SLEEP },
 	{ "mem",        "Memory",      app_mem_open,         15 },   /* debug: heap census + leak log */
+	{ "bluetooth",  "Bluetooth",   app_bluetooth_open,   16 },
 };
 
 #define MAX_DESK_APPS 36
@@ -67,6 +69,9 @@ static int n_sd_apps;
 static int s_cur_app = -1;
 static int s_idle_override = -1;
 static int kf_app_allows_sleep(void){
+	if(kf_bt_state()==KF_BT_CONNECTED || kf_bt_state()==KF_BT_STARTING ||
+	   kf_bt_state()==KF_BT_CONNECTING ||
+	   kf_bt_state()==KF_BT_SCANNING) return 0;
 	if(s_idle_override >= 0) return s_idle_override == 0;
 	return s_cur_app < 0 || !(dapps[s_cur_app].flags & (APP_NO_SLEEP | APP_KEEP_AWAKE));
 }

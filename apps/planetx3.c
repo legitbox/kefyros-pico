@@ -14,7 +14,9 @@
 #include "hardware/sync.h"
 #include "pico/time.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 #include "../port/clock.h"
+#include "../port/bt_audio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +52,7 @@ static inline bool opl_fifo_pop(uint8_t *reg, uint8_t *val){
 }
 
 static void px3_audio_core1_main(void){
+	flash_safe_execute_core_init();
 	static int16_t s_core1_buf[256 * 2];
 	while(s_audio_core1_running){
 		/* Drain pending register writes from Core 0 */
@@ -641,8 +644,11 @@ static void play_planetx3(void){
 	const uint64_t FRAME_PERIOD_US = 33333u; /* 30.0 FPS */
 	uint64_t next_tick_us = time_us_64();
 	uint64_t next_frame_us = time_us_64() + FRAME_PERIOD_US;
+	uint32_t radio_ms=0;
 
 	while(s_running){
+		uint32_t ms=to_ms_since_boot(get_absolute_time());
+		if(ms-radio_ms>=2){ kf_net_poll(); kf_bt_poll(); radio_ms=ms; }
 		/* 1. Poll UART keyboard */
 		uart_poll();
 		uint8_t st, key;

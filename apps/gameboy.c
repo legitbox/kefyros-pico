@@ -13,6 +13,7 @@
 #define PEANUT_FULL_GBC_SUPPORT      0
 
 #include "../kefyros.h"
+#include "../port/bt_audio.h"
 #include "../ui/theme.h"
 #include "../port/disp.h"
 #include "../lib/peanut-gbc/minigb_apu.h"
@@ -240,7 +241,10 @@ static uint8_t joy_for_key(uint8_t key){
 
 static void play_loop(void){
 	uint64_t next_us = time_us_64();
+	uint32_t radio_ms = 0;
 	while(s_state == GB_PLAY){
+		uint32_t ms=to_ms_since_boot(get_absolute_time());
+		if(ms-radio_ms>=2){ kf_net_poll(); kf_bt_poll(); radio_ms=ms; }
 		uart_poll();
 		uint8_t st, key;
 		while(uart_pop_key(&st, &key)){

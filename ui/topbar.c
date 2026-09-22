@@ -4,6 +4,7 @@
 // content area below it (see kf_inset_top / KF_CONTENT_*).
 #include "../kefyros.h"
 #include "../port/clock.h"
+#include "../port/bt_audio.h"
 #include "theme.h"
 #include "deskconf.h"
 #include <malloc.h>
@@ -13,7 +14,7 @@
    48 KiB KAPI arena; was ~197 KB before it existed). */
 extern char __HeapLimit[], __end__[];
 
-static lv_obj_t *bar, *lbl_mem, *lbl_clock, *lbl_batt, *lbl_wifi, *lbl_mhz;
+static lv_obj_t *bar, *lbl_mem, *lbl_clock, *lbl_batt, *lbl_wifi, *lbl_bt, *lbl_mhz;
 static lv_obj_t *mem_bar;                  /* stacked RAM bar (OS/app/net/leak segments) */
 
 /* ---- RAM bar segments ----
@@ -192,6 +193,19 @@ static void tb_update(lv_timer_t *t){
 		default:                lv_label_set_text(lbl_wifi, ""); break;
 		}
 	} else lv_label_set_text(lbl_wifi, "");
+	/* Bluetooth output state is global, including when the manager is closed. */
+	switch(kf_bt_state()){
+	case KF_BT_CONNECTED:
+		lv_label_set_text(lbl_bt,"BT");
+		lv_obj_set_style_text_color(lbl_bt,KF_ACTIVE,0); break;
+	case KF_BT_STARTING: case KF_BT_CONNECTING: case KF_BT_SCANNING:
+		lv_label_set_text(lbl_bt,"BT?");
+		lv_obj_set_style_text_color(lbl_bt,KF_AMBER_DIM,0); break;
+	case KF_BT_FAILED:
+		lv_label_set_text(lbl_bt,"BT!");
+		lv_obj_set_style_text_color(lbl_bt,lv_color_hex(0xe03c32),0); break;
+	default: lv_label_set_text(lbl_bt,""); break;
+	}
 
 	/* battery %, bit7 = charging. red when low. */
 	uint8_t bt;
@@ -257,6 +271,11 @@ void topbar_init(void){
 	lv_obj_align(lbl_clock, LV_ALIGN_LEFT_MID, 176, 0);
 
 	lbl_wifi = lv_label_create(bar);
+	lbl_bt = lv_label_create(bar);
+	lv_obj_set_style_text_font(lbl_bt, KF_FONT, 0);
+	lv_obj_set_style_text_color(lbl_bt, KF_AMBER, 0);
+	lv_label_set_text(lbl_bt, "");
+	lv_obj_align(lbl_bt, LV_ALIGN_LEFT_MID, 230, 0);
 	lv_obj_set_style_text_font(lbl_wifi, KF_FONT, 0);
 	lv_obj_set_style_text_color(lbl_wifi, KF_AMBER, 0);
 	lv_label_set_text(lbl_wifi, "");

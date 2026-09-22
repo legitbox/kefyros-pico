@@ -10,6 +10,7 @@
 #include "../ui/deskconf.h"
 #include "../port/disp.h"            /* disp_pause_core1 / disp_resume_core1 */
 #include "../port/clock.h"           /* kf_clock_set_bare — overclock ladder for the speed test */
+#include "../port/bt_audio.h"
 #include "lcdspi/lcdspi.h"          /* direct panel blit + LCD_SPI_SPEED */
 #include "hardware/spi.h"           /* spi_set_baudrate / spi_get_baudrate */
 #include "hardware/vreg.h"          /* vreg_get_voltage + VREG_VOLTAGE_* for the OC ladder */
@@ -23,6 +24,29 @@ extern char font8x8_basic[128][8];   /* ui/font8x8.c */
 static lv_obj_t *scr, *lbl_bat, *lbl_clk, *lbl_test;
 static lv_timer_t *stimer;     /* tied to scr's lifetime (deleted with the screen) */
 static int bkl, bk2;
+static lv_obj_t *btn_audio;
+static int audio_choice;
+static void audio_label(void){
+	if(!btn_audio) return;
+	lv_obj_t *l=lv_obj_get_child(btn_audio,0);
+	if(!l) return;
+	if(kf_bt_state()==KF_BT_CONNECTED)
+		lv_label_set_text_fmt(l,"Audio output: BT %s",kf_bt_device_name());
+	else if(kf_bt_state()==KF_BT_CONNECTING)
+		lv_label_set_text_fmt(l,"Audio output: connecting %s",kf_bt_device_name());
+	else lv_label_set_text(l,"Audio output: Speaker");
+}
+static void act_audio(lv_event_t *e){
+	(void)e;
+	int n=kf_bt_saved_count();
+	if(kf_bt_state()==KF_BT_CONNECTED || kf_bt_state()==KF_BT_CONNECTING){
+		kf_bt_disconnect();
+	} else if(n){
+		audio_choice=(audio_choice+1)%n;
+		kf_bt_connect_saved(audio_choice);
+	}
+	audio_label();
+}
 
 /* RTC bytes from the STM32 are BCD (STM32 RTC convention). */
 static int bcd(uint8_t v){ return (v>>4)*10 + (v&0x0f); }
@@ -47,7 +71,7 @@ static void refresh_clk(void){
 }
 
 static void tick_timer(lv_timer_t *tm){ (void)tm;
-	if(lv_screen_active()==scr){ refresh_bat(); refresh_clk(); } }
+	if(lv_screen_active()==scr){ refresh_bat(); refresh_clk(); audio_label(); } }
 static void on_settings_del(lv_event_t *e){ (void)e;
 	if(stimer){ lv_timer_delete(stimer); stimer = NULL; } }
 
@@ -379,6 +403,7 @@ void app_settings_open(void){
 	additem(list,g, "Keyboard Light -", act_bk2, (void*)(intptr_t)-1);
 	btn_tz = additem(list,g, "Time zone",   act_tz, NULL);      tz_label();
 	btn_24 = additem(list,g, "Time format", act_clock24, NULL); clock24_label();
+	btn_audio = additem(list,g, "Audio output", act_audio, NULL); audio_choice=-1; audio_label();
 	additem(list,g, "PSRAM Burn Test",  act_burn, NULL);
 	additem(list,g, "Screen Test",      act_screentest, NULL);
 	additem(list,g, "About Kefyros",    act_about, NULL);
