@@ -4,6 +4,8 @@
 #include "../kefyros.h"
 #include "../ui/deskconf.h"
 #include "btstack.h"
+#include "pico/cyw43_arch.h"
+#include "pico/time.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -288,6 +290,14 @@ void kf_bt_poll(void){
     if(eco_hold && (state==KF_BT_CONNECTED || state==KF_BT_READY || state==KF_BT_FAILED)){
         eco_hold=0; kf_clock_normal();
     }
+}
+void kf_bt_service_audio(void){
+    if(state==KF_BT_OFF || state==KF_BT_READY || state==KF_BT_FAILED) return;
+    static uint32_t last_us;
+    uint32_t now=time_us_32();
+    if(now-last_us < 2000u) return;
+    last_us=now;
+    if(kf_net_present()) cyw43_arch_poll();
 }
 kf_bt_state_t kf_bt_state(void){ return state; }
 const char *kf_bt_state_text(void){

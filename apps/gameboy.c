@@ -66,7 +66,8 @@ typedef struct {
 static int s_state;
 static int s_active;
 static lv_obj_t *s_scr, *s_list, *s_status, *s_rows[MAX_ROMS];
-static rom_ent_t s_roms[MAX_ROMS];
+static rom_ent_t *s_roms; /* idle KAPI arena while this built-in owns the screen */
+static int s_roms_heap;
 static int s_nrom, s_sel;
 
 static struct gb_s *s_gb;
@@ -133,6 +134,7 @@ static void lcd_line(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t 
 	spi_write_fast(Pico_LCD_SPI_MOD, s_row1, GB_W);
 	spi_finish(Pico_LCD_SPI_MOD);
 	lcd_spi_raise_cs();
+	if((line & 15u) == 0) kf_bt_service_audio();
 }
 
 static void read_psram_partial(uint32_t off, uint8_t *dst, uint32_t n){
@@ -211,6 +213,8 @@ static void stop_game(void){
 	save_cart();
 	kf_audio_stop();
 	free_runtime();
+	if(s_roms_heap) free(s_roms);
+	s_roms = NULL; s_roms_heap = 0;
 	reset_exclusive_psram();
 
 	/* Restore display controller to standard 16-bit RGB565 */
@@ -241,10 +245,8 @@ static uint8_t joy_for_key(uint8_t key){
 
 static void play_loop(void){
 	uint64_t next_us = time_us_64();
-	uint32_t radio_ms = 0;
 	while(s_state == GB_PLAY){
-		uint32_t ms=to_ms_since_boot(get_absolute_time());
-		if(ms-radio_ms>=2){ kf_net_poll(); kf_bt_poll(); radio_ms=ms; }
+		kf_bt_service_audio();
 		uart_poll();
 		uint8_t st, key;
 		while(uart_pop_key(&st, &key)){
@@ -257,7 +259,20 @@ static void play_loop(void){
 		s_gb->direct.joypad = (uint8_t)~s_buttons;
 
 		int ran = 0, guard = 0;
-		if(kf_audio_running()){
+		if(kf_audio_bt_route() && kf_audio_running()){
+			uint64_t now = time_us_64();
+			while(now >= next_us && guard++ < 2){
+				gb_run_frame(s_gb);
+				if(s_gberr){ stop_game(); return; }
+				minigb_apu_audio_callback(&s_apu, s_audio);
+				/* Radio congestion may drop sound, but must not stop emulation. */
+				kf_audio_write(s_audio, AUDIO_SAMPLES);
+				next_us += 16743u;
+				s_frames++; ran = 1;
+				now = time_us_64();
+			}
+			if(next_us + 33486u < now) next_us = now;
+		} else if(kf_audio_running()){
 			while(kf_audio_space() >= AUDIO_SAMPLES && guard++ < 8){
 				gb_run_frame(s_gb);
 				if(s_gberr){ stop_game(); return; }
@@ -466,6 +481,7 @@ static int rom_cmp(const void *a, const void *b){
 
 static void scan_roms(void){
 	s_nrom = 0;
+	if(!s_roms) return;
 	scan_dir(ROM_SUBDIR, 1);
 	scan_dir(ROM_ROOT, 0);
 	qsort(s_roms, (size_t)s_nrom, sizeof s_roms[0], rom_cmp);
@@ -487,7 +503,11 @@ void gameboy_poll(void){
 	uint8_t st, key;
 	while(uart_pop_key(&st, &key)){
 		if(st == KS_RELEASE) continue;
-		if(key == DK_ESC || key == DK_BREAK){ s_active = 0; s_state = GB_OFF; kf_grab_input(0); launcher_show(); return; }
+		if(key == DK_ESC || key == DK_BREAK){
+			if(s_roms_heap) free(s_roms);
+			s_roms = NULL; s_roms_heap = 0;
+			s_active = 0; s_state = GB_OFF; kf_grab_input(0); launcher_show(); return;
+		}
 		if(key == DK_UP && s_nrom){ s_sel = (s_sel + s_nrom - 1) % s_nrom; highlight(); }
 		else if(key == DK_DOWN && s_nrom){ s_sel = (s_sel + 1) % s_nrom; highlight(); }
 		else if(key == DK_ENTER && s_nrom){ start_game(&s_roms[s_sel]); return; }
@@ -495,6 +515,9 @@ void gameboy_poll(void){
 }
 
 void app_gameboy_open(void){
+	s_roms = kapi_idle_scratch(MAX_ROMS * sizeof *s_roms);
+	s_roms_heap = 0;
+	if(!s_roms){ s_roms = malloc(MAX_ROMS * sizeof *s_roms); s_roms_heap = !!s_roms; }
 	mkdir(ROM_ROOT, 0777);
 	mkdir(ROM_SUBDIR, 0777);
 	mkdir("/kefyros/saves", 0777);
@@ -532,7 +555,9 @@ void app_gameboy_open(void){
 	lv_obj_set_style_text_font(s_status, KF_FONT, 0);
 	lv_obj_set_style_text_color(s_status, KF_TEXT_DIM, 0);
 	lv_obj_align(s_status, LV_ALIGN_BOTTOM_LEFT, 4, -2);
-	set_status(s_nrom ? "ENTER play | arrows D-pad | F5/Z A | F4/X B | ESC quit" : "Put .gb in /kefyros/roms/gb");
+	set_status(!s_roms ? "Not enough SRAM for ROM list" :
+		   s_nrom ? "ENTER play | arrows D-pad | F5/Z A | F4/X B | ESC quit" :
+		   "Put .gb in /kefyros/roms/gb");
 	highlight();
 	kf_grab_input(1);
 	s_active = 1; s_state = GB_PICK;

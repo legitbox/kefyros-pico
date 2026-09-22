@@ -99,7 +99,8 @@ static uint8_t  s_dac_phase = 0;
 static uint8_t  s_dac_rgb[3];
 
 #define CHUNK_LINES 20
-static uint16_t s_chunk_buf[GAME_W * CHUNK_LINES];
+static uint16_t *s_chunk_buf; /* idle KAPI arena during this built-in's modal loop */
+static int s_chunk_heap;
 static int16_t  s_audio_buf[AUDIO_MAX_FRAMES * 2];
 
 /* Key queue for INT 16h */
@@ -517,6 +518,8 @@ static void stop_planetx3(void){
 	}
 
 	kf_audio_stop();
+	if(s_chunk_heap) free(s_chunk_buf);
+	s_chunk_buf = NULL; s_chunk_heap = 0;
 
 	xip_cache_clean_all();
 	xip_cache_invalidate_all();
@@ -549,6 +552,13 @@ static void stop_planetx3(void){
 }
 
 static void play_planetx3(void){
+	s_chunk_buf = kapi_idle_scratch(GAME_W * CHUNK_LINES * sizeof *s_chunk_buf);
+	s_chunk_heap = 0;
+	if(!s_chunk_buf){
+		s_chunk_buf = malloc(GAME_W * CHUNK_LINES * sizeof *s_chunk_buf);
+		s_chunk_heap = !!s_chunk_buf;
+	}
+	if(!s_chunk_buf){ printf("PX3: Out of SRAM for display chunk\n"); return; }
 	/* Ensure save directory exists */
 	mkdir(PX3_SAVE_DIR, 0777);
 
@@ -556,6 +566,8 @@ static void play_planetx3(void){
 	s_psram_off = kf_psram_alloc(1024 * 1024);
 	if(s_psram_off == 0xFFFFFFFFu){
 		printf("PX3: Out of PSRAM\n");
+		if(s_chunk_heap) free(s_chunk_buf);
+		s_chunk_buf = NULL; s_chunk_heap = 0;
 		return;
 	}
 	s_ram = (uint8_t *)(KF_QMI_PSRAM_CACHED + s_psram_off);
@@ -644,11 +656,9 @@ static void play_planetx3(void){
 	const uint64_t FRAME_PERIOD_US = 33333u; /* 30.0 FPS */
 	uint64_t next_tick_us = time_us_64();
 	uint64_t next_frame_us = time_us_64() + FRAME_PERIOD_US;
-	uint32_t radio_ms=0;
 
 	while(s_running){
-		uint32_t ms=to_ms_since_boot(get_absolute_time());
-		if(ms-radio_ms>=2){ kf_net_poll(); kf_bt_poll(); radio_ms=ms; }
+		kf_bt_service_audio();
 		/* 1. Poll UART keyboard */
 		uart_poll();
 		uint8_t st, key;
@@ -667,7 +677,11 @@ static void play_planetx3(void){
 		int ticks_run = 0;
 		while(now >= next_tick_us && ticks_run < 8){
 			trigger_timer_tick();
-			px3_cpu_exec(12000); /* ~12k instructions per 13.7ms tick = ~870k IPS (~10 MHz XT) */
+			/* Keep the radio serviced during an expensive emulated CPU tick. */
+			for(int batch=0;batch<6;batch++){
+				px3_cpu_exec(2000);
+				kf_bt_service_audio();
+			}
 			next_tick_us += TICK_PERIOD_US;
 			ticks_run++;
 			now = time_us_64();
@@ -690,6 +704,7 @@ static void play_planetx3(void){
 					}
 				}
 				draw_buffer_spi(0, GAME_Y_OFFSET + cy, GAME_W - 1, GAME_Y_OFFSET + cy + lines - 1, (unsigned char *)s_chunk_buf);
+				kf_bt_service_audio();
 			}
 			next_frame_us += FRAME_PERIOD_US;
 			if(next_frame_us + FRAME_PERIOD_US < now){

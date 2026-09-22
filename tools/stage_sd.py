@@ -75,8 +75,8 @@ ICON_MAP = {
 }
 import shutil
 for appid, fn in ICON_MAP.items():
-    src = (os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "bluetooth.png")
-           if appid == "bluetooth" else os.path.join(DL, fn))
+    src = (os.path.join(os.path.dirname(__file__), "..", "assets", "icons", "bluetooth.png" if appid == "bluetooth" else "gb.png")
+           if appid in ("bluetooth", "gb") else os.path.join(DL, fn))
     if not os.path.exists(src):
         sys.stderr.write("MISSING icon %s\n" % src); continue
     shutil.copyfile(src, os.path.join(ICONS, appid + ".png"))

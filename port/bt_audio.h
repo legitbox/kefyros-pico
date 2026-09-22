@@ -10,6 +10,7 @@ typedef enum {
 
 int kf_bt_init(void);
 void kf_bt_poll(void);
+void kf_bt_service_audio(void); /* lightweight CYW43 pump inside modal games */
 kf_bt_state_t kf_bt_state(void);
 const char *kf_bt_state_text(void);
 const char *kf_bt_device_name(void);
