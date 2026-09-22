@@ -63,7 +63,7 @@ double calc_eval(const cnode *n, int *ok);  /* global env; *ok=0 + calc_err on e
 void calc_fmt(double v, char *out, int outsz);   /* nice number -> string */
 
 /* ===================== worksheet mode (owned by calc.c) ===================== */
-enum { CMODE_REPL = 0, CMODE_GRAPH, CMODE_TABLE, CMODE_3D };
+enum { CMODE_REPL = 0, CMODE_GRAPH, CMODE_TABLE, CMODE_3D, CMODE_GEOM };
 int  calc_get_mode(void);
 void calc_set_mode(int m);
 void calc_show_worksheet(void);            /* reload worksheet screen; mode=REPL */
@@ -75,6 +75,11 @@ enum { GK_CARTESIAN = 0, GK_PARAM = 1, GK_POLAR = 2 };
 void calc_graph_2d(cnode **funcs, int nf, int kind);
 void calc_graph_key(uint8_t key, int mods, int pressed);   /* pressed: 1=down 0=up */
 int  calc_graph_tick(void);                                /* per-frame pan/zoom integrate */
+
+/* ===================== dynamic geometry (calc_geom.c) ===================== */
+void calc_geom_open(void);
+void calc_geom_key(uint8_t key, int mods, int pressed);
+int  calc_geom_tick(void);
 
 /* ===================== tables (calc_table.c) ===================== */
 void calc_table_open(const cnode *f, double start, double step);

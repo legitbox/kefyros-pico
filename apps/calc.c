@@ -10,6 +10,7 @@
 #include "../ui/theme.h"
 #include "../ui/deskconf.h"          /* persist result mode + angle to the SD config */
 #include "calc.h"
+#include "calc_geom.h"
 #include "calc_num.h"
 #include "calc_exact.h"
 #include <stdlib.h>
@@ -18,7 +19,7 @@
 #include <math.h>
 
 /* ===== screen state ===== */
-enum { SCR_HOME=0, SCR_SCRATCH, SCR_SOLVE, SCR_GRAPH, SCR_GRAPH3D, SCR_TABLE, SCR_SETTINGS };
+enum { SCR_HOME=0, SCR_SCRATCH, SCR_SOLVE, SCR_GRAPH, SCR_GRAPH3D, SCR_GEOM, SCR_TABLE, SCR_SETTINGS };
 
 /* result display mode: EXACT shows rationals/integers exactly (1/3+1/6 -> 1/2), falling back
    to numeric only when an expression isn't rational; DECIMAL always shows a number. */
@@ -55,6 +56,7 @@ static void home_key(uint8_t,int), scratch_key(uint8_t,int), solve_key(uint8_t,i
 /* viewer launch wrappers: remember which screen to return to, then open the viewer */
 static void launch_graph2d(cnode **f,int n,int k){ g_return_screen=screen; calc_graph_2d(f,n,k); }
 static void launch_graph3d(cnode *f){ g_return_screen=screen; calc_graph3d_open(f); }
+static void launch_geom(void){ g_return_screen=(screen==SCR_GEOM)?SCR_HOME:screen; screen=SCR_GEOM; calc_geom_open(); }
 static void launch_table(cnode *f,double s,double st){ g_return_screen=screen; calc_table_open(f,s,st); }
 
 /* ===================================================================== */
@@ -96,6 +98,7 @@ static int try_command(cnode *n){
 	if(!strcmp(nm,"param")) { launch_graph2d(n->args, n->nargs, GK_PARAM); return 1; }
 	if(!strcmp(nm,"polar")) { launch_graph2d(n->args, n->nargs, GK_POLAR); return 1; }
 	if(!strcmp(nm,"plot3d")){ if(n->nargs>=1) launch_graph3d(n->args[0]); else calc_note("usage: plot3d(f(x,y))"); return 1; }
+	if(!strcmp(nm,"geom"))  { launch_geom(); return 1; }
 	if(!strcmp(nm,"table")) {
 		if(n->nargs<1){ calc_note("usage: table(f(x)[,start,step])"); return 1; }
 		double start=-5, step=1; int ok=1;
@@ -483,7 +486,7 @@ static void do_graph2d(void){
 	for(int i=0;i<n;i++) cn_free(fs[i]);               /* the viewer cloned them */
 }
 static void g2dform_key(uint8_t k, int m){
-	if(k==DK_ESC || k==DK_BREAK){ show_screen(SCR_HOME); return; }
+	if(k==DK_ESC || k==DK_BREAK){ g2d_type=0; show_screen(SCR_HOME); return; }
 	if(k==DK_ENTER || k==DK_F1){ do_graph2d(); return; }
 	if(k==DK_F1+1){ g2d_type=(g2d_type+1)%3; g2d_relabel(); return; }  /* F2 */
 	form_edit_key(k, m);
@@ -559,10 +562,11 @@ static const struct { const char *label; int scr; } HITEMS[] = {
 	{ "Solve",      SCR_SOLVE    },
 	{ "Graph 2D",   SCR_GRAPH    },
 	{ "Graph 3D",   SCR_GRAPH3D  },
+	{ "Geometry",   SCR_GEOM     },
 	{ "Table",      SCR_TABLE    },
 	{ "Settings",   SCR_SETTINGS },   /* result mode + angle live here */
 };
-#define NHITEMS 6
+#define NHITEMS 7
 static lv_obj_t *hrows[NHITEMS];
 static int home_sel = 0;
 
@@ -611,7 +615,11 @@ static lv_obj_t *build_home(void){
 }
 static void home_key(uint8_t k, int m){
 	(void)m;
-	if(k==DK_ESC || k==DK_BREAK){ active=0;free(hbuf);hbuf=NULL;hn=0; kf_grab_input(0); kf_clock_normal(); kf_back_to_launcher(); return; }
+	if(k==DK_ESC || k==DK_BREAK){
+		active=0; mode=CMODE_REPL; screen=SCR_HOME; form_scr=NULL;
+		free(hbuf); hbuf=NULL; hn=0;
+		kf_grab_input(0); kf_clock_normal(); kf_back_to_launcher(); return;
+	}
 	if(k==DK_UP){   home_sel=(home_sel+NHITEMS-1)%NHITEMS; home_hl(); return; }
 	if(k==DK_DOWN){ home_sel=(home_sel+1)%NHITEMS; home_hl(); return; }
 	if(k==DK_ENTER) show_screen(HITEMS[home_sel].scr);
@@ -689,6 +697,12 @@ static void settings_key(uint8_t k, int m){
 /* ===================================================================== */
 static void show_screen(int s){
 	lv_obj_t *old = form_scr;
+	if(s == SCR_GEOM){
+		g_return_screen = screen;
+		screen = SCR_GEOM;
+		calc_geom_open();
+		return;
+	}
 	screen = s;
 	switch(s){
 	case SCR_HOME:    form_scr = build_home();    break;
@@ -724,16 +738,19 @@ void calc_poll(void){
 	if(!active) return;
 	uint8_t st, key;
 	while(uart_pop_key(&st, &key)){
+		if(!active) return;
 		int mods = uart_mods();
 		int pressed = (st != KS_RELEASE);
 		/* the 2D/3D plotters animate, so they need key-up too (held-key tracking) */
 		if(mode==CMODE_GRAPH){ calc_graph_key(key, mods, pressed);   continue; }
 		if(mode==CMODE_3D){    calc_graph3d_key(key, mods, pressed); continue; }
+		if(mode==CMODE_GEOM){  calc_geom_key(key, mods, pressed);    continue; }
 		if(st == KS_RELEASE) continue;
 		/* a full-screen viewer owns all keys while active */
 		if(mode==CMODE_TABLE){ calc_table_key(key, mods);   continue; }
 		switch(screen){
-		case SCR_HOME:    home_key(key, mods);      break;
+		case SCR_HOME:
+		case SCR_GEOM:    home_key(key, mods);      break;
 		case SCR_SCRATCH: scratch_key(key, mods);   break;
 		case SCR_SOLVE:   solve_key(key, mods);     break;
 		case SCR_GRAPH:   g2dform_key(key, mods);   break;
@@ -741,10 +758,13 @@ void calc_poll(void){
 		case SCR_TABLE:   tableform_key(key, mods); break;
 		case SCR_SETTINGS: settings_key(key, mods); break;
 		}
+		if(!active) return;
 	}
+	if(!active) return;
 	/* drive smooth pan/rotate animation each superloop pass */
-	if(mode==CMODE_GRAPH)   calc_graph_tick();
-	else if(mode==CMODE_3D) calc_graph3d_tick();
+	if(mode==CMODE_GRAPH)        calc_graph_tick();
+	else if(mode==CMODE_3D)      calc_graph3d_tick();
+	else if(mode==CMODE_GEOM)    calc_geom_tick();
 }
 
 void app_calc_open(void){

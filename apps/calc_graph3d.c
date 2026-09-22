@@ -425,6 +425,8 @@ void calc_graph3d_key(uint8_t key, int mods, int pressed){
 		case DK_ESC: case DK_BREAK:
 			cn_free(fn3); fn3=NULL; free(strip); strip=NULL; g3d_free();
 			held=0; vyaw=vpitch=vzoomr=0; auto_rot=0;
+			yaw=0.7; pitch=0.45; zoom=1.0;
+			shaded=0; show_plane=1; s_sph=0;
 			lv_obj_delete(scr3); scr3=NULL;
 			kf_clock_normal();    /* 3D render done: drop back to 400 MHz */
 			calc_show_worksheet(); return;

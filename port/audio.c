@@ -43,12 +43,11 @@ static uint32_t pwm_bits  = 12;
 #define SILENCE()   (pwm_mid | (pwm_mid << 16))
 
 /* ring holds pre-packed duty frames: low 16 = ch A (GP26/R), high 16 = ch B (GP27/L).
-   Lazily allocated at kf_audio_start() and freed at kf_audio_stop() — at 32 KB it's
-   the single biggest idle .bss hog, and it's only touched while audio is playing.
-   Keeping it off the heap floor when idle gives the rest of the OS (e.g. the calc
-   plotter's full-screen canvas) the contiguous room it needs. */
+   Ordinary callers malloc it only while playing. Music supplies storage in its
+   idle KAPI arena, so its ring does not consume the shared heap. */
 static uint32_t pp[2][DBUF];
 static uint32_t *ring;                               /* RING_N frames; NULL when idle */
+static int ring_owned;                               /* malloc-owned, not caller storage */
 static uint32_t ring_n = RING_N;                     /* active power-of-two capacity */
 static volatile uint32_t r_w = 0, r_r = 0;          /* free-running; count = r_w - r_r */
 static int dch = -1, dtimer = -1;
@@ -179,7 +178,9 @@ void kf_audio_idle_unpark(void){
 	gpio_set_function(AUDIO_L_PIN, GPIO_FUNC_PWM);
 }
 
-int kf_audio_start_buffered(int hz, int ring_frames){
+static int audio_start_buffered(int hz, int ring_frames, uint32_t *external){
+	kf_audio_idle_unpark();
+	pwm_set_enabled(AUDIO_SLICE, true);
 	if(hz < 8000) hz = 8000; else if(hz > 48000) hz = 48000;
 	if(running){ dma_channel_abort(dch); running = 0; }
 	if(ring_frames < 1024) ring_frames = 1024;
@@ -187,9 +188,19 @@ int kf_audio_start_buffered(int hz, int ring_frames){
 	/* Keep masking cheap and unambiguous: round down to a supported power of two. */
 	uint32_t cap = 1024;
 	while((cap << 1) <= (uint32_t)ring_frames) cap <<= 1;
-	if(ring && ring_n != cap){ free(ring); ring = NULL; }
+	if(ring && (ring_n != cap || (external && ring != external) || (!external && !ring_owned))){
+		if(ring_owned) free(ring);
+		ring = NULL; ring_owned = 0;
+	}
 	ring_n = cap;
-	if(!ring){ ring = malloc(sizeof(uint32_t) * ring_n); if(!ring) return 0; }
+	if(external){
+		if((uintptr_t)external & 3u) return 0;
+		ring = external; ring_owned = 0;
+	} else if(!ring){
+		ring = malloc(sizeof(uint32_t) * ring_n);
+		if(!ring) return 0;
+		ring_owned = 1;
+	}
 	r_w = r_r = 0;
 	ns_reset();
 	pick_resolution();
@@ -210,6 +221,13 @@ int kf_audio_start_buffered(int hz, int ring_frames){
 	return 1;
 }
 
+int kf_audio_start_buffered(int hz, int ring_frames){
+	return audio_start_buffered(hz, ring_frames, NULL);
+}
+int kf_audio_start_buffered_external(int hz, int ring_frames, uint32_t *storage){
+	if(!storage) return 0;
+	return audio_start_buffered(hz, ring_frames, storage);
+}
 void kf_audio_start(int hz){ (void)kf_audio_start_buffered(hz, RING_N); }
 
 void kf_audio_stop(void){
@@ -222,7 +240,8 @@ void kf_audio_stop(void){
 	running = 0;
 	r_w = r_r = 0;
 	pwm_hw->slice[AUDIO_SLICE].cc = SILENCE();   /* silence */
-	free(ring); ring = NULL;
+	if(ring_owned) free(ring);
+	ring = NULL; ring_owned = 0;
 	dma_hw->ints1 = 1u << dch;                   /* clear any pending completion */
 	irq_set_enabled(DMA_IRQ_1, true);
 }

@@ -144,6 +144,7 @@ uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
 void kf_audio_init(void);                 /* set up PWM slice 5 + DMA (call once at boot) */
 void kf_audio_start(int hz);              /* begin playback at sample rate hz (<=48000) */
 int  kf_audio_start_buffered(int hz, int ring_frames); /* power-of-two 1024..8192; 1 on success */
+int  kf_audio_start_buffered_external(int hz, int ring_frames, uint32_t *storage); /* caller owns ring storage */
 void kf_audio_stop(void);                 /* stop + silence */
 void kf_audio_clock_change_begin(void);   /* tristate speaker pins across a clk_sys change (anti-pop) */
 void kf_audio_clock_change_end(void);     /* restore speaker pins after the clock settles */
@@ -230,9 +231,11 @@ void app_spineko_open(void); /* Spineko: HTML-only web browser (HTTP/HTTPS) */
 void app_deepseek_open(void);/* DeepSeek chat client (HTTPS LLM chat) */
 void app_help_open(void);    /* Help: Markdown docs browser, content from SD /kefyros/help */
 int  kapi_run(const char *path); /* KAPI: load + run a class-1 .kx by path (no desktop tile in release) */
+void *kapi_idle_scratch(size_t bytes); /* idle .kx arena; built-in caller owns until exit */
 void kf_app_idle_policy(int policy); /* 0 normal, 1 keep clock, 2 keep awake; KAPI/launcher arbitration */
 void app_term_open(void);    /* Term: SSH-2 terminal client (full-screen VT100) */
 void app_gameboy_open(void); /* Game Boy / Game Boy Color emulator */
+void app_planetx3_open(void);/* Planet X3 real-time strategy */
 void app_mem_open(void);     /* Memory monitor: heap census + per-session leak log */
 
 /* topbar leak-tracker API (see ui/topbar.c) — used by the Memory monitor app */

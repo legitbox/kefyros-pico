@@ -200,7 +200,10 @@ void calc_graph_key(uint8_t key, int mods, int pressed){
 		switch(key){
 		case DK_ESC: case DK_F1+4: case DK_BREAK:
 			for(int i=0;i<MAXF;i++){ cn_free(funcs[i]); funcs[i]=NULL; }
+			nfuncs = 0;
 			free(strip); strip=NULL; held=0; vpx=vpy=vzoomr=0;
+			xmin=-10; xmax=10; ymin=-10; ymax=10;
+			trace_on=0; trace_col=GW/2;
 			lv_obj_delete(gscr); gscr=NULL;
 			calc_show_worksheet(); return;
 		case 't': case 'T': trace_on=!trace_on; trace_col=GW/2; held=0; vpx=vpy=vzoomr=0; redraw(); return;

@@ -829,6 +829,14 @@ static const kapi G_KAPI = {
 };
 
 /* ===================== teardown / poll ===================== */
+void *kapi_idle_scratch(size_t bytes){
+    /* Built-ins and SD-loaded apps cannot run together. Music may use this
+       arena while open, and releases its references before returning to the
+       launcher; a .kx image or canvas must never own it at the same time. */
+    if(s_active || s_arena_top || bytes > KAPI_ARENA_BYTES) return NULL;
+    return g_kapi_arena;
+}
+
 static void kapi_teardown(void){
     if(s_on_close) s_on_close(s_on_close_ud);
     if(s_view.open)g_view_close(&s_view);else if(s_panel_leased)g_release();

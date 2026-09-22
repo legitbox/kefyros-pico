@@ -48,7 +48,8 @@ static const desk_app_t builtin_apps[] = {
 	{ "help",       "Help",        app_help_open,        11 },
 	{ "term",       "Terminal",    app_term_open,        12 },   /* SSH-2 terminal client */
 	{ "gb",         "Game Boy",    app_gameboy_open,     13, APP_NO_SLEEP },  /* modal 59.7 Hz emulation */
-	{ "mem",        "Memory",      app_mem_open,         14 },   /* debug: heap census + leak log */
+	{ "planetx3",   "Planet X3",   app_planetx3_open,    14, APP_NO_SLEEP },
+	{ "mem",        "Memory",      app_mem_open,         15 },   /* debug: heap census + leak log */
 };
 
 #define MAX_DESK_APPS 36

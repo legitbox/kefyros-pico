@@ -263,3 +263,25 @@ group + Back history, GET forms, [img:alt] placeholders, amber style), slot 9, i
   Plus the lodepng leak fix (lib/lvgl/src/libs/lodepng/lv_lodepng.c).
 - .kx bundles rebuilt at 0x20074000 (hello/demo/smoke/calc); stale-base bundles are refused
   by the loader with "rebuild app". Both pimoroni and pico2w targets build.
+
+## MUSIC EMBEDDED PNG FRONT COVERS (2026-09-23, pending hardware check)
+- The D:/SPLOONMUSIC sample contains 583 FLACs: 299 embedded baseline JPEG front covers and
+  284 embedded PNG front covers. All are PICTURE type 3; no sidecars match the old JPEG fallback.
+  The old flac_meta() accepted only JPEG MIME. All PNG PICTURE records declare zero dimensions,
+  so the renderer reads image dimensions from PNG IHDR instead.
+- Music records JPEG/PNG PICTURE regions with bounds checks and front-cover priority. PNG decode
+  streams IDAT from the bounded FLAC file region through miniz into a 96px RGB565 thumbnail,
+  compositing alpha on the Music box background. It does not allocate the whole embedded PNG;
+  the largest sample is 2.26 MB. Sidecar PNGs are recognized too.
+- Track starts and auto-advance load art before allocating FLAC/audio buffers. Cover changes
+  detach and drop the previous LVGL source before reusing its thumbnail buffer.
+- Host smoke check decoded all 38 distinct embedded PNGs; every RGB565 thumbnail matched a
+  Pillow reference pixel-for-pixel, including the largest image through a nonzero file offset.
+  Pimoroni and stock pico2w builds pass. Pimoroni UF2 SHA-256:
+  a917907fd897cd775c5354e5dcbfa1b1cf95b5b399263f65861d7d7ebf9fd0f1.
+- Pending hardware: flash build-pimoroni/kefyros.uf2; browse PNG and JPEG tracks, play and
+  auto-advance, and check rapid navigation and Music reopen for art, audio and memory faults.
+
+## MUSIC HARDWARE RESULT (2026-09-23)
+- After the first art fix, covers rendered but playback stayed at 0:00. Music now places the persistent 96px RGB565 cover (18,432 bytes) and 4,096-frame audio ring (16,384 bytes) in the idle 48 KiB KAPI arena; cover decode uses a temporary heap thumbnail and releases it before FLAC playback. PNG inflate borrows the arena only while audio is stopped.
+- Both pimoroni and pico2w firmware builds pass. The pimoroni UF2 was copied to the RP2350 bootloader volume, which disconnected after flashing. User confirmed the current firmware works, including cover display and playback. The post-fix RAM percentage was not reported; Bluetooth streaming remains to be budgeted and tested.

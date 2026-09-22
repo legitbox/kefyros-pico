@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cross-build the Kefyros PicoCalc firmware (RP2350). Run in WSL.
 # Targets: pico2w (default), pimoroni (Pimoroni Pico Plus 2 W).
-set -e
+set -euo pipefail
 export PICO_SDK_PATH=/home/legitbox/pico-sdk
 cd /home/legitbox/kefyros-pico
 

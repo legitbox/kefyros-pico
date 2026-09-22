@@ -19,6 +19,7 @@
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
 
@@ -27,6 +28,7 @@
 #include "dr_flac/dr_flac.h"
 
 #include "src/libs/tjpgd/tjpgd.h"    /* raw scaled-stream JPEG decode for cover art */
+#include "music_png.h"             /* bounded streaming PNG cover decode */
 #include "src/font/lv_binfont_loader.h"  /* JP font loaded from SD at runtime, NOT baked
                                             into firmware: a ~1 MB baked font overflowed the
                                             400 MHz flash/XIP boot envelope and bricked boot.
@@ -40,9 +42,9 @@
 #define VIS_ROWS    11             /* visible wheel rows (odd; center is the slit) */
 #define ROW_CENTER  (VIS_ROWS/2)
 #define LEFTW       150            /* left wheel column width */
-#define THUMB       96             /* cover thumbnail max edge (px); 120 cost ~29 KB heap
-                                      per open — 96 (~18 KB) keeps the decode peak low enough
-                                      for the dr_flac + audio-ring mallocs to coexist */
+#define THUMB       96             /* max cover edge; 18 KB transient decode buffer */
+#define COVER_BYTES ((size_t)THUMB * THUMB * 2)
+#define MUSIC_RING_FRAMES 4096
 #define CHUNK       512            /* PCM frames per decode pump step */
 
 /* one library entry; stored in PSRAM as a flat array of these. */
@@ -53,13 +55,14 @@ typedef struct {
 	char     album[REC_TXT];
 	uint32_t duration;             /* seconds (0 until detail parsed) */
 	uint32_t rate;                 /* sample rate (0 until detail) */
-	uint32_t cover_off;            /* embedded JPEG byte offset in the file (0=none) */
-	uint32_t cover_len;            /* embedded JPEG byte length */
+	uint32_t cover_off;            /* embedded picture byte offset in the FLAC */
+	uint32_t cover_len;            /* embedded picture byte length (0=none) */
 	uint16_t track;                /* track number from filename/tag */
 	uint8_t  bits;                 /* bit depth */
 	uint8_t  channels;
 	uint8_t  detail;               /* 1 once flac_meta() filled rate/dur/cover */
-	uint8_t  pad[3];
+	uint8_t  cover_kind;           /* 'j' JPEG, 'p' PNG */
+	uint8_t  pad[2];
 } rec_t;
 
 /* ------------------------------------------------------------------ state --- */
@@ -90,11 +93,15 @@ static int       g_ch, g_decim, g_playhz;
 static uint64_t  g_pos, g_total;          /* native PCM frames */
 static int32_t   g_raw[CHUNK*2], g_st[CHUNK*2], g_dec2[CHUNK*2];
 
-/* cover thumbnail (RGB565); heap-allocated while the app is open, freed on exit so
-   the ~29 KB doesn't permanently shrink the shared heap for other apps. */
+/* The 48 KB idle KAPI arena holds the displayed RGB565 cover and audio ring
+   while Music is open. g_thumb is only a transient decode buffer. */
+static uint16_t     *g_cover_live;
 static uint16_t     *g_thumb;
+static int           g_thumb_edge;
 static lv_image_dsc_t g_cover_dsc;
 static int           g_cover_ok;
+static const char   *g_cover_error;
+static int           g_cover_disp = -1;
 static int           g_focus_dirty;       /* selection changed -> (re)load detail+cover */
 static uint32_t      g_focus_t;
 
@@ -155,7 +162,12 @@ static void set_album(const char *rel, rec_t *r){
 }
 
 /* =================================================== FLAC metadata (detail) = */
-static uint32_t rd_be32(FILE *f){ uint8_t b[4]; if(fread(b,1,4,f)!=4) return 0; return ((uint32_t)b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3]; }
+static int read_be32(FILE *f, uint32_t *left, uint32_t *out){
+	uint8_t b[4]; if(*left < 4 || fread(b,1,4,f)!=4) return 0;
+	*left -= 4;
+	*out = ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)|((uint32_t)b[2]<<8)|b[3];
+	return 1;
+}
 static uint32_t le32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
 
 static void take_tag(rec_t *r, const char *key, const char *val){
@@ -173,11 +185,16 @@ static void flac_meta(const char *full, rec_t *r){
 	char sig[4];
 	if(fread(sig,1,4,f)!=4 || memcmp(sig,"fLaC",4)){ fclose(f); return; }
 	int last = 0;
+	int best_cover = 0;
+	/* Keep the logical metadata offset ourselves. pico-vfs's _ftello_r() reports
+	   the FatFs file pointer, which can be ahead of stdio's buffered reads. */
+	long pos = 4;
 	while(!last){
 		uint8_t h[4]; if(fread(h,1,4,f)!=4) break;
 		last = h[0] & 0x80; int type = h[0] & 0x7f;
 		uint32_t len = ((uint32_t)h[1]<<16)|((uint32_t)h[2]<<8)|h[3];
-		long start = ftell(f);
+		if(pos > LONG_MAX-4 || len > (uint32_t)(LONG_MAX-pos-4)) break;
+		long start = pos + 4;
 		if(type == 0 && len >= 18){                         /* STREAMINFO */
 			uint8_t s[18];
 			if(fread(s,1,18,f)==18){
@@ -205,19 +222,33 @@ static void flac_meta(const char *full, rec_t *r){
 				}
 			}
 			free(buf);
-		} else if(type == 6){                               /* PICTURE */
-			(void)rd_be32(f);                               /* picture type */
-			uint32_t ml = rd_be32(f);
-			char mime[32]; uint32_t mc = ml < sizeof mime-1 ? ml : sizeof mime-1;
-			if(fread(mime,1,mc,f)!=mc){ fclose(f); return; }
-			mime[mc] = 0; if(ml > mc) fseek(f, ml-mc, SEEK_CUR);
-			uint32_t dl = rd_be32(f); fseek(f, dl, SEEK_CUR);   /* description */
-			(void)rd_be32(f); (void)rd_be32(f); (void)rd_be32(f); (void)rd_be32(f); /* w,h,depth,colors */
-			uint32_t datalen = rd_be32(f);
-			long dataoff = ftell(f);
-			if(strstr(mime,"jpeg") || strstr(mime,"jpg")){ r->cover_off = (uint32_t)dataoff; r->cover_len = datalen; }
+		} else if(type == 6 && len >= 32){                 /* PICTURE */
+			uint32_t left=len, pic_type, ml, dl, unused, datalen;
+			if(!read_be32(f,&left,&pic_type) || !read_be32(f,&left,&ml) || ml>left) break;
+			char mime[32]; uint32_t mc=ml<sizeof mime-1?ml:sizeof mime-1;
+			if(fread(mime,1,mc,f)!=mc) break;
+			mime[mc]=0;
+			if(ml>mc && fseek(f,(long)(ml-mc),SEEK_CUR)) break;
+			left-=ml;
+			if(!read_be32(f,&left,&dl) || dl>left || fseek(f,(long)dl,SEEK_CUR)) break;
+			left-=dl;
+			int valid=1;
+			for(int i=0;i<4;i++) if(!read_be32(f,&left,&unused)){ valid=0; break; }
+			if(!valid || !read_be32(f,&left,&datalen) || datalen>left) break;
+			long dataoff=start+(long)(len-left);
+			int kind=0;
+			if(!strcasecmp(mime,"image/jpeg") || !strcasecmp(mime,"image/jpg")) kind='j';
+			else if(!strcasecmp(mime,"image/png")) kind='p';
+			int priority=pic_type==3?2:1;                /* front cover wins */
+			if(kind && datalen && dataoff>=0 && priority>best_cover){
+				r->cover_off=(uint32_t)dataoff;
+				r->cover_len=datalen;
+				r->cover_kind=(uint8_t)kind;
+				best_cover=priority;
+			}
 		}
-		fseek(f, start + (long)len, SEEK_SET);              /* next block */
+		pos=start+(long)len;
+		if(fseek(f,pos,SEEK_SET)) break;                     /* next block */
 	}
 	fclose(f);
 	r->detail = 1;
@@ -338,55 +369,89 @@ static int cover_out(JDEC *jd, void *bitmap, JRECT *rect){
 static int decode_jpeg(FILE *f, long start, long len){
 	static uint8_t pool[4096];
 	if(!g_thumb) return 0;
-	cov_src src = { f, start, 0, start + len };
+	cov_src src = { f, start, 0, len };
 	JDEC jd;
 	if(jd_prepare(&jd, cover_in, pool, sizeof pool, &src) != JDR_OK) return 0;
 	int mx = jd.width > jd.height ? jd.width : jd.height;
-	g_cstep = (mx + THUMB - 1) / THUMB; if(g_cstep < 1) g_cstep = 1;
+	g_cstep = (mx + g_thumb_edge - 1) / g_thumb_edge; if(g_cstep < 1) g_cstep = 1;
 	g_tw = jd.width / g_cstep; g_th = jd.height / g_cstep;
 	if(g_tw < 1) g_tw = 1; if(g_th < 1) g_th = 1;
-	if(g_tw > THUMB) g_tw = THUMB; if(g_th > THUMB) g_th = THUMB;
+	if(g_tw > g_thumb_edge) g_tw = g_thumb_edge; if(g_th > g_thumb_edge) g_th = g_thumb_edge;
 	if(jd_decomp(&jd, cover_out, 0) != JDR_OK) return 0;
 	return 1;
 }
 /* load cover for a display position: embedded PICTURE first, else sidecar in its dir. */
 static void load_cover(int disp){
+	/* The old descriptor points at g_thumb. Drop it before changing the pixels or
+	   dimensions so LVGL cannot reuse a cached decode from the previous track. */
+	lv_image_set_src(g_cover, NULL);
+	lv_image_cache_drop(&g_cover_dsc);
 	g_cover_ok = 0;
+	g_cover_error = "NO ART";
 	if(disp < 0 || disp >= g_n) return;
 	rec_t r; rec_get(g_sorted[disp], &r);
 	char full[REC_PATH + 24]; make_full(full, sizeof full, r.path);
-
-	if(r.cover_len){                                      /* embedded JPEG */
-		FILE *f = fopen(full, "rb");
-		if(f){ g_cover_ok = decode_jpeg(f, (long)r.cover_off, (long)r.cover_len); fclose(f); }
+	if(!g_cover_live){ g_cover_error="ART ARENA"; return; }
+	if(!g_thumb){
+		static const int edges[] = { THUMB, 80, 64, 48 };
+		for(unsigned i=0;i<sizeof edges/sizeof edges[0];i++){
+			g_thumb=malloc((size_t)edges[i]*edges[i]*2);
+			if(g_thumb){ g_thumb_edge=edges[i]; break; }
+		}
 	}
+	if(!g_thumb){ g_cover_error="ART MEMORY"; return; }
+
+	if(r.cover_len){                                      /* embedded front image */
+		FILE *f = fopen(full, "rb");
+		if(f){
+			if(r.cover_kind=='j'){
+				g_cover_error="JPEG ERROR";
+				g_cover_ok=decode_jpeg(f,(long)r.cover_off,(long)r.cover_len);
+			} else if(r.cover_kind=='p'){
+				g_cover_error="PNG ERROR";
+				g_cover_ok=music_png_thumb(f,(long)r.cover_off,
+					(long)r.cover_len,g_thumb,g_thumb_edge,&g_tw,&g_th);
+			}
+			fclose(f);
+		} else g_cover_error="ART FILE";
+	} else g_cover_error="ART TAG";
 	if(!g_cover_ok){                                      /* sidecar in the album dir */
 		char dir[REC_PATH]; utf8_cpy(dir, full, sizeof dir);
 		char *slash = strrchr(dir, '/'); if(slash) *slash = 0;
-		static const char *names[] = { "Folder.jpg","folder.jpg","cover.jpg","Cover.jpg","front.jpg" };
+		static const struct { const char *name; int kind; } names[] = {
+			{ "Folder.jpg",'j' }, { "folder.jpg",'j' }, { "cover.jpg",'j' },
+			{ "Cover.jpg",'j' }, { "front.jpg",'j' }, { "Folder.png",'p' },
+			{ "folder.png",'p' }, { "cover.png",'p' }, { "Cover.png",'p' },
+			{ "front.png",'p' }
+		};
 		for(unsigned i=0;i<sizeof names/sizeof names[0] && !g_cover_ok;i++){
-			char sc[REC_PATH+24]; snprintf(sc, sizeof sc, "%s/%s", dir, names[i]);
+			char sc[REC_PATH+24]; snprintf(sc, sizeof sc, "%s/%s", dir, names[i].name);
 			FILE *f = fopen(sc, "rb"); if(!f) continue;
 			fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
-			g_cover_ok = decode_jpeg(f, 0, sz); fclose(f);
+			if(sz>0){
+				if(names[i].kind=='j') g_cover_ok=decode_jpeg(f,0,sz);
+				else g_cover_ok=music_png_thumb(f,0,sz,g_thumb,g_thumb_edge,&g_tw,&g_th);
+			}
+			fclose(f);
 		}
 	}
 	if(g_cover_ok){
+		memcpy(g_cover_live, g_thumb, (size_t)g_tw*g_th*2);
 		lv_memzero(&g_cover_dsc, sizeof g_cover_dsc);
 		g_cover_dsc.header.magic  = LV_IMAGE_HEADER_MAGIC;
 		g_cover_dsc.header.cf     = LV_COLOR_FORMAT_RGB565;
 		g_cover_dsc.header.w      = g_tw;
 		g_cover_dsc.header.h      = g_th;
 		g_cover_dsc.header.stride = g_tw * 2;
-		g_cover_dsc.data          = (const uint8_t*)g_thumb;
+		g_cover_dsc.data          = (const uint8_t*)g_cover_live;
 		g_cover_dsc.data_size     = (uint32_t)g_tw * g_th * 2;
 	}
+	free(g_thumb); g_thumb=NULL; g_thumb_edge=0;
 }
 
 /* ================================================================== UI ====== */
 static void show_cover(void){
 	if(g_cover_ok){
-		lv_image_cache_drop(&g_cover_dsc);
 		lv_image_set_src(g_cover, &g_cover_dsc);
 		int z = 120 * 256 / (g_tw > g_th ? g_tw : g_th);   /* fit to ~120 px box */
 		lv_image_set_scale(g_cover, z < 256 ? z : 256);
@@ -395,6 +460,7 @@ static void show_cover(void){
 	} else {
 		lv_image_set_src(g_cover, NULL);
 		lv_obj_add_flag(g_cover, LV_OBJ_FLAG_HIDDEN);
+		lv_label_set_text(g_noart, g_cover_error);
 		lv_obj_clear_flag(g_noart, LV_OBJ_FLAG_HIDDEN);
 	}
 }
@@ -477,7 +543,20 @@ static void open_disp(int disp){
 	g_pos = 0; g_paused = 0;
 	if(!r.detail){ flac_meta(full, &r); rec_put(g_sorted[disp], &r); }
 	g_play_disp = disp;
-	kf_audio_start(g_playhz);
+	/* Prefer the idle KAPI arena, which also holds the displayed cover. Keep a
+	   heap fallback and report failure instead of a silent 0:00 play state. */
+	int audio_ok = 0;
+	if(g_cover_live){
+		uint32_t *storage=(uint32_t*)((uint8_t*)g_cover_live+COVER_BYTES);
+		audio_ok=kf_audio_start_buffered_external(g_playhz,MUSIC_RING_FRAMES,storage);
+	}
+	if(!audio_ok) audio_ok=kf_audio_start_buffered(g_playhz,4096);
+	if(!audio_ok) audio_ok=kf_audio_start_buffered(g_playhz,2048);
+	if(!audio_ok) audio_ok=kf_audio_start_buffered(g_playhz,1024);
+	if(!audio_ok){
+		drflac_close(g_dec); g_dec=NULL; g_play_disp=-1;
+		lv_label_set_text(g_l_title, "! audio memory");
+	}
 }
 
 static int find_order_pos(int disp){
@@ -505,17 +584,35 @@ static void focus(int disp){           /* move highlight, queue detail+cover loa
 	g_focus_dirty = 1; g_focus_t = lv_tick_get();
 }
 
+static void refresh_focused_cover(void){
+	g_focus_dirty = 0;
+	ensure_detail(g_sel);
+	refresh_box_text();
+	load_cover(g_sel);
+	show_cover();
+	g_cover_disp = g_sel;
+}
+
 static void play_disp(int disp){
+	/* Decode the selected art while the previous audio ring/FLAC decoder are
+	   released. PNG inflate needs a 32 KB window; playback is opened afterward. */
+	close_dec();
 	g_order_pos = find_order_pos(disp);
-	open_disp(disp);
 	focus(disp);
+	if(g_cover_disp == disp) g_focus_dirty = 0; /* already decoded while browsing */
+	else refresh_focused_cover();
+	open_disp(disp);
 }
 
 static void on_eof(void){
 	if(g_repeat == 2){ open_disp(g_play_disp); return; }   /* repeat one */
 	int pos = g_order_pos + 1;
 	if(pos >= g_n){ if(g_repeat==1) pos = 0; else { close_dec(); return; } }
-	g_order_pos = pos; open_disp(g_order[pos]); focus(g_order[pos]);
+	close_dec();
+	g_order_pos = pos;
+	focus(g_order[pos]);
+	refresh_focused_cover();
+	open_disp(g_order[pos]);
 }
 
 static void pump(void){
@@ -563,7 +660,11 @@ static void m_exit(void){
 	kf_clock_normal();         /* hand the panel clock back to the normal 400 MHz UI */
 	g_active = 0;
 	g_cover_ok = 0;
-	free(g_thumb); g_thumb = NULL;       /* return the ~29 KB to the shared heap */
+	g_cover_disp = -1;
+	lv_image_set_src(g_cover,NULL);
+	lv_image_cache_drop(&g_cover_dsc);
+	free(g_thumb); g_thumb = NULL; g_thumb_edge = 0;
+	g_cover_live = NULL;
 	if(g_jpfont && g_jpfont != KF_FONT) lv_binfont_destroy((lv_font_t*)g_jpfont);
 	g_jpfont = NULL;
 	kf_grab_input(0);
@@ -600,11 +701,7 @@ void music_poll(void){
 		m_key(key);
 	}
 	if(g_focus_dirty && (lv_tick_get() - g_focus_t) > 120){
-		g_focus_dirty = 0;
-		ensure_detail(g_sel);
-		refresh_box_text();
-		load_cover(g_sel);
-		show_cover();
+		refresh_focused_cover();
 	}
 	pump();
 	refresh_now();
@@ -620,6 +717,8 @@ static lv_obj_t *mk_label(lv_obj_t *par, const lv_font_t *font, lv_color_t col, 
 }
 
 void app_music_open(void){
+	g_cover_disp = -1;
+	g_cover_live = kapi_idle_scratch(COVER_BYTES + MUSIC_RING_FRAMES*sizeof(uint32_t));
 	/* JP font from the SD card (kept out of firmware). Fallback = Latin Plex font. */
 	g_jpfont = lv_binfont_create("A:/kefyros/fonts/jp.bin");
 	if(!g_jpfont) g_jpfont = KF_FONT;
@@ -654,9 +753,9 @@ void app_music_open(void){
 	g_cover = lv_image_create(g_box);
 	lv_obj_align(g_cover, LV_ALIGN_TOP_MID, 0, 0);
 	g_noart = lv_label_create(g_box);
-	lv_obj_set_style_text_font(g_noart, g_jpfont, 0);
+	lv_obj_set_style_text_font(g_noart, KF_FONT, 0);
 	lv_obj_set_style_text_color(g_noart, KF_TEXT_MUTED, 0);
-	lv_label_set_text(g_noart, "\xE2\x99\xAA");          /* U+266A music note */
+	lv_label_set_text(g_noart, "NO ART");
 	lv_obj_align(g_noart, LV_ALIGN_TOP_MID, 0, 40);
 
 	int bw = LCD_W - LEFTW - 2 - 12;                     /* box inner width */
@@ -703,7 +802,6 @@ void app_music_open(void){
 	lv_obj_align(g_l_empty, LV_ALIGN_CENTER, 0, 0);
 	lv_label_set_text(g_l_empty, "");
 
-	if(!g_thumb) g_thumb = malloc((size_t)THUMB*THUMB*2);   /* cover scratch (freed on exit) */
 	kf_clock_normal();                /* the normal 400 MHz clock: 13-bit carrier + decode headroom */
 	g_active = 1;
 	lv_screen_load(g_scr);

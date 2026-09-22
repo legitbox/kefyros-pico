@@ -1,14 +1,16 @@
-// apps/gameboy.c - Game Boy / Game Boy Color for Kefyros.
+// apps/gameboy.c - Game Boy emulator for Kefyros (DMG, RGB111).
 //
-// The ILI9488 GRAM is the 2x framebuffer: its persistent white surface is cleared
-// once, then each Peanut-GB scanline is compared with a 160x144 RGB565 shadow.
-// Changed source-pixel runs are emitted as 2-pixel-wide, 2-row-high rectangles.
-// Busy scanlines collapse to one 320x2 transfer. No 320x288 SRAM framebuffer exists.
+// Display is exact 2x scaled (160x144 -> 320x288), centered vertically in the
+// 320x320 panel. The panel is switched to RGB111 mode (COLMOD 0x22: 3-bit colour,
+// 2 pixels packed per wire byte). Each 320-pixel physical row is exactly 160
+// bytes on the wire. A scanline is streamed directly to SPI in ~37 us with
+// hardware 2x2 physical sub-pixel Bayer dithering for the 4 DMG shades.
+// No 46 KB shadow framebuffer or sparse dirty run diffing needed.
 
 #define ENABLE_SOUND                 1
 #define ENABLE_LCD                   1
-#define PEANUT_GB_12_COLOUR          1
-#define PEANUT_FULL_GBC_SUPPORT      1
+#define PEANUT_GB_12_COLOUR          0
+#define PEANUT_FULL_GBC_SUPPORT      0
 
 #include "../kefyros.h"
 #include "../ui/theme.h"
@@ -27,8 +29,6 @@
 
 static uint8_t audio_read(uint16_t addr);
 static void audio_write(uint16_t addr, uint8_t val);
-/* The current pico-peanutGB header expects this frontend conversion helper
-   even though Kefyros never uses its packed RGB444 palette. */
 #define RGB555_TO_RGB444(c) (uint16_t)((((((c) >> 10) & 31u) >> 1) << 8) | \
 	((((c) >> 5) & 31u) >> 1) << 4 | (((c) & 31u) >> 1))
 #include "../lib/peanut-gbc/peanut_gb.h"
@@ -45,18 +45,15 @@ static void audio_write(uint16_t addr, uint8_t val);
 #define JOYPAD_UP      0x40u
 #define JOYPAD_DOWN    0x80u
 
-#define GB_W             160
-#define GB_H             144
-#define GB_Y             ((LCD_H - GB_H * 2) / 2)
-#define ROM_ROOT         "/kefyros/roms"
-#define ROM_SUBDIR       "/kefyros/roms/gb"
-#define SAVE_DIR         "/kefyros/saves/gb"
-#define MAX_ROMS         128
-#define ROM_NAME         96
-#define ROM_CHUNK        4096
-#define BANK_SIZE        0x4000u
-#define FULL_DIRTY       88
-#define MAX_SPARSE_RUNS  10
+#define GB_W           160
+#define GB_H           144
+#define GB_Y           ((LCD_H - GB_H * 2) / 2)  /* 16 px top/bottom border */
+#define ROM_ROOT       "/kefyros/roms"
+#define ROM_SUBDIR     "/kefyros/roms/gb"
+#define SAVE_DIR       "/kefyros/saves/gb"
+#define MAX_ROMS       128
+#define ROM_NAME       96
+#define BANK_SIZE      0x4000u
 
 enum { GB_OFF, GB_PICK, GB_PLAY };
 
@@ -73,97 +70,68 @@ static int s_nrom, s_sel;
 
 static struct gb_s *s_gb;
 static struct minigb_apu_ctx s_apu;
-static uint16_t *s_prev;
-static uint16_t s_line565[GB_W];
-static uint8_t s_dirty[GB_W];
-static uint8_t s_rgb[GB_W * 2 * 2];
+static uint8_t s_row0[GB_W];
+static uint8_t s_row1[GB_W];
 static int16_t s_audio[1200]; /* AUDIO_SAMPLES_TOTAL is 1096 at 32768 Hz. */
 static uint8_t s_buttons;
 static volatile int s_gberr;
-static uint32_t s_frames, s_rects, s_full_lines;
+static uint32_t s_frames;
 
-/* The ROM always occupies the first allocation in an exclusive PSRAM epoch. */
+/* ROM backing and bank cache: Bank 0 is always cached; Bank N is loaded on page change. */
 static uint32_t s_rom_off = 0xFFFFFFFFu;
 static uint32_t s_rom_size;
-static const uint8_t *s_rom_map;
 static uint8_t *s_bank0, *s_bankn;
 static uint32_t s_bank_page = 0xFFFFFFFFu;
 
 static uint8_t *s_cart;
-static uint32_t s_cart_off = 0xFFFFFFFFu;
 static size_t s_cart_size;
 static int s_cart_heap;
 static char s_save_path[256];
 static char s_load_detail[120];
 
-/* Neutral DMG shades. Shade zero is literal panel white, which is also the
-   retained background and therefore costs no SPI traffic while unchanged. */
-static const uint16_t s_dmg[3][4] = {
-	{0xffff, 0xad75, 0x52aa, 0x0000},
-	{0xffff, 0xad75, 0x52aa, 0x0000},
-	{0xffff, 0xad75, 0x52aa, 0x0000},
+/* RGB111 2x2 monochrome dither lookup:
+   Each Game Boy pixel expands to a 2x2 physical pixel block.
+   In RGB111 (COLMOD 0x22), 2 horizontal pixels are packed in 1 byte:
+     bit 5..3 = pixel 0 (RGB), bit 2..0 = pixel 1 (RGB)
+     RGB111_WHITE = 0b111 (7), RGB111_BLACK = 0b000 (0)
+   Shade 0 (White, 100% W): 4 white pixels -> (W,W), (W,W) = 0x3F, 0x3F
+   Shade 1 (Light Grey, 50% W): 2 white pixels -> checkerboard 0x38/0x07
+   Shade 2 (Dark Grey, 25% W): 1 white pixel -> diagonal lattice 0x07/0x00
+   Shade 3 (Black, 0% W): 4 black pixels -> (B,B), (B,B) = 0x00, 0x00 */
+static const uint8_t s_row0_lut[4][2] = {
+	{ 0x3F, 0x3F },
+	{ 0x38, 0x07 },
+	{ 0x07, 0x00 },
+	{ 0x00, 0x00 },
+};
+
+static const uint8_t s_row1_lut[4][2] = {
+	{ 0x3F, 0x3F },
+	{ 0x07, 0x38 },
+	{ 0x00, 0x38 },
+	{ 0x00, 0x00 },
 };
 
 static void set_status(const char *s){
 	if(s_status) lv_label_set_text(s_status, s ? s : "");
 }
 
-static uint16_t rgb555_to_565(uint16_t c){
-	uint16_t r = (c >> 10) & 31u;
-	uint16_t g = (c >> 5) & 31u;
-	uint16_t b = c & 31u;
-	return (uint16_t)((r << 11) | ((g << 1) << 5) | b);
-}
-
-static inline void rgb565_put2(uint8_t **dst, uint16_t c){
-	uint16_t s = __builtin_bswap16(c);
-	uint8_t *o = *dst;
-	o[0] = o[2] = (uint8_t)(s & 0xFF);
-	o[1] = o[3] = (uint8_t)(s >> 8);
-	*dst = o + 4;
-}
-
-static void emit_run(int line, int x0, int x1){
-	uint8_t *o = s_rgb;
-	for(int x = x0; x <= x1; x++) rgb565_put2(&o, s_line565[x]);
-	size_t n = (size_t)(x1 - x0 + 1) * 4u;
-	int y = GB_Y + line * 2;
-	define_region_spi(x0 * 2, y, x1 * 2 + 1, y + 1, 1);
-	spi_write_fast(Pico_LCD_SPI_MOD, s_rgb, n);
-	spi_write_fast(Pico_LCD_SPI_MOD, s_rgb, n);
+static void lcd_line(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t line){
+	(void)gb;
+	if(line >= GB_H) return;
+	int lp = (int)(line & 1);
+	for(int x = 0; x < GB_W; x++){
+		uint8_t c = pixels[x] & 3u;
+		int phase = (x ^ lp) & 1;
+		s_row0[x] = s_row0_lut[c][phase];
+		s_row1[x] = s_row1_lut[c][phase];
+	}
+	int y = GB_Y + (int)line * 2;
+	define_region_spi(0, y, LCD_W - 1, y + 1, 1);
+	spi_write_fast(Pico_LCD_SPI_MOD, s_row0, GB_W);
+	spi_write_fast(Pico_LCD_SPI_MOD, s_row1, GB_W);
 	spi_finish(Pico_LCD_SPI_MOD);
 	lcd_spi_raise_cs();
-	s_rects++;
-}
-
-static void lcd_line(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t line){
-	if(line >= GB_H || !s_prev) return;
-	uint16_t *old = s_prev + (size_t)line * GB_W;
-	int dirty = 0, runs = 0, in_run = 0;
-	for(int x = 0; x < GB_W; x++){
-		uint16_t c;
-		if(gb->cgb.cgbMode) c = rgb555_to_565(gb->cgb.fixPalette[pixels[x] & 0x3fu]);
-		else c = s_dmg[(pixels[x] & LCD_PALETTE_ALL) >> 4][pixels[x] & 3u];
-		s_line565[x] = c;
-		s_dirty[x] = (uint8_t)(c != old[x]);
-		if(s_dirty[x]){ dirty++; if(!in_run){ runs++; in_run = 1; } }
-		else in_run = 0;
-	}
-	if(!dirty) return;
-	if(dirty >= FULL_DIRTY || runs > MAX_SPARSE_RUNS){
-		emit_run((int)line, 0, GB_W - 1);
-		s_full_lines++;
-	} else {
-		int x = 0;
-		while(x < GB_W){
-			while(x < GB_W && !s_dirty[x]) x++;
-			if(x >= GB_W) break;
-			int x0 = x++;
-			while(x < GB_W && s_dirty[x]) x++;
-			emit_run((int)line, x0, x - 1);
-		}
-	}
-	memcpy(old, s_line565, sizeof s_line565);
 }
 
 static void read_psram_partial(uint32_t off, uint8_t *dst, uint32_t n){
@@ -178,8 +146,8 @@ static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr){
 	(void)gb;
 	uint32_t a = (uint32_t)addr;
 	if(a >= s_rom_size) return 0xff;
-	if(s_rom_map) return s_rom_map[a];
 	if(a < BANK_SIZE) return s_bank0[a];
+	if(s_rom_size <= 2u * BANK_SIZE) return s_bankn[a - BANK_SIZE];
 	uint32_t page = a / BANK_SIZE;
 	if(page != s_bank_page){
 		read_psram_partial(page * BANK_SIZE, s_bankn, BANK_SIZE);
@@ -225,12 +193,11 @@ static void load_cart(void){
 
 static void free_runtime(void){
 	free(s_gb); s_gb = NULL;
-	free(s_prev); s_prev = NULL;
 	free(s_bank0); s_bank0 = NULL;
 	free(s_bankn); s_bankn = NULL;
 	if(s_cart_heap) free(s_cart);
 	s_cart = NULL; s_cart_heap = 0; s_cart_size = 0;
-	s_rom_map = NULL; s_rom_off = s_cart_off = 0xFFFFFFFFu;
+	s_rom_off = 0xFFFFFFFFu;
 	s_rom_size = 0; s_bank_page = 0xFFFFFFFFu;
 }
 
@@ -244,6 +211,11 @@ static void stop_game(void){
 	kf_audio_stop();
 	free_runtime();
 	reset_exclusive_psram();
+
+	/* Restore display controller to standard 16-bit RGB565 */
+	spi_write_command(0x3A);
+	spi_write_data(0x55);
+
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
 	disp_resume_core1();
 	s_state = GB_OFF; s_active = 0;
@@ -258,10 +230,10 @@ static uint8_t joy_for_key(uint8_t key){
 	case DK_DOWN: return JOYPAD_DOWN;
 	case DK_LEFT: return JOYPAD_LEFT;
 	case DK_RIGHT: return JOYPAD_RIGHT;
-	case DK_F1 + 4: return JOYPAD_A;       /* F5 */
-	case DK_F1 + 3: return JOYPAD_B;       /* F4 */
+	case DK_F1 + 4: case 'z': case 'Z': case 'a': case 'A': return JOYPAD_A;       /* F5, Z, A */
+	case DK_F1 + 3: case 'x': case 'X': case 'b': case 'B': case 's': case 'S': return JOYPAD_B; /* F4, X, B */
 	case DK_ENTER: return JOYPAD_START;
-	case DK_BACKSPACE: return JOYPAD_SELECT;
+	case DK_BACKSPACE: case DK_TAB: case ' ': return JOYPAD_SELECT;
 	default: return 0;
 	}
 }
@@ -309,37 +281,71 @@ static int load_rom_file(const char *path){
 	if(!f){ snprintf(s_load_detail, sizeof s_load_detail, "Cannot open ROM"); return -1; }
 	if(fseek(f, 0, SEEK_END) != 0){ fclose(f); return -1; }
 	long z = ftell(f);
-	uint32_t psz = kf_psram_size();
-	if(!psz){ fclose(f); snprintf(s_load_detail, sizeof s_load_detail, "PSRAM OFFLINE after init/reset"); return -2; }
-	if(z < 0x150){ fclose(f); snprintf(s_load_detail, sizeof s_load_detail, "ROM file is truncated (%ld bytes)", z); return -1; }
-	if(z > (long)psz){ fclose(f); snprintf(s_load_detail, sizeof s_load_detail, "ROM %ldKB > PSRAM %luKB", z/1024, (unsigned long)(psz/1024)); return -2; }
+	if(z < 0x150){ fclose(f); snprintf(s_load_detail, sizeof s_load_detail, "ROM truncated (%ld B)", z); return -1; }
 	rewind(f);
 	s_rom_size = (uint32_t)z;
+
+	s_bank0 = malloc(BANK_SIZE);
+	s_bankn = malloc(BANK_SIZE);
+	if(!s_bank0 || !s_bankn){
+		fclose(f);
+		snprintf(s_load_detail, sizeof s_load_detail, "Out of SRAM for ROM banks");
+		return -3;
+	}
+
+	if(s_rom_size <= 2u * BANK_SIZE){
+		/* ROM <= 32 KB (e.g. Tetris): holds Bank 0 and Bank 1 directly in SRAM.
+		   Bypasses PSRAM completely: 100% stable, instant loading! */
+		size_t r0 = fread(s_bank0, 1, BANK_SIZE, f);
+		size_t r1 = 0;
+		if(s_rom_size > BANK_SIZE){
+			r1 = fread(s_bankn, 1, s_rom_size - BANK_SIZE, f);
+			if(s_rom_size - BANK_SIZE < BANK_SIZE)
+				memset(s_bankn + (s_rom_size - BANK_SIZE), 0xff, BANK_SIZE - (s_rom_size - BANK_SIZE));
+		} else {
+			memset(s_bankn, 0xff, BANK_SIZE);
+		}
+		fclose(f);
+		if(r0 + r1 != s_rom_size){
+			snprintf(s_load_detail, sizeof s_load_detail, "ROM read error (%zu/%lu)", r0 + r1, (unsigned long)s_rom_size);
+			return -1;
+		}
+		s_bank_page = 1;
+		return 0;
+	}
+
+	/* ROM > 32 KB: allocate in PSRAM, stream via s_bank0/s_bankn buffers (no stack buffer) */
+	uint32_t psz = kf_psram_size();
+	if(!psz){
+		fclose(f);
+		snprintf(s_load_detail, sizeof s_load_detail, "PSRAM OFFLINE for >32KB ROM");
+		return -2;
+	}
+	if(s_rom_size > psz){
+		fclose(f);
+		snprintf(s_load_detail, sizeof s_load_detail, "ROM %luKB > PSRAM %luKB",
+		         (unsigned long)(s_rom_size/1024), (unsigned long)(psz/1024));
+		return -2;
+	}
+
 	s_rom_off = kf_psram_alloc(s_rom_size);
 	if(s_rom_off == 0xFFFFFFFFu){
 		fclose(f);
-		snprintf(s_load_detail, sizeof s_load_detail, "PSRAM alloc failed: ROM %luKB, brk %lu/%luKB",
-		         (unsigned long)(s_rom_size/1024), (unsigned long)(kf_psram_brk()/1024),
-		         (unsigned long)(psz/1024));
+		snprintf(s_load_detail, sizeof s_load_detail, "PSRAM alloc failed: ROM %luKB", (unsigned long)(s_rom_size/1024));
 		return -2;
 	}
-	uint8_t buf[ROM_CHUNK];
+
 	uint32_t at = 0;
 	while(at < s_rom_size){
 		uint32_t n = s_rom_size - at;
-		if(n > sizeof buf) n = sizeof buf;
-		if(fread(buf, 1, n, f) != n){ fclose(f); return -1; }
-		kf_psram_write(s_rom_off + at, buf, n);
+		if(n > BANK_SIZE) n = BANK_SIZE;
+		uint8_t *chunk = (at == 0) ? s_bank0 : s_bankn;
+		if(fread(chunk, 1, n, f) != n){ fclose(f); return -1; }
+		kf_psram_write(s_rom_off + at, chunk, n);
 		at += n;
 	}
 	fclose(f);
-	s_rom_map = (const uint8_t *)kf_psram_map(s_rom_off, s_rom_size);
-	if(!s_rom_map){
-		s_bank0 = malloc(BANK_SIZE);
-		s_bankn = malloc(BANK_SIZE);
-		if(!s_bank0 || !s_bankn) return -3;
-		read_psram_partial(0, s_bank0, BANK_SIZE);
-	}
+	s_bank_page = 0xFFFFFFFFu;
 	return 0;
 }
 
@@ -355,7 +361,7 @@ static void build_save_path(const char *rom_name){
 static void start_game(const rom_ent_t *ent){
 	char path[256];
 	snprintf(path, sizeof path, "%s/%s", ent->subdir ? ROM_SUBDIR : ROM_ROOT, ent->name);
-	set_status("Loading ROM into PSRAM...");
+	set_status("Loading ROM...");
 	lv_refr_now(lv_display_get_default());
 
 	reset_exclusive_psram();
@@ -367,9 +373,11 @@ static void start_game(const rom_ent_t *ent){
 	}
 
 	s_gb = calloc(1, sizeof *s_gb);
-	s_prev = malloc((size_t)GB_W * GB_H * sizeof *s_prev);
-	if(!s_gb || !s_prev){ free_runtime(); reset_exclusive_psram(); set_status("Not enough SRAM for emulator"); return; }
-	for(size_t i = 0; i < (size_t)GB_W * GB_H; i++) s_prev[i] = 0xffff;
+	if(!s_gb){
+		free_runtime(); reset_exclusive_psram();
+		set_status("Not enough SRAM for emulator");
+		return;
+	}
 
 	enum gb_init_error_e err = gb_init(s_gb, gb_rom_read, gb_cart_ram_read, gb_cart_ram_write, gb_err, NULL);
 	if(err != GB_INIT_NO_ERROR){
@@ -380,10 +388,13 @@ static void start_game(const rom_ent_t *ent){
 
 	s_cart_size = (size_t)gb_get_save_size(s_gb);
 	if(s_cart_size){
-		s_cart_off = kf_psram_alloc((uint32_t)s_cart_size);
-		s_cart = s_cart_off == 0xFFFFFFFFu ? NULL : kf_psram_map(s_cart_off, (uint32_t)s_cart_size);
-		if(!s_cart){ s_cart = malloc(s_cart_size); s_cart_heap = 1; }
-		if(!s_cart){ free_runtime(); reset_exclusive_psram(); set_status("Not enough RAM for cartridge save"); return; }
+		s_cart = malloc(s_cart_size);
+		s_cart_heap = 1;
+		if(!s_cart){
+			free_runtime(); reset_exclusive_psram();
+			set_status("Not enough RAM for save");
+			return;
+		}
 	}
 	build_save_path(ent->name);
 	load_cart();
@@ -396,27 +407,40 @@ static void start_game(const rom_ent_t *ent){
 	struct tm now;
 	if(kf_time_local(&now)) gb_set_rtc(s_gb, &now);
 	s_gberr = 0; s_buttons = 0;
-	s_frames = s_rects = s_full_lines = 0;
-	/* 4096 stereo frames = 125 ms at 32768 Hz, ample for a worst-case 2x
-	   refresh but only a 16 KB contiguous allocation. Never launch silently. */
-	if(!kf_audio_start_buffered(AUDIO_SAMPLE_RATE, 4096)){
+	s_frames = 0;
+
+	/* 2048 stereo frames = 62.5 ms at 32768 Hz (8 KB contiguous buffer) */
+	if(!kf_audio_start_buffered(AUDIO_SAMPLE_RATE, 2048)){
 		free_runtime(); reset_exclusive_psram();
 		set_status("Not enough SRAM for audio ring");
 		return;
 	}
 
-	/* Clock first (clock changes briefly coordinate with Core 1), then park Core 1
-	   for the whole modal session and take direct ownership of the panel. */
+	/* Normal clock, park Core 1 and take direct control of SPI */
 	kf_clock_normal();
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
 	disp_pause_core1();
-	draw_rect_spi(0, 0, LCD_W - 1, LCD_H - 1, WHITE);
+
+	/* Switch panel to RGB111 mode (COLMOD 0x22: 3-bit, 2 px/byte) */
+	spi_write_command(0x3A);
+	spi_write_data(0x22);
+
+	/* Clear 320x320 screen in RGB111 to Black */
+	static uint8_t clear_row[LCD_W / 2];
+	memset(clear_row, 0x00, sizeof clear_row);
+	define_region_spi(0, 0, LCD_W - 1, LCD_H - 1, 1);
+	for(int y = 0; y < LCD_H; y++){
+		spi_write_fast(Pico_LCD_SPI_MOD, clear_row, sizeof clear_row);
+	}
+	spi_finish(Pico_LCD_SPI_MOD);
+	lcd_spi_raise_cs();
+
 	s_state = GB_PLAY;
 }
 
 static int has_rom_ext(const char *name){
 	const char *dot = strrchr(name, '.');
-	return dot && (!strcasecmp(dot, ".gb") || !strcasecmp(dot, ".gbc"));
+	return dot && !strcasecmp(dot, ".gb");
 }
 
 static void scan_dir(const char *path, int subdir){
@@ -479,7 +503,7 @@ void app_gameboy_open(void){
 	kf_inset_top(s_scr);
 	lv_obj_clear_flag(s_scr, LV_OBJ_FLAG_SCROLLABLE);
 	lv_obj_t *title = lv_label_create(s_scr);
-	lv_label_set_text(title, "Game Boy / Color");
+	lv_label_set_text(title, "Game Boy");
 	lv_obj_set_style_text_font(title, KF_FONT, 0);
 	lv_obj_set_style_text_color(title, KF_AMBER_BR, 0);
 	lv_obj_align(title, LV_ALIGN_TOP_LEFT, 4, 1);
@@ -504,7 +528,7 @@ void app_gameboy_open(void){
 	lv_obj_set_style_text_font(s_status, KF_FONT, 0);
 	lv_obj_set_style_text_color(s_status, KF_TEXT_DIM, 0);
 	lv_obj_align(s_status, LV_ALIGN_BOTTOM_LEFT, 4, -2);
-	set_status(s_nrom ? "ENTER play | arrows D-pad | F5 A | F4 B | ESC quit" : "Put .gb/.gbc in /kefyros/roms/gb");
+	set_status(s_nrom ? "ENTER play | arrows D-pad | F5/Z A | F4/X B | ESC quit" : "Put .gb in /kefyros/roms/gb");
 	highlight();
 	kf_grab_input(1);
 	s_active = 1; s_state = GB_PICK;
