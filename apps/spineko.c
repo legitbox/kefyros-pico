@@ -1327,7 +1327,7 @@ void browser_poll(void){
 		s_http_eco_fallback = 1;
 	int need_eco = kf_net_state()!=KF_NET_ONLINE || hs==KF_HTTP_RESOLVING || (active && s_http_eco_fallback);
 	if(!need_eco){
-		if(!s_fast_clock || kf_clock_khz()!=400000u){ kf_clock_normal(); s_fast_clock=1; }
+		if(!s_fast_clock || kf_clock_khz()!=300000u){ kf_clock_normal(); s_fast_clock=1; }
 	} else if(s_fast_clock || kf_clock_khz()!=250000u){
 		kf_clock_eco(); s_fast_clock=0;
 	}

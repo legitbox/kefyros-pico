@@ -144,18 +144,22 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static uint8_t row[LCD_W * 2];        /* one RGB565 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
-	/* Overclock ladder. Panel SPI = clk_sys/4 on each rung: 400->100, 420->105 MHz. Capped at
-	   420/105 - the panel SPI corrupts above ~110, so 420 is the practical ceiling. The 420 rung
-	   overvolts to 1.35 V (above the 1.30 V longevity cap) - held ONLY while this test is open;
-	   the entry clock + voltage are restored on exit (ESC). */
+	/* Overclock ladder. Panel SPI downclocked for RGB565 locked 30 FPS:
+	   250 MHz eco (62.5 MHz SPI @ 1.10 V), 300 MHz nominal (50 MHz SPI @ 1.10 V),
+	   350 MHz boost (58.33 MHz SPI @ 1.20 V).
+	   The entry clock + voltage are restored on exit (ESC). */
 	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
-		{400000, VREG_VOLTAGE_1_30, 100000000u},   /* 400/4 = 100  (UI default) */
-		{420000, VREG_VOLTAGE_1_35, 105000000u},   /* 420/4 = 105  (fastest)    */
+		{250000, VREG_VOLTAGE_1_10, 62500000u},   /* 250/4 = 62.5 MHz (eco)     */
+		{300000, VREG_VOLTAGE_1_10, 50000000u},   /* 300/6 = 50.0 MHz (nominal) */
+		{350000, VREG_VOLTAGE_1_20, 58333333u},   /* 350/6 = 58.3 MHz (boost)   */
 	};
 	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
-	int step = 0;
 	const uint32_t entry_khz = clock_sys_mhz() * 1000u;   /* restore clk_sys on exit  */
 	const enum vreg_voltage entry_v = vreg_get_voltage(); /* restore rail on exit     */
+	int step = 1;                                         /* nominal default */
+	for(int i = 0; i < NSTEP; i++){
+		if(STEP[i].khz == entry_khz){ step = i; break; }
+	}
 
 	kf_grab_input(1);                     /* raw keys to us, not LVGL */
 	disp_pause_core1();                   /* take the panel from the flush pump */
@@ -221,7 +225,7 @@ static void act_screentest(lv_event_t *e){ (void)e;
 
 	/* Restore the core clock + voltage we entered with (drop down from whatever rung
 	   we left on), then hand the panel back at the normal OS SPI speed. */
-	if(step != 0) kf_clock_set_bare(entry_khz, entry_v, entry_khz > STEP[step].khz);
+	if(STEP[step].khz != entry_khz) kf_clock_set_bare(entry_khz, entry_v, entry_khz > STEP[step].khz);
 	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);   /* restore the OS panel clock */
 	disp_resume_core1();
 	kf_grab_input(0);

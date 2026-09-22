@@ -3,12 +3,9 @@
 #include "pico/multicore.h"
 #include <hardware/spi.h>
 
-#define LCD_SPI_SPEED  100000000    /* = clk_sys/4 at the 400 MHz UI clock = 100 MHz. SPI baud is
-                                       clk_sys/4 (next divider step ÷2 is unsurvivable), so the panel
-                                       speed is tied to the UI clock: 400→100. The Screen Test
-                                       validated the panel clean to 110 (440 MHz); 480/500 killed the
-                                       *core*, so 440 is this chip's ceiling. Calc runs 420→105 via
-                                       kf_clock_boost() (the Calculator); the rest of the UI sits at 100. */
+#define LCD_SPI_SPEED  62500000    /* Panel SPI target downclocked from 100 MHz for 30 FPS RGB565.
+                                       From 300 MHz sys, /6 gives 50 MHz (~30.5 FPS wire ceiling),
+                                       yielding a safe ~3x panel overclock (down from 6.6x @ 100 MHz). */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI
