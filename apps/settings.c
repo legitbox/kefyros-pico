@@ -144,14 +144,14 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static uint8_t row[LCD_W * 2];        /* one RGB565 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
-	/* Overclock ladder. Panel SPI downclocked for RGB565 locked 30 FPS:
-	   250 MHz eco (62.5 MHz SPI @ 1.10 V), 300 MHz nominal (50 MHz SPI @ 1.10 V),
-	   350 MHz boost (58.33 MHz SPI @ 1.20 V).
+	/* Overclock ladder. Panel SPI downclocked for RGB565 locked 30+ FPS (all /4):
+	   250 MHz eco (62.5 MHz SPI @ 1.10 V), 300 MHz nominal (75 MHz SPI @ 1.10 V),
+	   350 MHz boost (87.5 MHz SPI @ 1.20 V).
 	   The entry clock + voltage are restored on exit (ESC). */
 	static const struct { uint32_t khz; enum vreg_voltage v; uint32_t spi; } STEP[] = {
 		{250000, VREG_VOLTAGE_1_10, 62500000u},   /* 250/4 = 62.5 MHz (eco)     */
-		{300000, VREG_VOLTAGE_1_10, 50000000u},   /* 300/6 = 50.0 MHz (nominal) */
-		{350000, VREG_VOLTAGE_1_20, 58333333u},   /* 350/6 = 58.3 MHz (boost)   */
+		{300000, VREG_VOLTAGE_1_10, 75000000u},   /* 300/4 = 75.0 MHz (nominal) */
+		{350000, VREG_VOLTAGE_1_20, 87500000u},   /* 350/4 = 87.5 MHz (boost)   */
 	};
 	const int NSTEP = (int)(sizeof STEP / sizeof STEP[0]);
 	const uint32_t entry_khz = clock_sys_mhz() * 1000u;   /* restore clk_sys on exit  */

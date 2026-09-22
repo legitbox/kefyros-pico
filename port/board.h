@@ -63,9 +63,9 @@
    main() then ramps WARM to the normal 300 MHz clock (kf_clock_normal) for smooth 30 FPS menus.
    The tiers:
      * kf_clock_sleep()  -> 150 MHz @ 1.10 V  (idle screen-off; kf_clock_wake() restores the prior tier)
-     * kf_clock_eco()    -> 250 MHz @ 1.10 V  (WiFi-safe; brief, wraps the radio JOIN only)
-     * kf_clock_normal() -> 300 MHz @ 1.10 V / 50-75 MHz SPI  (the UI / apps / audio default in RGB565)
-     * kf_clock_boost()  -> 350 MHz @ 1.20 V / 58-87 MHz SPI  (turbo: Music decode + calc 3D. Restores normal)
+     * kf_clock_eco()    -> 250 MHz @ 1.10 V / 62.5 MHz SPI (WiFi-safe; brief, wraps radio JOIN)
+     * kf_clock_normal() -> 300 MHz @ 1.10 V / 75.0 MHz SPI (the UI / apps / audio default in RGB565)
+     * kf_clock_boost()  -> 350 MHz @ 1.20 V / 87.5 MHz SPI (turbo: Music decode + calc 3D. Restores normal)
    The QMI flash divider is sized once at boot for the 350 MHz peak, so all tiers are safe. */
 #define KF_SYS_KHZ        250000      /* cold-boot clock; warm-ramps to the normal 300 MHz */
 #define KF_VREG_MV        1100        /* VREG_VOLTAGE_1_10 (stock voltage for 250/300; raised to 1.20 for boost) */

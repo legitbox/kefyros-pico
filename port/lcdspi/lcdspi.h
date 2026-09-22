@@ -3,9 +3,9 @@
 #include "pico/multicore.h"
 #include <hardware/spi.h>
 
-#define LCD_SPI_SPEED  62500000    /* Panel SPI target downclocked from 100 MHz for 30 FPS RGB565.
-                                       From 300 MHz sys, /6 gives 50 MHz (~30.5 FPS wire ceiling),
-                                       yielding a safe ~3x panel overclock (down from 6.6x @ 100 MHz). */
+#define LCD_SPI_SPEED  75000000    /* Panel SPI target: clk_sys/4 at 300 MHz = 75 MHz (~45.8 FPS wire).
+                                       At 250 MHz eco, clk_sys/4 = 62.5 MHz; at 350 MHz boost, /4 = 87.5 MHz.
+                                       All tiers use /4 divider cleanly (well within the panel's 100 MHz validation). */
 
 #define Pico_LCD_SCK 10 //
 #define Pico_LCD_TX  11 // MOSI
