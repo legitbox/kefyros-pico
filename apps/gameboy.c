@@ -76,7 +76,7 @@ static struct minigb_apu_ctx s_apu;
 static uint16_t *s_prev;
 static uint16_t s_line565[GB_W];
 static uint8_t s_dirty[GB_W];
-static uint8_t s_rgb[GB_W * 2 * 3];
+static uint8_t s_rgb[GB_W * 2 * 2];
 static int16_t s_audio[1200]; /* AUDIO_SAMPLES_TOTAL is 1096 at 32768 Hz. */
 static uint8_t s_buttons;
 static volatile int s_gberr;
@@ -115,24 +115,18 @@ static uint16_t rgb555_to_565(uint16_t c){
 	return (uint16_t)((r << 11) | ((g << 1) << 5) | b);
 }
 
-static void rgb565_put2(uint8_t **dst, uint16_t c){
-	uint8_t r5 = (uint8_t)((c >> 11) & 31u);
-	uint8_t g6 = (uint8_t)((c >> 5) & 63u);
-	uint8_t b5 = (uint8_t)(c & 31u);
-	uint8_t r = (uint8_t)((r5 << 3) | (r5 >> 2));
-	uint8_t g = (uint8_t)((g6 << 2) | (g6 >> 4));
-	uint8_t b = (uint8_t)((b5 << 3) | (b5 >> 2));
+static inline void rgb565_put2(uint8_t **dst, uint16_t c){
+	uint16_t s = __builtin_bswap16(c);
 	uint8_t *o = *dst;
-	o[0] = o[3] = r;
-	o[1] = o[4] = g;
-	o[2] = o[5] = b;
-	*dst = o + 6;
+	o[0] = o[2] = (uint8_t)(s & 0xFF);
+	o[1] = o[3] = (uint8_t)(s >> 8);
+	*dst = o + 4;
 }
 
 static void emit_run(int line, int x0, int x1){
 	uint8_t *o = s_rgb;
 	for(int x = x0; x <= x1; x++) rgb565_put2(&o, s_line565[x]);
-	size_t n = (size_t)(x1 - x0 + 1) * 6u;
+	size_t n = (size_t)(x1 - x0 + 1) * 4u;
 	int y = GB_Y + line * 2;
 	define_region_spi(x0 * 2, y, x1 * 2 + 1, y + 1, 1);
 	spi_write_fast(Pico_LCD_SPI_MOD, s_rgb, n);

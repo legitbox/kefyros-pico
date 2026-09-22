@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-/* Color: RGB565 in the draw buffer; flush expands to RGB666 for the ILI9488. */
+/* Color: RGB565 in the draw buffer and native RGB565 flush to the panel. */
 #define LV_COLOR_DEPTH 16
 
 /* Use the C library (musl) for malloc/string/sprintf — it's Linux. */

@@ -141,7 +141,7 @@ static void act_screentest(lv_event_t *e){ (void)e;
 	static const uint8_t pal[6][3] = {
 		{255,255,255},{255,0,0},{0,255,0},{0,0,255},{255,255,0},{0,255,255}
 	};
-	static uint8_t row[LCD_W * 3];        /* one RGB888 scanline (static: off the stack) */
+	static uint8_t row[LCD_W * 2];        /* one RGB565 scanline (static: off the stack) */
 	lv_obj_t *back = lv_screen_active();
 
 	/* Overclock ladder. Panel SPI = clk_sys/4 on each rung: 400->100, 420->105 MHz. Capped at
@@ -189,10 +189,13 @@ static void act_screentest(lv_event_t *e){ (void)e;
 		/* one scrolling-bar scanline pushed to the whole panel BELOW the text strip */
 		for(int x = 0; x < LCD_W; x++){
 			const uint8_t *c = pal[((x + frame) / 24) % 6];
-			row[x*3] = c[0]; row[x*3+1] = c[1]; row[x*3+2] = c[2];
+			uint16_t c565 = (uint16_t)(((c[0] & 0xF8) << 8) | ((c[1] & 0xFC) << 3) | (c[2] >> 3));
+			uint16_t s = __builtin_bswap16(c565);
+			row[x*2] = (uint8_t)(s & 0xFF);
+			row[x*2+1] = (uint8_t)(s >> 8);
 		}
 		define_region_spi(0, TEXT_H, LCD_W - 1, LCD_H - 1, 1);
-		for(int y = TEXT_H; y < LCD_H; y++) spi_write_fast(Pico_LCD_SPI_MOD, row, LCD_W * 3);
+		for(int y = TEXT_H; y < LCD_H; y++) spi_write_fast(Pico_LCD_SPI_MOD, row, LCD_W * 2);
 		spi_finish(Pico_LCD_SPI_MOD);
 		lcd_spi_raise_cs();
 

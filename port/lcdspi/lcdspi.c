@@ -24,7 +24,7 @@ static short vres = 320; // Vertical resolution for ILI9488
 static char s_height;
 static char s_width;
 int lcd_char_pos = 0;
-unsigned char lcd_buffer[320 * 3] = {0};// 1440 = 480*3, 320*3 = 960
+unsigned char lcd_buffer[320 * 2] = {0};
 
 void __not_in_flash_func(spi_write_fast)(spi_inst_t *spi, const uint8_t *src, size_t len) {
     // Write to TX FIFO whilst ignoring RX, then clean up afterward. When RX
@@ -34,6 +34,19 @@ void __not_in_flash_func(spi_write_fast)(spi_inst_t *spi, const uint8_t *src, si
         while (!spi_is_writable(spi))
             tight_loop_contents();
         spi_get_hw(spi)->dr = (uint32_t) src[i];
+    }
+}
+
+void __not_in_flash_func(spi_write_fast16)(spi_inst_t *spi, const uint16_t *src, size_t count) {
+    // Stream 16-bit RGB565 words over SPI (MSB first: Red byte then Blue byte)
+    for (size_t i = 0; i < count; ++i) {
+        uint16_t p = __builtin_bswap16(src[i]);
+        while (!spi_is_writable(spi))
+            tight_loop_contents();
+        spi_get_hw(spi)->dr = (uint32_t)(p & 0xFF);
+        while (!spi_is_writable(spi))
+            tight_loop_contents();
+        spi_get_hw(spi)->dr = (uint32_t)(p >> 8);
     }
 }
 
@@ -137,8 +150,7 @@ void read_buffer_spi(int x1, int y1, int x2, int y2, unsigned char *p) {
 }
 
 void draw_buffer_spi(int x1, int y1, int x2, int y2, unsigned char *p) {
-    int i, t;
-    unsigned char q[3];
+    int t;
     
     // Boundary checking
     if (x2 <= x1) {
@@ -160,38 +172,12 @@ void draw_buffer_spi(int x1, int y1, int x2, int y2, unsigned char *p) {
     if (y2 < 0) y2 = 0;
     if (y2 >= vres) y2 = vres - 1;
     
-    // Calculate total number of pixels
     int pixelCount = (x2 - x1 + 1) * (y2 - y1 + 1);
-    uint16_t *pixelBuffer = (uint16_t *)p;
+    const uint16_t *pixelBuffer = (const uint16_t *)p;
     
     define_region_spi(x1, y1, x2, y2, 1);
-    
-    for (i = 0; i < pixelCount; i++) {
-        uint16_t pixel = pixelBuffer[i];
-        
-        // Extract RGB565 components
-        uint8_t r5 = (pixel >> 11) & 0x1F;
-        uint8_t g6 = (pixel >> 5) & 0x3F;
-        uint8_t b5 = pixel & 0x1F;
-        
-        // Convert to 8-bit values (scaling approximation)
-        uint8_t r8 = (r5 << 3) | (r5 >> 2);
-        uint8_t g8 = (g6 << 2) | (g6 >> 4);
-        uint8_t b8 = (b5 << 3) | (b5 >> 2);
-        
-#ifdef ILI9488
-        // Convert each RGB565 pixel to RGB888 (3 bytes per pixel) for ILI9488
-        uint8_t rgb[3];
-        rgb[0] = r8;  // Red
-        rgb[1] = g8;  // Green
-        rgb[2] = b8;  // Blue
-        hw_send_spi(rgb, 3);
-#else
-        // For other controllers or if using 16-bit mode, retain the original conversion
-        hw_send_spi(q, 2);
-#endif
-    }
-    
+    spi_write_fast16(Pico_LCD_SPI_MOD, pixelBuffer, (size_t)pixelCount);
+    spi_finish(Pico_LCD_SPI_MOD);
     lcd_spi_raise_cs();
 }
 
@@ -203,13 +189,8 @@ void draw_buffer_spi(int x1, int y1, int x2, int y2, unsigned char *p) {
 //    bitmap - pointer to the bitmap
 void draw_bitmap_spi(int x1, int y1, int width, int height, int scale, int fc, int bc, unsigned char *bitmap) {
     int i, j, k, m, n;
-    char f[3], b[3];
+    uint8_t f[2], b[2];
     int vertCoord, horizCoord, XStart, XEnd, YEnd;
-    char *p = 0;
-    union colourmap {
-        char rgbbytes[4];
-        unsigned int rgb;
-    } c;
 
     if (x1 >= hres || y1 >= vres || x1 + width * scale < 0 || y1 + height * scale < 0)return;
     // adjust when part of the bitmap is outside the displayable coordinates
@@ -222,17 +203,15 @@ void draw_bitmap_spi(int x1, int y1, int width, int height, int scale, int fc, i
     YEnd = y1 + (height * scale) - 1;
     if (YEnd >= vres) YEnd = vres - 1;// the height of the bitmap will extend beyond the bottom margin
 
-#ifdef ILI9488
-    // convert the colours to 565 format
-    f[0] = (fc >> 16);
-    f[1] = (fc >> 8) & 0xFF;
-    f[2] = (fc & 0xFF);
-    b[0] = (bc >> 16);
-    b[1] = (bc >> 8) & 0xFF;
-    b[2] = (bc & 0xFF);
+    uint16_t f565 = (uint16_t)(((fc >> 8) & 0xF800) | ((fc >> 5) & 0x07E0) | ((fc >> 3) & 0x001F));
+    uint16_t b565 = (uint16_t)(((bc >> 8) & 0xF800) | ((bc >> 5) & 0x07E0) | ((bc >> 3) & 0x001F));
+    uint16_t fs = __builtin_bswap16(f565);
+    uint16_t bs = __builtin_bswap16(b565);
+    f[0] = (uint8_t)(fs & 0xFF);
+    f[1] = (uint8_t)(fs >> 8);
+    b[0] = (uint8_t)(bs & 0xFF);
+    b[1] = (uint8_t)(bs >> 8);
 
-#endif
-    //printf("draw_bitmap_spi-> XStart %d, y1 %d, XEnd %d, YEnd %d\n",XStart,y1,XEnd,YEnd);
     define_region_spi(XStart, y1, XEnd, YEnd, 1);
 
     n = 0;
@@ -249,38 +228,36 @@ void draw_bitmap_spi(int x1, int y1, int width, int height, int scale, int fc, i
                     if (horizCoord++ < 0) continue;                  // we have not reached the left margin
                     if (horizCoord > hres) continue;                 // we are beyond the right margin
                     if ((bitmap[((i * width) + k) / 8] >> (((height * width) - ((i * width) + k) - 1) % 8)) & 1) {
-                        hw_send_spi((uint8_t *) &f, 3);
+                        hw_send_spi(f, 2);
                     } else {
-                        hw_send_spi((uint8_t *) &b, 3);
+                        hw_send_spi(b, 2);
                     }
-                    n += 3;
+                    n += 2;
                 }
             }
         }
     }
     lcd_spi_raise_cs();                                  //set CS high
-
 }
 
 // Draw a filled rectangle
-// this is the basic drawing promitive used by most drawing routines
+// this is the basic drawing primitive used by most drawing routines
 //    x1, y1, x2, y2 - the coordinates
 //    c - the colour
 void draw_rect_spi(int x1, int y1, int x2, int y2, int c) {
-    // convert the colours to 565 format
-    unsigned char col[3];
+    uint8_t col[2];
+    uint16_t c565 = (uint16_t)(((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c >> 3) & 0x001F));
+    uint16_t cs = __builtin_bswap16(c565);
+    col[0] = (uint8_t)(cs & 0xFF);
+    col[1] = (uint8_t)(cs >> 8);
+
     if (x1 == x2 && y1 == y2) {
         if (x1 < 0) return;
         if (x1 >= hres) return;
         if (y1 < 0) return;
         if (y1 >= vres) return;
         define_region_spi(x1, y1, x2, y2, 1);
-#ifdef ILI9488
-        col[0] = (c >> 16);
-        col[1] = (c >> 8) & 0xFF;
-        col[2] = (c & 0xFF);
-#endif
-        hw_send_spi(col, 3);
+        hw_send_spi(col, 2);
     } else {
         int i, t, y;
         unsigned char *p;
@@ -304,22 +281,15 @@ void draw_rect_spi(int x1, int y1, int x2, int y2, int c) {
         if (y2 < 0) y2 = 0;
         if (y2 >= vres) y2 = vres - 1;
         define_region_spi(x1, y1, x2, y2, 1);
-#ifdef ILI9488
-        i = x2 - x1 + 1;
-        i *= 3;
+        i = (x2 - x1 + 1) * 2;
         p = lcd_buffer;
-        col[0] = (c >> 16);
-        col[1] = (c >> 8) & 0xFF;
-        col[2] = (c & 0xFF);
-        for (t = 0; t < i; t += 3) {
+        for (t = 0; t < i; t += 2) {
             p[t] = col[0];
             p[t + 1] = col[1];
-            p[t + 2] = col[2];
         }
         for (y = y1; y <= y2; y++) {
             spi_write_fast(Pico_LCD_SPI_MOD, p, i);
         }
-#endif
     }
     spi_finish(Pico_LCD_SPI_MOD);
     lcd_spi_raise_cs();
@@ -594,7 +564,7 @@ void pico_lcd_init() {
     spi_write_data(0x48); // MX, BGR
 
     spi_write_command(0x3A); // Pixel Interface Format
-    spi_write_data(0x66); // 18/24-bit colour for SPI (RGB666/RGB888)
+    spi_write_data(0x55); // 16-bit colour for SPI (RGB565)
 
     spi_write_command(0xB0); // Interface Mode Control
     spi_write_data(0x00);

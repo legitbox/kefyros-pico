@@ -195,7 +195,7 @@ static void g_clip(kf_canvas h, int x, int y, int w, int hh){
 static void g_screen_size(int *w, int *h){ if(w) *w = LCD_W; if(h) *h = LCD_H; }
 
 /* exclusive (raw panel) — wrappers over the same path the GB emulator uses. push() takes
-   already-formatted RGB888 bytes (panel-native), like spi_write_fast in gameboy.c. */
+   already-formatted RGB565 bytes (panel-native), like spi_write_fast in gameboy.c. */
 static int s_panel_leased;
 static kf_err g_lease(void){
     if(s_panel_leased)return KF_EAGAIN;

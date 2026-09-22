@@ -103,6 +103,7 @@
 #define TRISSET             -2
 
 extern void __not_in_flash_func(spi_write_fast)(spi_inst_t *spi, const uint8_t *src, size_t len);
+extern void __not_in_flash_func(spi_write_fast16)(spi_inst_t *spi, const uint16_t *src, size_t count);
 extern void __not_in_flash_func(spi_finish)(spi_inst_t *spi);
 extern void hw_read_spi(unsigned char *buff, int cnt);
 extern void hw_send_spi(const unsigned char *buff, int cnt);
