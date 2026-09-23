@@ -121,6 +121,13 @@ static void act_rescan(lv_event_t *e){ (void)e;
 	start_scan();        /* re-populate as results arrive */
 }
 
+static void act_disconnect(lv_event_t *e){ (void)e;
+	close_pw();
+	kf_net_disconnect();
+	rebuild_list();
+	refresh_status();
+}
+
 static void act_forget(lv_event_t *e){ (void)e;
 	close_pw();
 	kf_net_forget();
@@ -163,6 +170,9 @@ static void rebuild_list(void){
 	lv_obj_add_event_cb(b, act_bench, LV_EVENT_CLICKED, NULL);
 	lv_group_add_obj(g, b);
 	if(kf_net_ssid()[0]){
+		b = lv_list_add_button(list, NULL, "Disconnect");
+		lv_obj_add_event_cb(b, act_disconnect, LV_EVENT_CLICKED, NULL);
+		lv_group_add_obj(g, b);
 		b = lv_list_add_button(list, NULL, "Forget network");
 		lv_obj_add_event_cb(b, act_forget, LV_EVENT_CLICKED, NULL);
 		lv_group_add_obj(g, b);

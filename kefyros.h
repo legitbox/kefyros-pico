@@ -187,6 +187,7 @@ const char    *kf_net_ip(void);           /* dotted IPv4, "0.0.0.0" until online
 const char    *kf_net_ssid(void);         /* current/last target SSID ("" if none) */
 int            kf_net_rssi(void);         /* current RSSI dBm, or 0 when unavailable */
 void           kf_net_connect(const char *ssid, const char *pass);  /* async; persists creds */
+void           kf_net_disconnect(void);   /* drop the link, keep saved creds */
 void           kf_net_forget(void);       /* disconnect + clear saved creds */
 void           kf_net_autoconnect(void);  /* scan + join the strongest saved network (call at boot, at eco) */
 int            kf_net_autoconnect_active(void); /* 1 while a boot campaign is still scanning/trying */

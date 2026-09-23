@@ -276,6 +276,10 @@ void kf_net_connect(const char *ssid, const char *pass){
 
 void kf_net_forget(void){
 	if(s_ssid[0]) known_forget_one(s_ssid);   /* drop it from the saved store */
+	kf_net_disconnect();
+}
+
+void kf_net_disconnect(void){
 	s_camp = CAMP_NONE;
 	s_have_target = 0;
 	s_badauth = 0;
