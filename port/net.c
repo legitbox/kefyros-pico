@@ -17,6 +17,7 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"   /* tcp_active_pcbs, for the idle check */
 #include "lwip/dns.h"
 #include "lwip/apps/sntp.h"
 #include <time.h>
@@ -43,6 +44,8 @@ static char           s_pass[65] = {0};       /* current/last target key  */
 static int            s_have_target = 0;       /* creds set -> watchdog active */
 static int            s_badauth = 0;           /* last attempt rejected the key */
 static char           s_ip[16] = "0.0.0.0";
+static uint32_t       s_idle_drop_ms = 0;      /* lv_tick when the idle timeout dropped the link */
+static uint32_t       s_rejoin_khz = 0;        /* clock to restore once an idle rejoin settles */
 
 static uint32_t       s_last_attempt_ms = 0;   /* for the reconnect backoff */
 static uint32_t       s_attempts = 0;
@@ -265,6 +268,7 @@ static void set_target(const char *ssid, const char *pass){
 }
 
 void kf_net_connect(const char *ssid, const char *pass){
+	s_idle_drop_ms = 0;
 	if(!ssid || !ssid[0]) return;
 	s_camp = CAMP_NONE;                 /* a manual connect cancels any boot campaign */
 	set_target(ssid, pass);
@@ -276,6 +280,11 @@ void kf_net_connect(const char *ssid, const char *pass){
 
 void kf_net_forget(void){
 	if(s_ssid[0]) known_forget_one(s_ssid);   /* drop it from the saved store */
+	kf_net_disconnect();
+}
+
+void kf_net_disconnect(void){
+	s_idle_drop_ms = 0;                /* a manual disconnect is not undone by a key press */
 	s_camp = CAMP_NONE;
 	s_have_target = 0;
 	s_badauth = 0;
@@ -295,6 +304,7 @@ int kf_net_autoconnect_active(void){ return s_camp == CAMP_SCAN || s_camp == CAM
    in kf_net_poll drives it). No-op if nothing saved or the radio isn't up. Caller must already
    be at a WiFi-safe clock (<=270 MHz). */
 void kf_net_autoconnect(void){
+	s_idle_drop_ms = 0;
 	if(!s_present || known_count() == 0) return;
 	s_try_n = 0; s_try_idx = 0;
 	s_seen_n = 0;
@@ -504,9 +514,39 @@ static void campaign_tick(void){
 	}
 }
 
+/* Idle disconnect: after `wifi_timeout` minutes (config.txt, default 10, 0 = never) with no
+   key pressed and no open TCP connection (an SSH session, an app socket), drop the link.
+   Saved networks stay. The first key pressed inside an app afterwards rejoins them (on the
+   desktop a key doesn't; apps that need the network connect when they open anyway). */
+static void idle_check(void){
+	static uint32_t last;
+	if(lv_tick_get() - last < 1000) return;
+	last = lv_tick_get();
+	if(s_rejoin_khz && (s_state == KF_NET_ONLINE || (!kf_net_autoconnect_active() && s_state != KF_NET_CONNECTING))){
+		if(s_rejoin_khz >= 350000u) kf_clock_boost();   /* back to the tier the app was on */
+		else if(s_rejoin_khz >= 300000u) kf_clock_normal();
+		s_rejoin_khz = 0;
+	}
+	if(s_idle_drop_ms){
+		if((int32_t)(uart_last_activity() - s_idle_drop_ms) > 0 && kf_app_is_open()){
+			s_idle_drop_ms = 0;
+			s_rejoin_khz = kf_clock_khz();
+			kf_clock_eco();                /* the radio only joins at <=~270 MHz */
+			kf_net_autoconnect();
+		}
+		return;
+	}
+	int min = deskconf_get_int("wifi_timeout", 10);
+	if(min <= 0 || (!s_have_target && s_camp == CAMP_NONE) || tcp_active_pcbs) return;
+	if(lv_tick_get() - uart_last_activity() < (uint32_t)min * 60000u) return;
+	kf_net_disconnect();
+	s_idle_drop_ms = lv_tick_get() | 1;
+}
+
 void kf_net_poll(void){
 	if(!s_present) return;
 	cyw43_arch_poll();                 /* services CYW43 + lwIP timeouts (poll mode) */
+	idle_check();
 
 	int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
 	s_link = link;
