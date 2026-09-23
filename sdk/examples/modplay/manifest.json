@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "modplay",
+  "name": "MOD Player",
+  "version": "0.1.0",
+  "abi": 1,
+  "mode": "windowed",
+  "exec": "modplay.kx",
+  "icon": "icon.png",
+  "perf": "normal",
+  "idle": "keep_clock",
+  "flags": []
+}
