@@ -8,8 +8,9 @@
  * XM and S3M play with libxm (WTFPL, Artefact2). It needs the unpacked module in RAM, so
  * its context comes from the kernel heap: roughly 1-2.5x the file size.
  *
- * Keys: UP/DOWN/PGUP/PGDN pick, ENTER play, SPACE pause, LEFT/RIGHT prev/next,
- * ESC quit. A song advances to the next file when it loops. The file list is one
+ * Keys: UP/DOWN/PGUP/PGDN pick, ENTER play or open a folder, BKSP folder up, SPACE pause,
+ * LEFT/RIGHT prev/next, ESC quit. A song advances to the next file in its folder when it
+ * loops. The file list is one
  * label drawn as a scrolling window, since the kernel caps an app at 96 UI objects. */
 #include "kapi.h"
 #include "kapi_rt.h"
@@ -33,10 +34,16 @@ static kf_mem s_mod;          /* PSRAM copy of the current module */
 #define RATE      32768
 #define CHUNK     512         /* stereo frames rendered per step */
 
-static char *s_pool;           /* heap: all file names, NUL-separated */
+/* The list shows one folder. Folder names end in '/', and "../" leads up. */
+static char *s_pool;           /* heap: all entry names, NUL-separated */
 static uint16_t *s_off;        /* heap: pool offset of each name, sorted */
-static int s_pool_used, s_pool_cap, s_nfiles, s_off_cap, s_cur = -1, s_paused, s_sel, s_top;
+static int s_pool_used, s_pool_cap, s_nfiles, s_off_cap, s_sel, s_top;
 #define NAME(i) (s_pool + s_off[i])
+static char s_dir[160] = MOD_DIR;
+static int is_dir(int i){ const char *n = NAME(i); return n[strlen(n) - 1] == '/'; }
+/* the song playing, which may be in another folder than the one listed */
+static int s_playing, s_paused, s_cur = -1;   /* s_cur: its row in the list, or -1 */
+static char s_play_dir[160], s_play_name[NAME_LEN];
 static unsigned char s_hdr[1084];
 static pocketmod_context s_pm;
 static xm_context_t *s_xm;   /* heap; set while an XM/S3M plays */
@@ -67,32 +74,57 @@ static int ncmp(const char *a, const char *b){
 	}
 }
 
-static void scan(void){
-	K->fs->mkdir(MOD_DIR);
-	kf_dir d = K->fs->opendir(MOD_DIR);
-	if(!d) return;
-	char name[NAME_LEN]; int dir;
-	while(K->fs->readdir(d, name, sizeof name, &dir)){
-		if(dir || name[0] == '.' || !is_song(name)) continue;
-		int len = (int)strlen(name) + 1;
-		if(s_pool_used + len > s_pool_cap){
-			if(s_pool_cap + 1024 > 65535) break;   /* s_off is 16-bit */
-			char *p = K->mem->realloc(s_pool, (size_t)s_pool_cap + 1024);
-			if(!p) break;
-			s_pool = p; s_pool_cap += 1024;
-		}
-		if(s_nfiles == s_off_cap){
-			uint16_t *o = K->mem->realloc(s_off, (size_t)(s_off_cap + 64) * sizeof *o);
-			if(!o) break;
-			s_off = o; s_off_cap += 64;
-		}
-		memcpy(s_pool + s_pool_used, name, (size_t)len);
-		int i = s_nfiles++;
-		while(i > 0 && ncmp(NAME(i-1), name) > 0){ s_off[i] = s_off[i-1]; i--; }
-		s_off[i] = (uint16_t)s_pool_used;
-		s_pool_used += len;
+/* "../" first, then folders, then by name */
+static int ecmp(const char *a, const char *b){
+	if(!strcmp(a, "../")) return -1;
+	if(!strcmp(b, "../")) return 1;
+	int da = a[strlen(a) - 1] == '/', db = b[strlen(b) - 1] == '/';
+	return da != db ? db - da : ncmp(a, b);
+}
+
+static void add(const char *name){
+	int len = (int)strlen(name) + 1;
+	if(s_pool_used + len > s_pool_cap){
+		if(s_pool_cap + 1024 > 65535) return;   /* s_off is 16-bit */
+		char *p = K->mem->realloc(s_pool, (size_t)s_pool_cap + 1024);
+		if(!p) return;
+		s_pool = p; s_pool_cap += 1024;
 	}
-	K->fs->closedir(d);
+	if(s_nfiles == s_off_cap){
+		uint16_t *o = K->mem->realloc(s_off, (size_t)(s_off_cap + 64) * sizeof *o);
+		if(!o) return;
+		s_off = o; s_off_cap += 64;
+	}
+	memcpy(s_pool + s_pool_used, name, (size_t)len);
+	int i = s_nfiles++;
+	while(i > 0 && ecmp(NAME(i-1), name) > 0){ s_off[i] = s_off[i-1]; i--; }
+	s_off[i] = (uint16_t)s_pool_used;
+	s_pool_used += len;
+}
+
+static int find(const char *name){
+	for(int i = 0; i < s_nfiles; i++) if(!strcmp(NAME(i), name)) return i;
+	return -1;
+}
+
+/* List s_dir; select `sel` if given. */
+static void scan(const char *sel){
+	s_nfiles = s_pool_used = 0;
+	if(strcmp(s_dir, MOD_DIR)) add("../");
+	kf_dir d = K->fs->opendir(s_dir);
+	if(d){
+		char name[NAME_LEN]; int dir;
+		while(K->fs->readdir(d, name, sizeof name - 1, &dir)){
+			if(name[0] == '.' || (!dir && !is_song(name))) continue;
+			if(dir) strcat(name, "/");
+			add(name);
+		}
+		K->fs->closedir(d);
+	}
+	s_cur = s_playing && !strcmp(s_dir, s_play_dir) ? find(s_play_name) : -1;
+	s_sel = sel ? find(sel) : -1;
+	if(s_sel < 0) s_sel = s_cur >= 0 ? s_cur : 0;
+	s_top = 0;
 }
 
 static void set_now(const char *s){ K->ui->set_text(s_now, s); }
@@ -113,7 +145,7 @@ static void stop(void){
 	K->sys->idle_policy(KF_IDLE_NORMAL);
 	if(s_mod){ K->mem->psram_free(s_mod); s_mod = 0; }
 	if(s_xm){ K->mem->free(s_xm); s_xm = 0; }
-	s_cur = -1;
+	s_playing = 0; s_cur = -1;
 }
 
 /* Copy the file into PSRAM through s_mix as a bounce buffer. */
@@ -161,10 +193,10 @@ static const char *load_xm(const char *path){
 }
 
 static void play(int i){
-	char path[128], msg[96]; long size = 0;
+	char path[224], msg[96]; long size = 0;
 	stop();
-	if(i < 0 || i >= s_nfiles) return;
-	snprintf(path, sizeof path, MOD_DIR "/%s", NAME(i));
+	if(i < 0 || i >= s_nfiles || is_dir(i)) return;
+	snprintf(path, sizeof path, "%s/%s", s_dir, NAME(i));
 	if(is_xm(path)){
 		const char *err = load_xm(path);
 		if(err){ stop(); snprintf(msg, sizeof msg, "%s: %s", err, NAME(i)); set_now(msg); return; }
@@ -176,12 +208,39 @@ static void play(int i){
 	}
 	if(K->aud->out_start(RATE) != KF_OK){ stop(); set_now("Audio busy"); return; }
 	K->sys->idle_policy(KF_IDLE_KEEP_CLOCK);
-	s_cur = s_sel = i; s_paused = 0; s_shown_pat = -1;
+	strcpy(s_play_dir, s_dir); strcpy(s_play_name, NAME(i));
+	s_playing = 1; s_cur = s_sel = i; s_paused = 0; s_shown_pat = -1;
+	draw_list();
+}
+
+/* the next song row after `i` in direction `step`, wrapping; -1 if the folder has none */
+static int next_song(int i, int step){
+	for(int k = 1; k <= s_nfiles; k++){
+		int j = ((i + step * k) % s_nfiles + s_nfiles) % s_nfiles;
+		if(!is_dir(j)) return j;
+	}
+	return -1;
+}
+
+static void open_dir(int i){
+	char child[NAME_LEN];
+	if(!strcmp(NAME(i), "../")){
+		char *slash = strrchr(s_dir, '/');
+		snprintf(child, sizeof child, "%s/", slash + 1);
+		*slash = 0;
+		scan(child);
+	} else {
+		size_t l = strlen(s_dir);
+		if(l + strlen(NAME(i)) + 1 >= sizeof s_dir) return;
+		snprintf(s_dir + l, sizeof s_dir - l, "/%s", NAME(i));
+		s_dir[strlen(s_dir) - 1] = 0;   /* drop the '/' */
+		scan(0);
+	}
 	draw_list();
 }
 
 static void pause_toggle(void){
-	if(s_cur < 0) return;
+	if(!s_playing) return;
 	s_paused = !s_paused;
 	if(s_paused){ K->aud->out_stop(); K->sys->idle_policy(KF_IDLE_NORMAL); }
 	else { K->aud->out_start(RATE); K->sys->idle_policy(KF_IDLE_KEEP_CLOCK); }
@@ -199,12 +258,16 @@ static void feed(void){
 			s_out[i] = v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : (int16_t)v;
 		}
 		K->aud->out_write(s_out, n);
-		if(s_xm ? xm_get_loop_count(s_xm) > 0 : pocketmod_loop_count(&s_pm) > 0){ play((s_cur + 1) % s_nfiles); return; }
+		if(s_xm ? xm_get_loop_count(s_xm) > 0 : pocketmod_loop_count(&s_pm) > 0){
+			/* ponytail: if another folder is listed, just stop; keep a second list to follow the song's folder */
+			if(s_cur >= 0) play(next_song(s_cur, 1)); else { stop(); draw_list(); }
+			return;
+		}
 	}
 }
 
 static void show(void){
-	if(s_cur < 0) return;
+	if(!s_playing) return;
 	int pos, len, row, ch;
 	if(s_xm){
 		uint8_t pi, pat, r; uint32_t smp;
@@ -217,13 +280,13 @@ static void show(void){
 	s_shown_pat = pos; s_shown_line = row;
 	char msg[128];
 	snprintf(msg, sizeof msg, "%s %s\n%s  pos %02d/%02d  row %02d  %dch",
-	         s_paused ? "||" : ">", NAME(s_cur), s_title[0] ? s_title : "(untitled)", pos, len, row, ch);
+	         s_paused ? "||" : ">", s_play_name, s_title[0] ? s_title : "(untitled)", pos, len, row, ch);
 	set_now(msg);
 }
 
 static void on_frame(void *ud){
 	(void)ud;
-	if(s_cur >= 0 && !s_paused) feed();
+	if(s_playing && !s_paused) feed();
 	show();
 }
 
@@ -239,15 +302,16 @@ static void on_key(void *ud, int key, int down){
 	if(!down) return;
 	if(key == KF_KEY_ESC){ quit(); K->sys->exit(0); }
 	else if(key == ' ') pause_toggle();
-	else if(key == KF_KEY_ENTER && s_nfiles) play(s_sel);
+	else if(key == KF_KEY_ENTER && s_nfiles){ if(is_dir(s_sel)) open_dir(s_sel); else play(s_sel); }
+	else if(key == KF_KEY_BKSP && s_nfiles && !strcmp(NAME(0), "../")) open_dir(0);
 	else if((key == KF_KEY_UP || key == KF_KEY_DOWN || key == KF_KEY_PGUP || key == KF_KEY_PGDN) && s_nfiles){
 		int step = key == KF_KEY_UP ? -1 : key == KF_KEY_DOWN ? 1 : key == KF_KEY_PGUP ? -VIS : VIS;
 		if(step == 1 || step == -1) s_sel = (s_sel + step + s_nfiles) % s_nfiles;
 		else { s_sel += step; if(s_sel < 0) s_sel = 0; if(s_sel >= s_nfiles) s_sel = s_nfiles - 1; }
 		draw_list();
 	}
-	else if(key == KF_KEY_RIGHT && s_nfiles) play(s_cur < 0 ? 0 : (s_cur + 1) % s_nfiles);
-	else if(key == KF_KEY_LEFT && s_nfiles) play(s_cur <= 0 ? s_nfiles - 1 : s_cur - 1);
+	else if(key == KF_KEY_RIGHT && s_nfiles) play(next_song(s_cur >= 0 ? s_cur : -1, 1));
+	else if(key == KF_KEY_LEFT && s_nfiles) play(next_song(s_cur >= 0 ? s_cur : 0, -1));
 }
 
 static void on_close(void *ud){ (void)ud; quit(); }
@@ -259,14 +323,15 @@ int app_main(const kapi *k){
 		k->sys->log("modplay.kx: needs PSRAM, audio and the UI layer");
 		return -1;
 	}
-	scan();
+	k->fs->mkdir(MOD_DIR);
+	scan(0);
 
 	kui_obj scr = k->ui->screen();
 	k->ui->flex(scr, KUI_FLEX_COLUMN, 4);
 	s_now = k->ui->label(scr, "");
 	s_list = k->ui->label(scr, "");
 	k->ui->grow(s_list, 1);
-	k->ui->label(scr, "ENTER play  SPACE pause  </> prev/next  ESC quit");
+	k->ui->label(scr, "ENTER play/open  BKSP up  SPACE pause  </> prev/next");
 	draw_list();
 	set_now(s_nfiles ? "Pick a module" : "Put .mod/.xm/.s3m files in " MOD_DIR);
 
