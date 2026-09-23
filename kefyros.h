@@ -191,6 +191,7 @@ void           kf_net_forget(void);       /* disconnect + clear saved creds */
 void           kf_net_autoconnect(void);  /* scan + join the strongest saved network (call at boot, at eco) */
 int            kf_net_autoconnect_active(void); /* 1 while a boot campaign is still scanning/trying */
 int            kf_net_has_saved(void);    /* 1 if any network is remembered */
+int            kf_net_saved_pass(const char *ssid, char pass[65]); /* 1 + key if ssid is remembered */
 /* scan: cb invoked once per (deduped) AP. secured=0 for open networks. */
 typedef void (*kf_scan_cb)(const char *ssid, int rssi, int secured);
 int            kf_net_scan_start(kf_scan_cb cb);  /* 0 on start, <0 = cyw43/err code */

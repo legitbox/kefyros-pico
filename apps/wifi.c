@@ -131,8 +131,10 @@ static void act_forget(lv_event_t *e){ (void)e;
 static void act_ap(lv_event_t *e){
 	int idx = (int)(intptr_t)lv_event_get_user_data(e);
 	if(idx < 0 || idx >= ap_n) return;
-	if(ap_secured[idx]) open_pw(ap_ssid[idx]);
-	else { close_pw(); kf_net_connect(ap_ssid[idx], ""); refresh_status(); }
+	char pass[65];
+	int saved = kf_net_saved_pass(ap_ssid[idx], pass);
+	if(ap_secured[idx] && !saved) open_pw(ap_ssid[idx]);
+	else { close_pw(); kf_net_connect(ap_ssid[idx], pass); refresh_status(); }
 }
 
 /* one AP discovered by the scan -> append a row (runs on core0 from kf_net_poll). */
