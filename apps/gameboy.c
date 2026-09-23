@@ -55,6 +55,7 @@ static void audio_write(uint16_t addr, uint8_t val);
 #define MAX_ROMS       128
 #define ROM_NAME       96
 #define BANK_SIZE      0x4000u
+#define BANK_SLOTS     8          /* switchable-bank cache; slots past the first are best-effort */
 
 enum { GB_OFF, GB_PICK, GB_PLAY };
 
@@ -79,13 +80,21 @@ static uint8_t s_buttons;
 static volatile int s_gberr;
 static uint32_t s_frames;
 
-/* ROM backing and bank cache: Bank 0 is always cached; Bank N is loaded on page change. */
+/* ROM backing and bank cache: Bank 0 is always cached. Switchable banks live in up to
+   BANK_SLOTS SRAM slots (LRU), so games that bounce between a few banks every frame
+   (GB Studio trampolines, music drivers) stop re-copying 16 KB from PSRAM per switch. */
 static uint32_t s_rom_off = 0xFFFFFFFFu;
 static uint32_t s_rom_size;
-static uint8_t *s_bank0, *s_bankn;
-static uint32_t s_bank_page = 0xFFFFFFFFu;
+static uint8_t *s_bank0, *s_bankn;           /* s_bankn == s_slot[s_cur] */
+static uint32_t s_bank_page = 0xFFFFFFFFu;   /* page held by s_bankn */
+static uint8_t *s_slot[BANK_SLOTS];
+static uint32_t s_slot_page[BANK_SLOTS];
+static uint32_t s_slot_used[BANK_SLOTS];
+static int s_nslot, s_cur;
+static uint32_t s_tick;
 
 static uint8_t *s_cart;
+static uint32_t s_cart_off = 0xFFFFFFFFu;    /* PSRAM fallback when SRAM can't hold cart RAM */
 static size_t s_cart_size;
 static int s_cart_heap;
 static char s_save_path[256];
@@ -145,6 +154,21 @@ static void read_psram_partial(uint32_t off, uint8_t *dst, uint32_t n){
 	if(take < n) memset(dst + take, 0xff, n - take);
 }
 
+static void __not_in_flash_func(select_bank)(uint32_t page){
+	int victim = 0;
+	for(int i = 0; i < s_nslot; i++){
+		if(s_slot_page[i] == page){ victim = i; goto hit; }
+		if(s_slot_used[i] < s_slot_used[victim]) victim = i;
+	}
+	read_psram_partial(page * BANK_SIZE, s_slot[victim], BANK_SIZE);
+	s_slot_page[victim] = page;
+hit:
+	s_slot_used[victim] = ++s_tick;
+	s_cur = victim;
+	s_bankn = s_slot[victim];
+	s_bank_page = page;
+}
+
 static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr){
 	(void)gb;
 	uint32_t a = (uint32_t)addr;
@@ -152,21 +176,24 @@ static uint8_t gb_rom_read(struct gb_s *gb, const uint_fast32_t addr){
 	if(a < BANK_SIZE) return s_bank0[a];
 	if(s_rom_size <= 2u * BANK_SIZE) return s_bankn[a - BANK_SIZE];
 	uint32_t page = a / BANK_SIZE;
-	if(page != s_bank_page){
-		read_psram_partial(page * BANK_SIZE, s_bankn, BANK_SIZE);
-		s_bank_page = page;
-	}
+	if(page != s_bank_page) select_bank(page);
 	return s_bankn[a & (BANK_SIZE - 1u)];
 }
 
 static uint8_t gb_cart_ram_read(struct gb_s *gb, const uint_fast32_t addr){
 	(void)gb;
-	return s_cart && addr < s_cart_size ? s_cart[addr] : 0xff;
+	if(addr >= s_cart_size) return 0xff;
+	if(s_cart) return s_cart[addr];
+	uint8_t v = 0xff;
+	if(s_cart_off != 0xFFFFFFFFu) kf_psram_read(s_cart_off + (uint32_t)addr, &v, 1);
+	return v;
 }
 
 static void gb_cart_ram_write(struct gb_s *gb, const uint_fast32_t addr, const uint8_t val){
 	(void)gb;
-	if(s_cart && addr < s_cart_size) s_cart[addr] = val;
+	if(addr >= s_cart_size) return;
+	if(s_cart) s_cart[addr] = val;
+	else if(s_cart_off != 0xFFFFFFFFu) kf_psram_write(s_cart_off + (uint32_t)addr, &val, 1);
 }
 
 static void gb_err(struct gb_s *gb, const enum gb_error_e e, const uint16_t val){
@@ -178,28 +205,49 @@ static uint8_t audio_read(uint16_t addr){ return minigb_apu_audio_read(&s_apu, a
 static void audio_write(uint16_t addr, uint8_t val){ minigb_apu_audio_write(&s_apu, addr, val); }
 
 static void save_cart(void){
-	if(!s_cart || !s_cart_size) return;
+	if(!s_cart_size || (!s_cart && s_cart_off == 0xFFFFFFFFu)) return;
 	FILE *f = fopen(s_save_path, "wb");
 	if(!f) return;
-	fwrite(s_cart, 1, s_cart_size, f);
+	if(s_cart) fwrite(s_cart, 1, s_cart_size, f);
+	else {
+		uint8_t buf[512];
+		for(uint32_t at = 0; at < s_cart_size; at += sizeof buf){
+			uint32_t n = s_cart_size - at < sizeof buf ? s_cart_size - at : sizeof buf;
+			kf_psram_read(s_cart_off + at, buf, n);
+			fwrite(buf, 1, n, f);
+		}
+	}
 	fclose(f);
 }
 
 static void load_cart(void){
-	if(!s_cart || !s_cart_size) return;
-	memset(s_cart, 0, s_cart_size);
+	if(!s_cart_size || (!s_cart && s_cart_off == 0xFFFFFFFFu)) return;
+	if(s_cart){
+		memset(s_cart, 0, s_cart_size);
+		FILE *f = fopen(s_save_path, "rb");
+		if(!f) return;
+		fread(s_cart, 1, s_cart_size, f);
+		fclose(f);
+		return;
+	}
 	FILE *f = fopen(s_save_path, "rb");
-	if(!f) return;
-	fread(s_cart, 1, s_cart_size, f);
-	fclose(f);
+	uint8_t buf[512];
+	for(uint32_t at = 0; at < s_cart_size; at += sizeof buf){
+		uint32_t n = s_cart_size - at < sizeof buf ? s_cart_size - at : sizeof buf;
+		size_t got = f ? fread(buf, 1, n, f) : 0;
+		memset(buf + got, 0, n - got);
+		kf_psram_write(s_cart_off + at, buf, n);
+	}
+	if(f) fclose(f);
 }
 
 static void free_runtime(void){
 	free(s_gb); s_gb = NULL;
 	free(s_bank0); s_bank0 = NULL;
-	free(s_bankn); s_bankn = NULL;
+	for(int i = 0; i < BANK_SLOTS; i++){ free(s_slot[i]); s_slot[i] = NULL; }
+	s_bankn = NULL; s_nslot = 0; s_cur = 0; s_tick = 0;
 	if(s_cart_heap) free(s_cart);
-	s_cart = NULL; s_cart_heap = 0; s_cart_size = 0;
+	s_cart = NULL; s_cart_heap = 0; s_cart_size = 0; s_cart_off = 0xFFFFFFFFu;
 	s_rom_off = 0xFFFFFFFFu;
 	s_rom_size = 0; s_bank_page = 0xFFFFFFFFu;
 }
@@ -305,7 +353,8 @@ static int load_rom_file(const char *path){
 	s_rom_size = (uint32_t)z;
 
 	s_bank0 = malloc(BANK_SIZE);
-	s_bankn = malloc(BANK_SIZE);
+	s_bankn = s_slot[0] = malloc(BANK_SIZE);
+	s_nslot = s_bankn ? 1 : 0;
 	if(!s_bank0 || !s_bankn){
 		fclose(f);
 		snprintf(s_load_detail, sizeof s_load_detail, "Out of SRAM for ROM banks");
@@ -364,8 +413,25 @@ static int load_rom_file(const char *path){
 		at += n;
 	}
 	fclose(f);
+	for(int i = 0; i < BANK_SLOTS; i++){ s_slot_page[i] = 0xFFFFFFFFu; s_slot_used[i] = 0; }
 	s_bank_page = 0xFFFFFFFFu;
 	return 0;
+}
+
+/* Extra bank slots for multi-bank ROMs, taken last so gb_s, cart RAM and the audio
+   ring are already placed. Stop while ~32 KB of kernel heap would remain. */
+static void alloc_extra_slots(void){
+	if(s_rom_size <= 2u * BANK_SIZE) return;
+	uint32_t banks = (s_rom_size + BANK_SIZE - 1u) / BANK_SIZE - 1u;
+	while(s_nslot < BANK_SLOTS && (uint32_t)s_nslot < banks){
+		void *guard = malloc(32u * 1024u);
+		if(!guard) break;
+		s_slot[s_nslot] = malloc(BANK_SIZE);
+		free(guard);
+		if(!s_slot[s_nslot]) break;
+		s_slot_page[s_nslot] = 0xFFFFFFFFu; s_slot_used[s_nslot] = 0;
+		s_nslot++;
+	}
 }
 
 static void build_save_path(const char *rom_name){
@@ -408,8 +474,9 @@ static void start_game(const rom_ent_t *ent){
 	s_cart_size = (size_t)gb_get_save_size(s_gb);
 	if(s_cart_size){
 		s_cart = malloc(s_cart_size);
-		s_cart_heap = 1;
-		if(!s_cart){
+		s_cart_heap = s_cart != NULL;
+		if(!s_cart && kf_psram_size()) s_cart_off = kf_psram_alloc((uint32_t)s_cart_size);
+		if(!s_cart && s_cart_off == 0xFFFFFFFFu){
 			free_runtime(); reset_exclusive_psram();
 			set_status("Not enough RAM for save");
 			return;
@@ -434,6 +501,7 @@ static void start_game(const rom_ent_t *ent){
 		set_status("Not enough SRAM for audio ring");
 		return;
 	}
+	alloc_extra_slots();
 
 	/* Normal clock, park Core 1 and take direct control of SPI */
 	kf_clock_normal();
