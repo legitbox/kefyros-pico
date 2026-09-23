@@ -289,6 +289,12 @@ void kf_net_forget(void){
 }
 
 int kf_net_has_saved(void){ return known_count() > 0; }
+int kf_net_saved_pass(const char *ssid, char pass[65]){
+	char s[33];
+	for(int i=0;i<KF_WIFI_MAX;i++){ known_get(i, s, pass); if(!s[0]) break; if(!strcmp(s, ssid)) return 1; }
+	pass[0] = 0;
+	return 0;
+}
 int kf_net_autoconnect_active(void){ return s_camp == CAMP_SCAN || s_camp == CAMP_TRY; }
 
 /* Boot auto-connect: scan, then try the visible saved networks strongest-first (campaign_tick
