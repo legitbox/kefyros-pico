@@ -1,0 +1,3 @@
+libxm (WTFPL v2) from https://github.com/Artefact2/libxm, commit d8067bd.
+xm.h is src/xm.h.in with XM_SAMPLE_TYPE=int8_t. stdbit.h and stdckdint.h cover the
+C23 headers that arm-none-eabi-gcc 13 lacks. Build options are in ../build.sh.
