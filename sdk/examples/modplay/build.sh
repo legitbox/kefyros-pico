@@ -16,14 +16,18 @@ CFLAGS="-mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16 -Os \
         -I$SDK -I$SDK/include"
 
 # libxm: 8-bit samples to save heap, fixed rate, no names/timing/muting API.
-XMFLAGS="-std=c2x -ffast-math -DNDEBUG -w -I$HERE/libxm \
+# It builds against the toolchain's newlib headers, not $SDK/include: that math.h
+# lacks exp2f/sqrtf, and an implicit int declaration silences every sample.
+XMFLAGS="-mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16 -Os \
+        -ffreestanding -fno-builtin -ffunction-sections -fdata-sections \
+        -std=c2x -ffast-math -DNDEBUG -w -Werror=implicit-function-declaration -I$HERE/libxm \
         -DXM_VERBOSE=0 -DXM_LINEAR_INTERPOLATION=1 -DXM_RAMPING=1 -DXM_LIBXM_DELTA_SAMPLES=0 \
         -DXM_STRINGS=0 -DXM_TIMING_FUNCTIONS=0 -DXM_MUTING_FUNCTIONS=0 -DXM_SAMPLE_RATE=32768 \
         -DXM_MICROSTEP_BITS=12 -DXM_PANNING_TYPE=8 -DXM_LOOPING_TYPE=2 \
         -DXM_DISABLED_EFFECTS=0ULL -DXM_DISABLED_VOLUME_EFFECTS=0ULL -DXM_DISABLED_FEATURES=0ULL"
 
 "$CC" $CFLAGS -c "$HERE/modplay.c" -o "$HERE/modplay.o"
-for f in xm load play; do "$CC" $CFLAGS $XMFLAGS -c "$HERE/libxm/$f.c" -o "$HERE/xm_$f.o"; done
+for f in xm load play; do "$CC" $XMFLAGS -c "$HERE/libxm/$f.c" -o "$HERE/xm_$f.o"; done
 "$CC" -mcpu=cortex-m33 -mthumb -mfloat-abi=softfp -mfpu=fpv5-sp-d16 -nostdlib \
       -Wl,--gc-sections -T "$SDK/app.ld" "$HERE/modplay.o" "$HERE"/xm_*.o "$SDK/lib/libkapi.a" \
       -o "$HERE/modplay.elf" -lm -lgcc
