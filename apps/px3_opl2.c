@@ -38,7 +38,7 @@ uint8_t px3_opl2_read_status(void){
 	return st;
 }
 
-void px3_opl2_render_stereo(int16_t *stereo_buf, int frames){
+void px3_opl2_render_mono(int16_t *mono_buf, int frames){
 	for(int i = 0; i < frames; i++){
 		int16_t s = 0;
 		OPL2_GenerateResampled(&s_chip, &s);
@@ -48,7 +48,6 @@ void px3_opl2_render_stereo(int16_t *stereo_buf, int frames){
 		if(val > 32767) val = 32767;
 		else if(val < -32768) val = -32768;
 
-		stereo_buf[i * 2 + 0] = (int16_t)val;
-		stereo_buf[i * 2 + 1] = (int16_t)val;
+		mono_buf[i] = (int16_t)val;
 	}
 }

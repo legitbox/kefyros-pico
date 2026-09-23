@@ -6,6 +6,7 @@
 #include "btstack.h"
 #include "pico/cyw43_arch.h"
 #include "pico/time.h"
+#include "hal_flash_bank.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -359,4 +360,68 @@ void kf_bt_disconnect(void){
     if(a2dp_cid) a2dp_source_disconnect(a2dp_cid);
     a2dp_cid=0;
     state=initialized ? (hci_ready?KF_BT_READY:KF_BT_STARTING) : KF_BT_OFF;
+}
+
+/* ==================== In-RAM BTstack HAL Flash Bank ====================
+ * BTstack's default SDK glue (btstack_cyw43.c) initializes a TLV store via
+ * pico_flash_bank_instance(). By default in pico-sdk, that uses physical flash
+ * sectors near the top of flash (PICO_FLASH_BANK_STORAGE_OFFSET).
+ *
+ * In Kefyros, persistent pairing keys are managed in SD card deskconf.txt.
+ * More critically, executing flash erases/programs at runtime or accessing flash
+ * at 16MB on RP2350 causes:
+ *   1) A hardware Bus Fault (PRECISERR) because the BootROM's default QMI ATRANS
+ *      aperture does not map 16MB uncached space;
+ *   2) A race/crash on Core 1 which runs out of XIP flash blitting to the LCD panel.
+ *
+ * Providing an in-RAM flash bank implementation satisfies BTstack's TLV store
+ * entirely in memory with zero flash accesses, zero lockout, and zero bus faults.
+ */
+#define BT_RAM_BANK_SIZE 1024
+static uint8_t s_bt_ram_banks[2][BT_RAM_BANK_SIZE];
+
+static uint32_t bt_ram_bank_get_size(void *context){
+    (void)context;
+    return BT_RAM_BANK_SIZE;
+}
+static uint32_t bt_ram_bank_get_alignment(void *context){
+    (void)context;
+    return 1;
+}
+static void bt_ram_bank_erase(void *context, int bank){
+    (void)context;
+    if(bank >= 0 && bank < 2){
+        memset(s_bt_ram_banks[bank], 0xff, BT_RAM_BANK_SIZE);
+    }
+}
+static void bt_ram_bank_read(void *context, int bank, uint32_t offset, uint8_t *buffer, uint32_t size){
+    (void)context;
+    if(bank >= 0 && bank < 2 && offset <= BT_RAM_BANK_SIZE && (offset + size) <= BT_RAM_BANK_SIZE){
+        memcpy(buffer, &s_bt_ram_banks[bank][offset], size);
+    }
+}
+static void bt_ram_bank_write(void *context, int bank, uint32_t offset, const uint8_t *data, uint32_t size){
+    (void)context;
+    if(bank >= 0 && bank < 2 && offset <= BT_RAM_BANK_SIZE && (offset + size) <= BT_RAM_BANK_SIZE){
+        for(uint32_t i = 0; i < size; i++){
+            s_bt_ram_banks[bank][offset + i] &= data[i];
+        }
+    }
+}
+
+static const hal_flash_bank_t s_bt_ram_bank_obj = {
+    .get_size      = bt_ram_bank_get_size,
+    .get_alignment = bt_ram_bank_get_alignment,
+    .erase         = bt_ram_bank_erase,
+    .read          = bt_ram_bank_read,
+    .write         = bt_ram_bank_write,
+};
+
+const hal_flash_bank_t *__wrap_pico_flash_bank_instance(void){
+    static int inited = 0;
+    if(!inited){
+        memset(s_bt_ram_banks, 0xff, sizeof s_bt_ram_banks);
+        inited = 1;
+    }
+    return &s_bt_ram_bank_obj;
 }

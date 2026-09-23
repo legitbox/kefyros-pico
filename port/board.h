@@ -59,16 +59,16 @@
 #define KF_DBG_RX         1
 
 /* ---- clock tiers ----
-   COLD BOOT at 250 MHz @ 1.10 V: PSRAM- and WiFi-safe, coming up cleanly on every power-up.
+   COLD BOOT at 250 MHz @ 1.20 V: PSRAM- and WiFi-safe, coming up cleanly on every power-up.
    main() then ramps WARM to the normal 300 MHz clock (kf_clock_normal) for smooth 30 FPS menus.
    The tiers:
      * kf_clock_sleep()  -> 150 MHz @ 1.10 V  (idle screen-off; kf_clock_wake() restores the prior tier)
-     * kf_clock_eco()    -> 250 MHz @ 1.10 V / 62.5 MHz SPI (WiFi-safe; brief, wraps radio JOIN)
-     * kf_clock_normal() -> 300 MHz @ 1.10 V / 75.0 MHz SPI (the UI / apps / audio default in RGB565)
-     * kf_clock_boost()  -> 350 MHz @ 1.20 V / 87.5 MHz SPI (turbo: Music decode + calc 3D. Restores normal)
+     * kf_clock_eco()    -> 250 MHz @ 1.20 V / 62.5 MHz SPI (WiFi-safe; brief, wraps radio JOIN)
+     * kf_clock_normal() -> 300 MHz @ 1.20 V / 75.0 MHz SPI (the UI / apps / audio default in RGB565)
+     * kf_clock_boost()  -> 350 MHz @ 1.25 V / 87.5 MHz SPI (turbo: Music decode + calc 3D. Restores normal)
    The QMI flash divider is sized once at boot for the 350 MHz peak, so all tiers are safe. */
 #define KF_SYS_KHZ        250000      /* cold-boot clock; warm-ramps to the normal 300 MHz */
-#define KF_VREG_MV        1100        /* VREG_VOLTAGE_1_10 (stock voltage for 250/300; raised to 1.20 for boost) */
+#define KF_VREG_MV        1200        /* VREG_VOLTAGE_1_20 (stable voltage for 250/300; raised to 1.25 for boost) */
 
 #if defined(PIMORONI_PICO_PLUS2_W_RP2350)
 #define KF_BOARD_NAME     "PicoCalc / Pimoroni Pico Plus 2 W"

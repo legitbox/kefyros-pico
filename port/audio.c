@@ -24,6 +24,7 @@
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "pico/mutex.h"
+#include "pico/time.h"
 #include <stdlib.h>
 
 #define AUDIO_R_PIN 26                             /* PWM slice 5 ch A -> right */
@@ -58,6 +59,9 @@ static volatile int bt_route = 0;
 static int sample_rate = 44100;
 static uint64_t bt_phase;
 static mutex_t audio_writer_lock;
+static volatile kf_audio_stats_t s_stats;
+static volatile uint32_t s_last_dma_irq_us;
+static volatile int s_had_data;
 
 /* ---- per-channel 2nd-order noise shaper + TPDF dither state (ch0=L, ch1=R) ---- */
 static int32_t  ns_e1[2], ns_e2[2];                 /* error feedback (full-scale domain) */
@@ -99,9 +103,15 @@ static inline uint32_t ring_count(void){ return r_w - r_r; }
 
 /* refill a ping-pong half from the ring (IRQ context); silence on underrun */
 static void fill(uint32_t *b){
+	uint32_t missing = 0;
 	for(int i = 0; i < DBUF; i++){
 		if(ring && r_r != r_w){ b[i] = ring[r_r & (ring_n-1u)]; r_r++; }
-		else b[i] = SILENCE();
+		else { b[i] = SILENCE(); missing++; }
+	}
+	if(s_had_data){
+		if(missing){ s_stats.pwm_underrun_events++; s_stats.pwm_underrun_frames += missing; }
+		uint32_t buffered = ring_count();
+		if(buffered < s_stats.min_buffered_frames) s_stats.min_buffered_frames = buffered;
 	}
 }
 
@@ -109,6 +119,13 @@ static void dma_isr(void){
 	if(dma_hw->ints1 & (1u << dch)){
 		dma_hw->ints1 = 1u << dch;                  /* ack */
 		if(!running) return;                        /* stopped: don't restart/refill */
+		uint32_t now = time_us_32();
+		if(s_last_dma_irq_us){
+			uint32_t gap = now - s_last_dma_irq_us;
+			if(gap > s_stats.max_dma_irq_gap_us) s_stats.max_dma_irq_gap_us = gap;
+		}
+		s_last_dma_irq_us = now;
+		s_stats.dma_irqs++;
 		int played = cur;
 		cur ^= 1;
 		dma_channel_set_read_addr(dch, pp[cur], false);
@@ -224,6 +241,10 @@ static int audio_start_buffered(int hz, int ring_frames, uint32_t *external){
 		ring_owned = 1;
 	}
 	r_w = r_r = 0;
+	s_stats = (kf_audio_stats_t){0};
+	s_stats.min_buffered_frames = ring_n;
+	s_last_dma_irq_us = 0;
+	s_had_data = 0;
 	bt_phase = 0;
 	sample_rate = hz;
 	ns_reset();
@@ -265,6 +286,15 @@ void kf_audio_stop(void){
 int  kf_audio_running(void){ return running; }
 int  kf_audio_space(void){ return ring ? (int)(ring_n - (r_w - r_r)) : 0; }
 int  kf_audio_buffered(void){ return ring ? (int)(r_w - r_r) : 0; }   /* frames queued but unplayed */
+void kf_audio_get_stats(kf_audio_stats_t *out){
+	if(!out) return;
+	out->pwm_underrun_events = s_stats.pwm_underrun_events;
+	out->pwm_underrun_frames = s_stats.pwm_underrun_frames;
+	out->bt_underrun_frames = s_stats.bt_underrun_frames;
+	out->dma_irqs = s_stats.dma_irqs;
+	out->max_dma_irq_gap_us = s_stats.max_dma_irq_gap_us;
+	out->min_buffered_frames = s_had_data ? s_stats.min_buffered_frames : 0;
+}
 
 /* drop buffered audio + reset the shaper (used right after a seek so the new
    position is heard immediately; DMA keeps running and plays silence until refilled). */
@@ -304,7 +334,11 @@ int kf_audio_bt_read(int16_t *out, int frames, int out_rate){
 	if(!bt_route || !running || !ring || out_rate <= 0) return 0;
 	uint64_t step = ((uint64_t)(uint32_t)sample_rate << 32) / (uint32_t)out_rate;
 	for(int i=0; i<frames; ++i){
-		if(r_w - r_r < 2){ out[2*i] = out[2*i+1] = 0; continue; }
+		if(r_w - r_r < 2){
+			out[2*i] = out[2*i+1] = 0;
+			if(s_had_data) s_stats.bt_underrun_frames++;
+			continue;
+		}
 		__dmb();
 		uint32_t a = ring[r_r & (ring_n-1u)];
 		uint32_t b = ring[(r_r+1u) & (ring_n-1u)];
@@ -337,6 +371,7 @@ int kf_audio_write_s32(const int32_t *st, int frames){
 		r_w++; w++;
 	}
 	mutex_exit(&audio_writer_lock);
+	if(w) s_had_data = 1;
 	return w;
 }
 
@@ -355,5 +390,30 @@ int kf_audio_write(const int16_t *st, int frames){
 		r_w++; w++;
 	}
 	mutex_exit(&audio_writer_lock);
+	if(w) s_had_data = 1;
+	return w;
+}
+
+/* FM synths produce mono. Convert once and drive both PWM channels from the
+   same duty value instead of running two identical noise shapers per frame. */
+int kf_audio_write_mono(const int16_t *mono, int frames){
+	if(!ring || !mono) return 0;
+	mutex_enter_blocking(&audio_writer_lock);
+	int w = 0;
+	while(w < frames && ring_count() < ring_n){
+		uint32_t packed;
+		if(bt_route){
+			uint32_t sample = (uint16_t)mono[w];
+			packed = sample | (sample << 16);
+		} else {
+			uint32_t duty = duty_s32(0, (int32_t)mono[w] * 65536);
+			packed = duty | (duty << 16);
+		}
+		ring[r_w & (ring_n-1u)] = packed;
+		__dmb();
+		r_w++; w++;
+	}
+	mutex_exit(&audio_writer_lock);
+	if(w) s_had_data = 1;
 	return w;
 }

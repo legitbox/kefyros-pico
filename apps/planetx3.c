@@ -26,26 +26,45 @@
 
 #define OPL_FIFO_SIZE 256
 static volatile uint16_t s_opl_fifo[OPL_FIFO_SIZE];
+static volatile uint32_t s_opl_queued_us[OPL_FIFO_SIZE];
 static volatile uint32_t s_opl_head = 0;
 static volatile uint32_t s_opl_tail = 0;
 static volatile bool     s_audio_core1_running = false;
 static uint8_t           s_adlib_addr_latch = 0;
 static uint8_t           s_adlib_reg4 = 0;
 
+typedef struct {
+	uint32_t fifo_drops, fifo_peak, fifo_peak_delay_us;
+	uint32_t opl_peak_us, pack_peak_us, audio_block_peak_us, audio_blocks, audio_short_writes;
+	uint32_t ticks_run, ticks_skipped, max_tick_late_us, max_cpu_batch_us;
+	uint32_t frames, late_frames, max_frame_us, max_spi_chunk_us;
+	uint32_t conversion_us, spi_us;
+} px3_perf_t;
+static volatile px3_perf_t s_perf;
+static uint64_t s_perf_start_us;
+static uint32_t s_perf_clock_khz, s_perf_psram_hz;
+static int s_profile_started, s_display_taken;
+
 static inline void opl_fifo_push(uint8_t reg, uint8_t val){
 	uint32_t next = (s_opl_head + 1) & (OPL_FIFO_SIZE - 1);
 	if(next != s_opl_tail){
 		s_opl_fifo[s_opl_head] = ((uint16_t)reg << 8) | val;
+		s_opl_queued_us[s_opl_head] = time_us_32();
 		__dmb();
 		s_opl_head = next;
+		uint32_t depth = (next - s_opl_tail) & (OPL_FIFO_SIZE - 1);
+		if(depth > s_perf.fifo_peak) s_perf.fifo_peak = depth;
+	} else {
+		s_perf.fifo_drops++;
 	}
 }
 
-static inline bool opl_fifo_pop(uint8_t *reg, uint8_t *val){
+static inline bool opl_fifo_pop(uint8_t *reg, uint8_t *val, uint32_t *queued_us){
 	if(s_opl_head == s_opl_tail) return false;
 	uint16_t item = s_opl_fifo[s_opl_tail];
 	*reg = (item >> 8) & 0xFF;
 	*val = item & 0xFF;
+	*queued_us = s_opl_queued_us[s_opl_tail];
 	__dmb();
 	s_opl_tail = (s_opl_tail + 1) & (OPL_FIFO_SIZE - 1);
 	return true;
@@ -53,11 +72,14 @@ static inline bool opl_fifo_pop(uint8_t *reg, uint8_t *val){
 
 static void px3_audio_core1_main(void){
 	flash_safe_execute_core_init();
-	static int16_t s_core1_buf[256 * 2];
+	static int16_t s_core1_buf[256];
 	while(s_audio_core1_running){
 		/* Drain pending register writes from Core 0 */
 		uint8_t reg, val;
-		while(opl_fifo_pop(&reg, &val)){
+		uint32_t queued_us;
+		while(opl_fifo_pop(&reg, &val, &queued_us)){
+			uint32_t delay = time_us_32() - queued_us;
+			if(delay > s_perf.fifo_peak_delay_us) s_perf.fifo_peak_delay_us = delay;
 			px3_opl2_write_raw(reg, val);
 		}
 
@@ -65,8 +87,16 @@ static void px3_audio_core1_main(void){
 		if(kf_audio_running()){
 			int space = kf_audio_space();
 			if(space >= 256){
-				px3_opl2_render_stereo(s_core1_buf, 256);
-				kf_audio_write(s_core1_buf, 256);
+				uint32_t t0 = time_us_32();
+				px3_opl2_render_mono(s_core1_buf, 256);
+				uint32_t t1 = time_us_32();
+				int wrote = kf_audio_write_mono(s_core1_buf, 256);
+				uint32_t t2 = time_us_32();
+				if(t1 - t0 > s_perf.opl_peak_us) s_perf.opl_peak_us = t1 - t0;
+				if(t2 - t1 > s_perf.pack_peak_us) s_perf.pack_peak_us = t2 - t1;
+				if(t2 - t0 > s_perf.audio_block_peak_us) s_perf.audio_block_peak_us = t2 - t0;
+				s_perf.audio_blocks++;
+				if(wrote != 256) s_perf.audio_short_writes++;
 			} else {
 				tight_loop_contents();
 			}
@@ -86,8 +116,6 @@ static void px3_audio_core1_main(void){
 #define GAME_H        200
 #define GAME_Y_OFFSET ((LCD_H - GAME_H) / 2)  /* 60 px black border top & bottom */
 
-#define AUDIO_MAX_FRAMES 2048
-
 static int      s_running = 0;
 static int      s_audio_chosen = 0;
 static uint32_t s_psram_off = 0xFFFFFFFFu;
@@ -99,9 +127,11 @@ static uint8_t  s_dac_phase = 0;
 static uint8_t  s_dac_rgb[3];
 
 #define CHUNK_LINES 20
+#define CHUNK_BYTES (GAME_W * CHUNK_LINES * sizeof(uint16_t))
+#define PX3_AUDIO_RING_FRAMES 4096
 static uint16_t *s_chunk_buf; /* idle KAPI arena during this built-in's modal loop */
+static uint32_t *s_audio_storage;
 static int s_chunk_heap;
-static int16_t  s_audio_buf[AUDIO_MAX_FRAMES * 2];
 
 /* Key queue for INT 16h */
 #define KEY_QUEUE_SIZE 16
@@ -507,6 +537,38 @@ static void trigger_timer_tick(void){
 	}
 }
 
+static void write_perf_report(const kf_audio_stats_t *audio, int bt_route){
+	if(!s_profile_started) return;
+	uint32_t seconds = (uint32_t)((time_us_64() - s_perf_start_us) / 1000000u);
+	char path[128];
+	snprintf(path, sizeof(path), "%s/PERF.TXT", PX3_SAVE_DIR);
+	FILE *f = fopen(path, "a");
+	if(!f){ printf("PX3: Cannot write %s\n", path); return; }
+	fprintf(f, "run seconds=%u route=%s clock_khz=%u psram_hz=%u\n",
+	        seconds, bt_route ? "bt" : "pwm", s_perf_clock_khz, s_perf_psram_hz);
+	fprintf(f, "audio underrun_events=%u underrun_frames=%u bt_underrun_frames=%u "
+	        "min_ring=%u dma_irqs=%u max_irq_gap_us=%u opl_peak_us=%u "
+	        "pack_peak_us=%u block_peak_us=%u blocks=%u short_writes=%u fifo_peak=%u "
+	        "fifo_drops=%u fifo_peak_delay_us=%u\n",
+	        audio->pwm_underrun_events, audio->pwm_underrun_frames,
+	        audio->bt_underrun_frames, audio->min_buffered_frames,
+	        audio->dma_irqs, audio->max_dma_irq_gap_us,
+	        s_perf.opl_peak_us, s_perf.pack_peak_us, s_perf.audio_block_peak_us,
+	        s_perf.audio_blocks,
+	        s_perf.audio_short_writes, s_perf.fifo_peak, s_perf.fifo_drops,
+	        s_perf.fifo_peak_delay_us);
+	fprintf(f, "video ticks=%u skipped=%u max_tick_late_us=%u max_cpu_batch_us=%u "
+	        "frames=%u late_frames=%u max_frame_us=%u conversion_us=%u "
+	        "spi_us=%u max_spi_chunk_us=%u\n\n",
+	        s_perf.ticks_run, s_perf.ticks_skipped, s_perf.max_tick_late_us,
+	        s_perf.max_cpu_batch_us, s_perf.frames, s_perf.late_frames,
+	        s_perf.max_frame_us, s_perf.conversion_us, s_perf.spi_us,
+	        s_perf.max_spi_chunk_us);
+	fclose(f);
+	printf("PX3: Performance log saved to %s\n", path);
+	s_profile_started = 0;
+}
+
 static void stop_planetx3(void){
 	s_running = 0;
 
@@ -517,10 +579,21 @@ static void stop_planetx3(void){
 		multicore_reset_core1();
 	}
 
+	kf_audio_stats_t audio_stats;
+	kf_audio_get_stats(&audio_stats);
+	int bt_route = kf_audio_bt_route();
 	kf_audio_stop();
+	s_audio_storage = NULL;
+	write_perf_report(&audio_stats, bt_route);
 	if(s_chunk_heap) free(s_chunk_buf);
 	s_chunk_buf = NULL; s_chunk_heap = 0;
 
+	/* Early load/audio failures still have the LVGL flush pump on Core 1. Park it
+	   before cleaning the QMI cache, just as the normal game exit does. */
+	if(!s_display_taken && s_psram_off != 0xFFFFFFFFu){
+		disp_core1_reset();
+		s_display_taken = 1;
+	}
 	xip_cache_clean_all();
 	xip_cache_invalidate_all();
 
@@ -533,15 +606,19 @@ static void stop_planetx3(void){
 		kf_psram_reset_alloc();
 		s_psram_off = 0xFFFFFFFFu;
 	}
+	s_ram = NULL;
 
-	/* Restore display controller to standard 16-bit RGB565 */
-	spi_write_command(0x3A);
-	spi_write_data(0x55);
+	if(s_display_taken){
+		/* Restore display controller to standard 16-bit RGB565 */
+		spi_write_command(0x3A);
+		spi_write_data(0x55);
 
-	spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
+		spi_set_baudrate(Pico_LCD_SPI_MOD, LCD_SPI_SPEED);
 
-	/* Relaunch Core 1 display flush pump for LVGL */
-	disp_core1_relaunch();
+		/* Relaunch Core 1 display flush pump for LVGL */
+		disp_core1_relaunch();
+		s_display_taken = 0;
+	}
 
 	/* Restore normal clock (300 MHz) for OS */
 	kf_clock_normal();
@@ -552,10 +629,13 @@ static void stop_planetx3(void){
 }
 
 static void play_planetx3(void){
-	s_chunk_buf = kapi_idle_scratch(GAME_W * CHUNK_LINES * sizeof *s_chunk_buf);
+	s_profile_started = 0;
+	s_display_taken = 0;
+	s_chunk_buf = kapi_idle_scratch(CHUNK_BYTES + PX3_AUDIO_RING_FRAMES * sizeof(uint32_t));
+	s_audio_storage = s_chunk_buf ? (uint32_t *)((uint8_t *)s_chunk_buf + CHUNK_BYTES) : NULL;
 	s_chunk_heap = 0;
 	if(!s_chunk_buf){
-		s_chunk_buf = malloc(GAME_W * CHUNK_LINES * sizeof *s_chunk_buf);
+		s_chunk_buf = malloc(CHUNK_BYTES);
 		s_chunk_heap = !!s_chunk_buf;
 	}
 	if(!s_chunk_buf){ printf("PX3: Out of SRAM for display chunk\n"); return; }
@@ -623,7 +703,6 @@ static void play_planetx3(void){
 	/* Initialize CPU and sound */
 	px3_cpu_init(s_ram);
 	px3_cpu_reset(0x1000, 0x0100, 0x1000, 0xFFFE);
-	px3_opl2_init(44100);
 
 	/* Boost clock to 350 MHz @ 1.20 V */
 	kf_clock_boost();
@@ -631,14 +710,23 @@ static void play_planetx3(void){
 	/* Initialize OPL2 synth and audio output */
 	px3_opl2_init(44100);
 	kf_audio_idle_unpark();
-	if(!kf_audio_start_buffered(44100, 4096)){
-		kf_audio_start_buffered(44100, 2048);
+	int audio_ok = s_audio_storage &&
+		kf_audio_start_buffered_external(44100, PX3_AUDIO_RING_FRAMES, s_audio_storage);
+	if(!audio_ok) audio_ok = kf_audio_start_buffered(44100, PX3_AUDIO_RING_FRAMES);
+	if(!audio_ok){
+		if(!kf_audio_start_buffered(44100, 2048)){
+			printf("PX3: Out of SRAM for audio ring\n");
+			stop_planetx3();
+			return;
+		}
 	}
 
 	/* Park & reset Core 1 from LVGL display pump, then launch dedicated audio synth on Core 1 */
 	disp_core1_reset();
+	s_display_taken = 1;
 	s_opl_head = 0;
 	s_opl_tail = 0;
+	s_perf = (px3_perf_t){0};
 	s_audio_core1_running = true;
 	multicore_launch_core1(px3_audio_core1_main);
 
@@ -651,6 +739,10 @@ static void play_planetx3(void){
 	s_key_tail = 0;
 	s_audio_chosen = 0;
 	s_running = 1;
+	s_perf_clock_khz = kf_clock_khz();
+	s_perf_psram_hz = kf_psram_bus_hz();
+	s_perf_start_us = time_us_64();
+	s_profile_started = 1;
 
 	const uint64_t TICK_PERIOD_US = 13731u; /* 72.826 Hz PIT timer tick */
 	const uint64_t FRAME_PERIOD_US = 33333u; /* 30.0 FPS */
@@ -676,36 +768,55 @@ static void play_planetx3(void){
 		uint64_t now = time_us_64();
 		int ticks_run = 0;
 		while(now >= next_tick_us && ticks_run < 8){
+			uint64_t lateness = now - next_tick_us;
+			if(lateness > s_perf.max_tick_late_us)
+				s_perf.max_tick_late_us = (uint32_t)(lateness > UINT32_MAX ? UINT32_MAX : lateness);
 			trigger_timer_tick();
 			/* Keep the radio serviced during an expensive emulated CPU tick. */
 			for(int batch=0;batch<6;batch++){
+				uint32_t cpu_start = time_us_32();
 				px3_cpu_exec(2000);
+				uint32_t cpu_us = time_us_32() - cpu_start;
+				if(cpu_us > s_perf.max_cpu_batch_us) s_perf.max_cpu_batch_us = cpu_us;
 				kf_bt_service_audio();
 			}
 			next_tick_us += TICK_PERIOD_US;
 			ticks_run++;
+			s_perf.ticks_run++;
 			now = time_us_64();
 		}
 		if(next_tick_us + TICK_PERIOD_US * 8 < now){
+			s_perf.ticks_skipped += (uint32_t)((now - next_tick_us) / TICK_PERIOD_US);
 			next_tick_us = now;
 		}
 
 		/* 3. Display blit at 30 FPS */
 		now = time_us_64();
 		if(now >= next_frame_us){
+			uint32_t frame_start = time_us_32();
+			if(now - next_frame_us >= FRAME_PERIOD_US) s_perf.late_frames++;
 			uint8_t *vga_ram = &s_ram[0xA0000];
 			for(int cy = 0; cy < GAME_H; cy += CHUNK_LINES){
 				int lines = (cy + CHUNK_LINES <= GAME_H) ? CHUNK_LINES : (GAME_H - cy);
 				uint16_t *dst = s_chunk_buf;
+				uint32_t t0 = time_us_32();
 				for(int y = 0; y < lines; y++){
 					uint8_t *src_row = vga_ram + (cy + y) * GAME_W;
 					for(int x = 0; x < GAME_W; x++){
 						*dst++ = s_palette[src_row[x]];
 					}
 				}
+				s_perf.conversion_us += time_us_32() - t0;
+				t0 = time_us_32();
 				draw_buffer_spi(0, GAME_Y_OFFSET + cy, GAME_W - 1, GAME_Y_OFFSET + cy + lines - 1, (unsigned char *)s_chunk_buf);
+				uint32_t spi_chunk_us = time_us_32() - t0;
+				s_perf.spi_us += spi_chunk_us;
+				if(spi_chunk_us > s_perf.max_spi_chunk_us) s_perf.max_spi_chunk_us = spi_chunk_us;
 				kf_bt_service_audio();
 			}
+			uint32_t frame_us = time_us_32() - frame_start;
+			if(frame_us > s_perf.max_frame_us) s_perf.max_frame_us = frame_us;
+			s_perf.frames++;
 			next_frame_us += FRAME_PERIOD_US;
 			if(next_frame_us + FRAME_PERIOD_US < now){
 				next_frame_us = now + FRAME_PERIOD_US;

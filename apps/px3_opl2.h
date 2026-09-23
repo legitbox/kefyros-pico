@@ -9,7 +9,7 @@ void    px3_opl2_write_addr(uint8_t val);
 void    px3_opl2_write_data(uint8_t val);
 void    px3_opl2_write_raw(uint8_t reg, uint8_t val);
 uint8_t px3_opl2_read_status(void);
-void    px3_opl2_render_stereo(int16_t *stereo_buf, int frames);
+void    px3_opl2_render_mono(int16_t *mono_buf, int frames);
 void    px3_opl2_reset(void);
 
 #endif

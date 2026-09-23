@@ -130,9 +130,9 @@ void     kf_psram_reclock(void);                      /* re-derive PIO clkdiv af
    power. The switch pauses the Core-1 display pump and re-derives all clk_sys-derived
    peripheral clocks, so it's safe to call from app code (NOT from inside an LVGL flush). */
 /* Clock tiers — the whole OS uses these (see port/clock.c). */
-void     kf_clock_eco(void);     /* 250 MHz @ 1.10 V / 62.5 MHz SPI - WiFi-safe; brief, wraps radio join */
-void     kf_clock_normal(void);  /* 300 MHz @ 1.10 V / 75.0 MHz SPI - UI / apps / audio default in RGB565 */
-void     kf_clock_boost(void);   /* 350 MHz @ 1.20 V / 87.5 MHz SPI - turbo: Music decode + calc 3D render  */
+void     kf_clock_eco(void);     /* 250 MHz @ 1.20 V / 62.5 MHz SPI - WiFi-safe; brief, wraps radio join */
+void     kf_clock_normal(void);  /* 300 MHz @ 1.20 V / 75.0 MHz SPI - UI / apps / audio default in RGB565 */
+void     kf_clock_boost(void);   /* 350 MHz @ 1.25 V / 87.5 MHz SPI - turbo: Music decode + calc 3D render  */
 void     kf_clock_sleep(void);   /* 150 MHz @ 1.10 V              - idle screen-off low-power     */
 void     kf_clock_wake(void);    /* restore the tier active before kf_clock_sleep()             */
 uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
@@ -143,7 +143,7 @@ uint32_t kf_clock_khz(void);                          /* current clk_sys, kHz */
    resolution samples (write_s32) to keep 24-bit FLAC intact. */
 void kf_audio_init(void);                 /* set up PWM slice 5 + DMA (call once at boot) */
 void kf_audio_start(int hz);              /* begin playback at sample rate hz (<=48000) */
-int  kf_audio_start_buffered(int hz, int ring_frames); /* power-of-two 1024..8192; 1 on success */
+int  kf_audio_start_buffered(int hz, int ring_frames); /* power-of-two 1024..4096; 1 on success */
 int  kf_audio_start_buffered_external(int hz, int ring_frames, uint32_t *storage); /* caller owns ring storage */
 void kf_audio_stop(void);                 /* stop + silence */
 void kf_audio_clock_change_begin(void);   /* tristate speaker pins across a clk_sys change (anti-pop) */
@@ -154,6 +154,15 @@ void kf_audio_flush(void);                /* drop buffered audio + reset shaper 
 int  kf_audio_running(void);
 int  kf_audio_space(void);                /* free stereo frames in the ring */
 int  kf_audio_buffered(void);             /* frames queued but not yet played (latency gauge) */
+typedef struct {
+    uint32_t pwm_underrun_events;         /* DMA halves containing unexpected silence */
+    uint32_t pwm_underrun_frames;
+    uint32_t bt_underrun_frames;
+    uint32_t dma_irqs;
+    uint32_t max_dma_irq_gap_us;
+    uint32_t min_buffered_frames;         /* after first producer write */
+} kf_audio_stats_t;
+void kf_audio_get_stats(kf_audio_stats_t *out); /* snapshot after stopping producer */
 
 /* OS sound effects: play /kefyros/sfx/<name>.wav on a UI event (ui/sfx.c). Silent if the
    file is missing, effects are disabled (deskconf "sfx"), or music owns the speaker. */
@@ -161,6 +170,7 @@ void kf_sfx_play(const char *name);
 void sfx_poll(void);                       /* pump an in-flight effect; call every main loop */
 int  kf_audio_write_s32(const int32_t *stereo, int frames); /* full-scale L,R; frames accepted */
 int  kf_audio_write(const int16_t *stereo, int frames);     /* legacy 16-bit L,R; frames accepted */
+int  kf_audio_write_mono(const int16_t *mono, int frames);  /* identical PWM/BT channels; one conversion */
 void kf_audio_set_bt_route(int enabled); /* OS sink selection; keeps producer API stable */
 int  kf_audio_bt_route(void);
 int  kf_audio_bt_read(int16_t *stereo, int frames, int out_rate); /* A2DP backend only */

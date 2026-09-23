@@ -119,9 +119,9 @@ static bool kf_set_sys_clock_khz(uint32_t khz){
 }
 
 void clock_init(void){
-	/* 1) Core rail at 1.10 V — stock voltage for 250 MHz cold boot and 300 MHz nominal.
-	 *    kf_clock_boost() raises it (to 1.20 V) when stepping up to 350 MHz. */
-	vreg_set_voltage(VREG_VOLTAGE_1_10);
+	/* 1) Core rail at 1.20 V — stable voltage for 250 MHz cold boot and 300 MHz nominal.
+	 *    kf_clock_boost() raises it (to 1.25 V) when stepping up to 350 MHz. */
+	vreg_set_voltage(VREG_VOLTAGE_1_20);
 	sleep_ms(2);                         /* let the regulator settle */
 
 	/* 2) Slow XIP for the 350 MHz peak BEFORE changing clk_sys. /4 gives 62.5 MHz
@@ -184,32 +184,32 @@ static void clock_apply(uint32_t khz, enum vreg_voltage v, uint32_t lcd_hz, bool
 
 /* ===== Clock tiers — the WHOLE OS uses these. =====
      sleep   150 MHz @ 1.10 V / 37.5-75 MHz SPI - idle screen-off; kf_clock_wake() restores prior
-     eco     250 MHz @ 1.10 V / 62.5   MHz SPI - WiFi-safe (radio won't bring up/associate >~270 MHz).
+     eco     250 MHz @ 1.20 V / 62.5   MHz SPI - WiFi-safe (radio won't bring up/associate >~270 MHz).
                                                  clk_sys/4 = 62.5 MHz. Brief: only wraps cyw43 JOIN.
-     normal  300 MHz @ 1.10 V / 75     MHz SPI - the default the UI / apps / audio sit at in RGB565.
+     normal  300 MHz @ 1.20 V / 75     MHz SPI - the default the UI / apps / audio sit at in RGB565.
                                                  clk_sys/4 = 75.0 MHz (~45.8 FPS wire flush).
                                                  A WiFi link joined at eco RIDES 300 (the cyw43 bus
                                                  divider is retuned on the switch).
-     boost   350 MHz @ 1.20 V / 87.5   MHz SPI - the fastest mode (Music decode, the calc's 3D
+     boost   350 MHz @ 1.25 V / 87.5   MHz SPI - the fastest mode (Music decode, the calc's 3D
                                                  render); clk_sys/4 = 87.5 MHz. Callers drop back to normal on exit. */
 
 void kf_clock_eco(void){
 	if(s_cur_khz == 250000u) return;   /* == not <=, so kf_clock_wake() can restore eco from 150 */
 	/* 250 MHz: under the ~270 MHz WiFi ceiling. Used briefly to (re)join the radio; once joined,
 	   the OS ramps to normal and the link rides 300 (kf_net_reclock retunes the cyw43 bus). */
-	clock_apply(250000u, VREG_VOLTAGE_1_10, LCD_SPI_SPEED, false);
+	clock_apply(250000u, VREG_VOLTAGE_1_20, LCD_SPI_SPEED, false);
 }
 /* The steady-state default the whole UI returns to: 300 MHz / 75 MHz SPI (in RGB565).
    Warm-ramped from the 250 MHz cold boot. */
 void kf_clock_normal(void){
 	if(s_cur_khz == 300000u) return;
-	clock_apply(300000u, VREG_VOLTAGE_1_10, LCD_SPI_SPEED, 300000u > s_cur_khz);
+	clock_apply(300000u, VREG_VOLTAGE_1_20, LCD_SPI_SPEED, 300000u > s_cur_khz);
 }
-/* The fastest mode: 350 MHz @ 1.20 V -> SPI = 350/4 = 87.5 MHz. Brief use only (Music FLAC decode +
+/* The fastest mode: 350 MHz @ 1.25 V -> SPI = 350/4 = 87.5 MHz. Brief use only (Music FLAC decode +
    13-bit audio carrier, the calc's 3D render); callers return to normal on exit. */
 void kf_clock_boost(void){
 	if(s_cur_khz == 350000u) return;
-	clock_apply(350000u, VREG_VOLTAGE_1_20, 87500000u, 350000u > s_cur_khz);
+	clock_apply(350000u, VREG_VOLTAGE_1_25, 87500000u, 350000u > s_cur_khz);
 }
 /* Deep low-power sleep: 150 MHz @ the stock 1.10 V rail (the QMI flash divider stays valid down
    here), panel SPI 37.5 MHz. The launcher's idle timer drops here (and kills both backlights) after

@@ -285,3 +285,25 @@ group + Back history, GET forms, [img:alt] placeholders, amber style), slot 9, i
 ## MUSIC HARDWARE RESULT (2026-09-23)
 - After the first art fix, covers rendered but playback stayed at 0:00. Music now places the persistent 96px RGB565 cover (18,432 bytes) and 4,096-frame audio ring (16,384 bytes) in the idle 48 KiB KAPI arena; cover decode uses a temporary heap thumbnail and releases it before FLAC playback. PNG inflate borrows the arena only while audio is stopped.
 - Both pimoroni and pico2w firmware builds pass. The pimoroni UF2 was copied to the RP2350 bootloader volume, which disconnected after flashing. User confirmed the current firmware works, including cover display and playback. The post-fix RAM percentage was not reported; Bluetooth streaming remains to be budgeted and tested.
+
+## MUSIC PLAYER REFACTOR & MP3 MIGRATION (2026-09-23)
+- Fully migrated from FLAC to MP3 standard using dr_mp3 (lib/dr_mp3/dr_mp3.h, single-file, public domain / MIT-0) for playback up to 320 kbps CBR/VBR stereo.
+- Added apps/music_id3.c and apps/music_id3.h: full parser for ID3v2.2, ID3v2.3, ID3v2.4 and ID3v1 tags (title, artist, album, track number, duration) and embedded front covers (APIC frame, JPEG & PNG), with automated Latin-1 / UTF-16 to UTF-8 text transcoding.
+- Split-screen square UI (320x320 panel):
+  * Top-left: Multi-mode library browser (182x176) supporting All Songs, By Artist (drill-down), By Album (drill-down), and direct SD File Browser ([..], folders, .mp3 files).
+  * Top-right: 120x120 scaled album art box with aspect-ratio preservation, NO ART fallback, and audio format/backend badge.
+  * Bottom section: Title & artist/album labels, full-width timeline progress bar, elapsed/remaining readout ([>] 01:23 / 03:45 (-02:22)), status flags (SHUF, REP, REP1, [HOLD]), and audio sink indicator.
+- Real-time stereo line visualizer: two horizontal stripe bars (Left channel on top, Right channel below) with horizontal gradient (Green #b6f000 -> Amber #d4940a -> Red #ff3333) and smooth VU meter decay ballistics.
+- F1 Backlight toggle & HOLD mode: pressing F1 locks out all other key inputs and switches off LCD backlight (REG_BKL). Pressing F1 again restores backlight. Backlight state is restored unconditionally on app exit from deskconf (state unfucked guarantee).
+- Audio backend integration: supports both PWM DAC (noise-shaped DMA pacing) and Bluetooth A2DP via kf_audio_set_bt_route(). Hot-switchable via b key.
+- PSRAM integration: 1,500 track database (rec_t), artist and album tables, directory listings, and drill-down tracklists are all allocated in QMI PSRAM (kf_psram_alloc), shrinking SRAM .bss by over 8 KB compared to the old player.
+- Both pimoroni and pico2w targets pass compilation and linking cleanly (BUILD_OK).
+
+## MP3 PLAYBACK & COVER ART STABILIZATION (2026-09-23)
+- Fixed JPEG cover decoding errors: pico-vfs stdio buffering caused ftell(f) to advance past the logical stream position during ID3 tag parsing. Replaced ftell() with exact logical byte tracking (cur) relative to frame start (fstart) in apps/music_id3.c, added explicit magic byte header validation (0xFF 0xD8 for JPEG, \x89PNG for PNG), handled 1-byte null misalignment, and added a 64-byte forward marker scanner for drift resilience.
+- Fixed playback initialization failure: dr_mp3 default DRMP3_DATA_CHUNK_SIZE was 64 KB (65536 bytes), causing realloc() to return NULL under fragmented ~120 KB heap. Reduced chunk size to 4096 bytes via DRMP3_DATA_CHUNK_SIZE override.
+- Implemented logical stream callbacks (mp3_io_read, mp3_io_seek, mp3_io_tell) in apps/music.c using explicit SEEK_SET operations with logical position tracking, completely bypassing stdio buffer/FatFs divergence.
+- Relocated drmp3 decoder instance from dynamic heap malloc (~14 KB) to static .bss (g_dec_obj), eliminating any risk of OOM during track transitions.
+- Replaced whole-file PCM frame count scanning (which stalled for 10-30s on MP3s without Xing/VBRI headers) with instantaneous ID3 TLEN header / duration calculation.
+- Bound interactive LV_EVENT_CLICKED handlers to browser rows, play/pause controls, cover art, and footer status, enabling responsive touch input alongside hardware keyboard shortcuts.
+- Verified build and flashed pimoroni target directly to RP2350 device (Drive F:); bootrom accepted image and rebooted successfully.

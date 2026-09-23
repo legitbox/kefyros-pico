@@ -202,7 +202,7 @@ void kf_sd_gate(void){
 				shown = s;
 				if(s == SD_NO_CARD){
 					lv_label_set_text(msg, "No SD card found.");
-					lv_label_set_text(hint, "Insert a FAT32-formatted SD card to start Kefyros,\n"
+					lv_label_set_text(hint, "Insert a FAT32 or exFAT SD card to start Kefyros,\n"
 					                        "or choose an option below.");
 				} else if(s == SD_EMPTY){
 					lv_label_set_text(msg, "SD card is not set up.");

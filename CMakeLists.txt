@@ -180,6 +180,7 @@ target_link_libraries(kefyros PRIVATE
 )
 
 # debug log on uart0 (GP0/GP1); USB free for BOOTSEL flashing
+target_link_options(kefyros PRIVATE -Wl,--wrap=pico_flash_bank_instance)
 pico_enable_stdio_uart(kefyros 1)
 pico_enable_stdio_usb(kefyros 0)
 
