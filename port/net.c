@@ -17,6 +17,7 @@
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/tcp.h"
+#include "lwip/priv/tcp_priv.h"   /* tcp_active_pcbs, for the idle check */
 #include "lwip/dns.h"
 #include "lwip/apps/sntp.h"
 #include <time.h>
@@ -508,9 +509,23 @@ static void campaign_tick(void){
 	}
 }
 
+/* Idle disconnect: after `wifi_timeout` minutes (config.txt, default 10, 0 = never) with no
+   key pressed and no open TCP connection (an SSH session, an app socket), drop the link.
+   Saved networks stay; the next app that needs the network connects again. */
+static void idle_check(void){
+	static uint32_t last;
+	if(lv_tick_get() - last < 1000) return;
+	last = lv_tick_get();
+	int min = deskconf_get_int("wifi_timeout", 10);
+	if(min <= 0 || (!s_have_target && s_camp == CAMP_NONE) || tcp_active_pcbs) return;
+	if(lv_tick_get() - uart_last_activity() < (uint32_t)min * 60000u) return;
+	kf_net_disconnect();
+}
+
 void kf_net_poll(void){
 	if(!s_present) return;
 	cyw43_arch_poll();                 /* services CYW43 + lwIP timeouts (poll mode) */
+	idle_check();
 
 	int link = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
 	s_link = link;
