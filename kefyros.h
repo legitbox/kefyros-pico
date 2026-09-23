@@ -78,6 +78,7 @@ void     uart_poll(void);                          /* drain RX bytes (non-blocki
 int      uart_pop_key(uint8_t *state, uint8_t *key);
 int      uart_mods(void);
 uint32_t uart_last_activity(void);
+int      kf_app_is_open(void);   /* 1 while an app runs, 0 on the desktop (ui/launcher.c) */
 /* register access (request/response, blocking with timeout); #bytes read, <0 on fail */
 int  reg_read(uint8_t reg, uint8_t *out, int maxlen);
 int  reg_write(uint8_t reg, const uint8_t *data, int len);
