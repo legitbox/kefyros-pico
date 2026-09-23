@@ -5,8 +5,9 @@
  * the 1084-byte header in SRAM and fetches pattern rows and sample windows through
  * POCKETMOD_READ, so module size is bounded by PSRAM, not by the 48 KiB arena.
  *
- * Keys: UP/DOWN pick, ENTER play, SPACE pause, LEFT/RIGHT prev/next, ESC quit.
- * A song advances to the next file when it loops. */
+ * Keys: UP/DOWN/PGUP/PGDN pick, ENTER play, SPACE pause, LEFT/RIGHT prev/next,
+ * ESC quit. A song advances to the next file when it loops. The file list is one
+ * label drawn as a scrolling window, since the kernel caps an app at 96 UI objects. */
 #include "kapi.h"
 #include "kapi_rt.h"
 #include <stdio.h>
@@ -20,18 +21,23 @@ static kf_mem s_mod;          /* PSRAM copy of the current module */
 #include "pocketmod.h"
 
 #define MOD_DIR   "/kefyros/mods"
-#define MAX_FILES 80          /* the kernel wraps at most 96 UI objects per app */
+#define MAX_FILES 400
+#define POOL      12288       /* all file names, NUL-separated */
 #define NAME_LEN  64
+#define VIS       12          /* list rows shown */
 #define RATE      32768
 #define CHUNK     512         /* stereo frames rendered per step */
 
-static char s_names[MAX_FILES][NAME_LEN];
-static int s_nfiles, s_cur = -1, s_paused;
+static char s_pool[POOL];
+static uint16_t s_off[MAX_FILES];
+static int s_pool_used, s_nfiles, s_cur = -1, s_paused, s_sel, s_top;
+#define NAME(i) (s_pool + s_off[i])
 static unsigned char s_hdr[1084];
 static pocketmod_context s_pm;
 static float s_mix[CHUNK][2];
 static int16_t s_out[CHUNK * 2];
 static kui_obj s_now, s_list;
+static char s_listbuf[VIS * 48];
 static int s_shown_pat = -1, s_shown_line = -1;
 
 static int is_mod(const char *n){
@@ -54,14 +60,29 @@ static void scan(void){
 	char name[NAME_LEN]; int dir;
 	while(s_nfiles < MAX_FILES && K->fs->readdir(d, name, sizeof name, &dir)){
 		if(dir || name[0] == '.' || !is_mod(name)) continue;
+		int len = (int)strlen(name) + 1;
+		if(s_pool_used + len > POOL) break;
+		memcpy(s_pool + s_pool_used, name, (size_t)len);
 		int i = s_nfiles++;
-		while(i > 0 && ncmp(s_names[i-1], name) > 0){ memcpy(s_names[i], s_names[i-1], NAME_LEN); i--; }
-		memcpy(s_names[i], name, NAME_LEN);
+		while(i > 0 && ncmp(NAME(i-1), name) > 0){ s_off[i] = s_off[i-1]; i--; }
+		s_off[i] = (uint16_t)s_pool_used;
+		s_pool_used += len;
 	}
 	K->fs->closedir(d);
 }
 
 static void set_now(const char *s){ K->ui->set_text(s_now, s); }
+
+static void draw_list(void){
+	if(s_sel < s_top) s_top = s_sel;
+	if(s_sel >= s_top + VIS) s_top = s_sel - VIS + 1;
+	char *o = s_listbuf, *end = s_listbuf + sizeof s_listbuf;
+	for(int i = s_top; i < s_nfiles && i < s_top + VIS; i++)
+		o += snprintf(o, (size_t)(end - o), "%c%c%.44s\n", i == s_sel ? '>' : ' ',
+		              i == s_cur ? '*' : ' ', NAME(i));
+	*o = 0;
+	K->ui->set_text(s_list, s_listbuf);
+}
 
 static void stop(void){
 	K->aud->out_stop();
@@ -90,16 +111,15 @@ static void play(int i){
 	char path[128], msg[96]; long size = 0;
 	stop();
 	if(i < 0 || i >= s_nfiles) return;
-	snprintf(path, sizeof path, MOD_DIR "/%s", s_names[i]);
-	if(!load(path, &size)){ stop(); snprintf(msg, sizeof msg, "Can't load %s", s_names[i]); set_now(msg); return; }
+	snprintf(path, sizeof path, MOD_DIR "/%s", NAME(i));
+	if(!load(path, &size)){ stop(); snprintf(msg, sizeof msg, "Can't load %s", NAME(i)); set_now(msg); return; }
 	K->mem->psram_read(s_mod, 0, s_hdr, size < (long)sizeof s_hdr ? (size_t)size : sizeof s_hdr);
-	if(!pocketmod_init(&s_pm, s_hdr, (int)size, RATE)){ stop(); snprintf(msg, sizeof msg, "Not a MOD: %s", s_names[i]); set_now(msg); return; }
+	if(!pocketmod_init(&s_pm, s_hdr, (int)size, RATE)){ stop(); snprintf(msg, sizeof msg, "Not a MOD: %s", NAME(i)); set_now(msg); return; }
 	if(K->aud->out_start(RATE) != KF_OK){ stop(); set_now("Audio busy"); return; }
 	K->sys->idle_policy(KF_IDLE_KEEP_CLOCK);
-	s_cur = i; s_paused = 0; s_shown_pat = -1;
+	s_cur = s_sel = i; s_paused = 0; s_shown_pat = -1;
+	draw_list();
 }
-
-static void pick(void *ud){ play((int)(intptr_t)ud); }
 
 static void pause_toggle(void){
 	if(s_cur < 0) return;
@@ -128,7 +148,7 @@ static void show(void){
 	char title[21], msg[128];
 	memcpy(title, s_hdr, 20); title[20] = 0;
 	snprintf(msg, sizeof msg, "%s %s\n%s  pos %02d/%02d  row %02d  %dch",
-	         s_paused ? "||" : ">", s_names[s_cur], title[0] ? title : "(untitled)",
+	         s_paused ? "||" : ">", NAME(s_cur), title[0] ? title : "(untitled)",
 	         s_pm.pattern, s_pm.length, s_pm.line < 0 ? 0 : s_pm.line, s_pm.num_channels);
 	set_now(msg);
 }
@@ -144,6 +164,13 @@ static void on_key(void *ud, int key, int down){
 	if(!down) return;
 	if(key == KF_KEY_ESC){ stop(); K->sys->exit(0); }
 	else if(key == ' ') pause_toggle();
+	else if(key == KF_KEY_ENTER && s_nfiles) play(s_sel);
+	else if((key == KF_KEY_UP || key == KF_KEY_DOWN || key == KF_KEY_PGUP || key == KF_KEY_PGDN) && s_nfiles){
+		int step = key == KF_KEY_UP ? -1 : key == KF_KEY_DOWN ? 1 : key == KF_KEY_PGUP ? -VIS : VIS;
+		if(step == 1 || step == -1) s_sel = (s_sel + step + s_nfiles) % s_nfiles;
+		else { s_sel += step; if(s_sel < 0) s_sel = 0; if(s_sel >= s_nfiles) s_sel = s_nfiles - 1; }
+		draw_list();
+	}
 	else if(key == KF_KEY_RIGHT && s_nfiles) play(s_cur < 0 ? 0 : (s_cur + 1) % s_nfiles);
 	else if(key == KF_KEY_LEFT && s_nfiles) play(s_cur <= 0 ? s_nfiles - 1 : s_cur - 1);
 }
@@ -162,9 +189,10 @@ int app_main(const kapi *k){
 	kui_obj scr = k->ui->screen();
 	k->ui->flex(scr, KUI_FLEX_COLUMN, 4);
 	s_now = k->ui->label(scr, "");
-	s_list = k->ui->list(scr);
-	for(int i = 0; i < s_nfiles; i++) k->ui->list_add(s_list, s_names[i], pick, (void *)(intptr_t)i);
+	s_list = k->ui->label(scr, "");
+	k->ui->grow(s_list, 1);
 	k->ui->label(scr, "ENTER play  SPACE pause  </> prev/next  ESC quit");
+	draw_list();
 	set_now(s_nfiles ? "Pick a module" : "Put .mod files in " MOD_DIR);
 
 	k->sys->on_key(on_key, 0);
